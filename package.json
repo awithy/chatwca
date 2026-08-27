@@ -7,12 +7,44 @@
     "node": ">=22.19.0"
   },
   "scripts": {
+    "clean": "rm -rf dist coverage",
+    "dev": "concurrently --kill-others-on-fail --names server,web \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "tsx watch src/server/index.ts",
+    "dev:web": "vite",
+    "build": "npm run clean && npm run build:server && npm run build:web",
+    "build:server": "tsc -p tsconfig.server.json",
+    "build:web": "vite build",
+    "start": "node dist/server/server/index.js",
+    "typecheck": "tsc --noEmit -p tsconfig.server.json && tsc --noEmit -p tsconfig.web.json",
+    "test": "vitest run --passWithNoTests",
+    "test:unit": "vitest run tests/unit --passWithNoTests",
+    "test:integration": "vitest run tests/integration --passWithNoTests",
+    "test:browser": "playwright test --pass-with-no-tests",
     "test:sdk-smoke": "node --test tests/smoke/pi-sdk.test.mjs"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.84.3"
+    "@earendil-works/pi-coding-agent": "0.84.3",
+    "@sinclair/typebox": "^0.34.48",
+    "express": "^5.2.1",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "ws": "^8.19.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "0.84.3"
+    "@earendil-works/pi-ai": "0.84.3",
+    "@playwright/test": "^1.58.2",
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.3.5",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^5.1.4",
+    "concurrently": "^9.2.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1",
+    "vitest": "^4.0.18"
   }
 }

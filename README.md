@@ -2,7 +2,7 @@
 
 ChatWCA is a single-user web interface for the [Pi coding agent](https://pi.dev/), built with TypeScript, Node.js, React, and the `@earendil-works/pi-coding-agent` SDK.
 
-> **Status:** Design phase. The implementation has not yet been scaffolded. See [docs/design.md](docs/design.md) for the complete design.
+> **Status:** Early implementation. The TypeScript application foundation is in place; see [plan.md](plan.md) for progress and [docs/design.md](docs/design.md) for the complete design.
 
 ## Planned features
 

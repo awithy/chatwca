@@ -47,6 +47,8 @@ This plan implements the proposed design in `docs/design.md`. The repository cur
 
 ### T1.1 Scaffold the TypeScript application
 
+**Status:** Complete — strict server/web TypeScript builds, Vite/React, Express static delivery, and Vitest/Playwright scaffolding are configured.
+
 Create the initial structure:
 
 ```text

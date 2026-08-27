@@ -537,6 +537,7 @@ An accepted prompt's later model failure is represented in the message/event str
 | `CHATWCA_MAX_LIVE_CONVERSATIONS` | `8` | Maximum retained runtimes |
 | `CHATWCA_MAX_IMAGES` | `8` | Images allowed per prompt |
 | `CHATWCA_MAX_IMAGE_BYTES` | `8388608` | Decoded bytes per image |
+| `CHATWCA_MAX_TOTAL_IMAGE_BYTES` | `25165824` | Aggregate decoded image bytes per prompt |
 | `PI_CODING_AGENT_DIR` | Pi default | Pi configuration and session root |
 | `PI_OFFLINE` | unset | Use Pi's existing offline behavior |
 

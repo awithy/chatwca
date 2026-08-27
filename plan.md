@@ -69,6 +69,8 @@ tests/browser/
 
 ### T1.2 Implement typed configuration
 
+**Status:** Complete — server-only environment parsing, defaults, startup errors, and validation tests are implemented in [`src/server/config.ts`](src/server/config.ts).
+
 In `src/server/config.ts`:
 
 - Parse all variables defined in the design.

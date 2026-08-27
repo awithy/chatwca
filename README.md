@@ -66,6 +66,9 @@ Pi provider credentials will use the standard Pi credential store or provider en
 | `CHATWCA_PORT` | `8787` | Server port |
 | `CHATWCA_DEFAULT_CWD` | process CWD | Initial working directory |
 | `CHATWCA_MAX_LIVE_CONVERSATIONS` | `8` | Maximum live Pi runtimes |
+| `CHATWCA_MAX_IMAGES` | `8` | Maximum images per prompt |
+| `CHATWCA_MAX_IMAGE_BYTES` | `8388608` | Maximum decoded bytes per image |
+| `CHATWCA_MAX_TOTAL_IMAGE_BYTES` | `25165824` | Maximum aggregate decoded image bytes per prompt |
 | `PI_CODING_AGENT_DIR` | Pi default | Pi configuration and session directory |
 | `PI_OFFLINE` | unset | Use Pi's standard offline mode |
 

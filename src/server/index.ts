@@ -1,14 +1,31 @@
 import express from "express";
 
+import { ConfigurationError, loadConfig } from "./config.js";
 import { serveWebApp } from "./static.js";
 
-const app = express();
-serveWebApp(app);
+function main(): void {
+  let config;
+  try {
+    config = loadConfig();
+  } catch (error: unknown) {
+    const message =
+      error instanceof ConfigurationError
+        ? error.message
+        : "Unexpected error while loading configuration";
+    console.error(`ChatWCA configuration error: ${message}`);
+    process.exitCode = 1;
+    return;
+  }
 
-// Typed configuration and the shared HTTP/WebSocket server are added in T1.2/T1.3.
-const host = process.env.CHATWCA_HOST ?? "0.0.0.0";
-const port = Number(process.env.CHATWCA_PORT ?? "8787");
+  const app = express();
+  serveWebApp(app);
 
-app.listen(port, host, () => {
-  console.log(`ChatWCA listening on http://${host}:${String(port)}`);
-});
+  // The shared HTTP/WebSocket server is added in T1.3.
+  app.listen(config.port, config.host, () => {
+    console.log(
+      `ChatWCA listening on http://${config.host}:${String(config.port)}`,
+    );
+  });
+}
+
+main();

@@ -51,7 +51,7 @@ http://192.168.20.10:8787
 
 ## Requirements
 
-- Node.js 22 or newer
+- Node.js 22.19 or newer
 - A configured Pi installation
 - At least one available model/provider credential
 - Filesystem and command permissions appropriate for the workspaces Pi will operate on
@@ -76,6 +76,7 @@ The initial release focuses on chat and conversation management. It will not inc
 ## Documentation
 
 - [Technical design](docs/design.md)
+- [Validated Pi SDK integration notes](docs/pi-sdk-notes.md)
 
 ## License
 

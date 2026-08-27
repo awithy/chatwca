@@ -1,7 +1,9 @@
 # ChatWCA Design
 
-**Status:** Proposed  
-**Runtime:** Node.js 22+, TypeScript  
+**Status:** Proposed
+
+**Runtime:** Node.js 22.19+, TypeScript
+
 **Audience:** Implementers and maintainers
 
 ## 1. Summary
@@ -97,7 +99,7 @@ flowchart LR
 | Area | Choice |
 |---|---|
 | Language | TypeScript with strict mode |
-| Server runtime | Node.js 22+ |
+| Server runtime | Node.js 22.19+ |
 | HTTP server | Express |
 | Streaming transport | `ws` WebSocket server attached to the HTTP server |
 | Frontend | React and Vite |

@@ -17,6 +17,8 @@ This plan implements the proposed design in `docs/design.md`. The repository cur
 
 ### T0.1 Pin and inspect the SDK
 
+**Status:** Complete — pinned 0.84.3; findings and adaptations are recorded in [`docs/pi-sdk-notes.md`](docs/pi-sdk-notes.md).
+
 - Select and pin a compatible `@earendil-works/pi-coding-agent` version.
 - Verify the concrete APIs and event types for:
   - `ModelRuntime` creation and refresh;

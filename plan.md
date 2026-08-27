@@ -81,6 +81,8 @@ In `src/server/config.ts`:
 
 ### T1.3 Add the HTTP/server shell
 
+**Status:** Complete — Express and WebSocket share one HTTP server, operational endpoints expose safe startup data, and the React shell verifies both HTTP and socket connectivity.
+
 In `src/server/index.ts`:
 
 - Create one HTTP server shared by Express and `ws`.

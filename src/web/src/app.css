@@ -29,3 +29,51 @@ p {
   color: #9da7b3;
   font-size: 1.125rem;
 }
+
+.eyebrow {
+  margin-bottom: 0;
+  color: #58a6ff;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.server-status {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+  margin-top: 2rem;
+  padding: 1rem;
+  border: 1px solid #30363d;
+  border-radius: 0.5rem;
+  background: #161b22;
+}
+
+.server-status div {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.server-status small {
+  overflow-wrap: anywhere;
+  color: #9da7b3;
+}
+
+.server-status .error {
+  color: #ff7b72;
+}
+
+.status-dot {
+  flex: 0 0 auto;
+  width: 0.625rem;
+  height: 0.625rem;
+  margin-top: 0.3rem;
+  border-radius: 50%;
+  background: #d29922;
+}
+
+.status-dot.connected {
+  background: #3fb950;
+}

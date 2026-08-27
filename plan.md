@@ -35,6 +35,8 @@ This plan implements the proposed design in `docs/design.md`. The repository cur
 
 ### T0.2 Build a disposable SDK smoke test
 
+**Status:** Complete — `npm run test:sdk-smoke` exercises persistence and reopening with Pi's faux provider in isolated temporary directories.
+
 - Create a temporary-session script/test that creates a session in a temporary CWD, subscribes to events, disposes it, and reopens it.
 - Use a fake model/provider where the SDK supports one; the smoke test must not require paid model access in CI.
 - Confirm when session files and message entries become durable.

@@ -6,7 +6,13 @@
   "engines": {
     "node": ">=22.19.0"
   },
+  "scripts": {
+    "test:sdk-smoke": "node --test tests/smoke/pi-sdk.test.mjs"
+  },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.84.3"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.84.3"
   }
 }

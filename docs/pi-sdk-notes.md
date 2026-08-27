@@ -127,4 +127,12 @@ To preserve a live source conversation, ChatWCA must follow the design and invok
 
 ## Test model support
 
-`@earendil-works/pi-ai` 0.84.3 exports a deterministic faux provider (`fauxProvider`, `fauxAssistantMessage`, `fauxText`, `fauxThinking`, and `fauxToolCall`). It supports scripted responses, configurable streaming rate, text/image model declarations, and no paid provider. T0.2 should use this provider with isolated in-memory credentials/settings and a temporary session directory.
+`@earendil-works/pi-ai` 0.84.3 exports a deterministic faux provider (`fauxProvider`, `fauxAssistantMessage`, `fauxText`, `fauxThinking`, and `fauxToolCall`). It supports scripted responses, configurable streaming rate, text/image model declarations, and no paid provider.
+
+The disposable smoke test runs with:
+
+```sh
+npm run test:sdk-smoke
+```
+
+It uses in-memory credentials/settings and temporary agent, workspace, model-store, and session directories. The test confirms that an empty/user-only session file is absent, the first completed assistant message flushes all accumulated entries, listing then discovers the session, and session/message entry IDs survive runtime disposal and reopening. It does not require provider credentials or network access.

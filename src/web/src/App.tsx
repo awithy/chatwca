@@ -1,10 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-import type { ConversationSummary, UiImage } from "../../shared/protocol.js";
+import type {
+  ConversationSummary,
+  UiImage,
+  WorkspaceSummary,
+} from "../../shared/protocol.js";
 import { useChatSocket } from "./api/index.js";
 import { Composer } from "./components/Composer.js";
 import { ConversationHeader } from "./components/ConversationHeader.js";
-import { ConversationSidebar } from "./components/ConversationSidebar.js";
+import { WorkspaceSidebar } from "./components/WorkspaceSidebar.js";
+import type { WorkspaceFormValues } from "./components/WorkspaceForm.js";
 import { MessageTimeline } from "./components/MessageTimeline.js";
 import type { PromptAction } from "./components/chat-interactions.js";
 
@@ -34,7 +39,8 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [loadingConversationId, setLoadingConversationId] = useState<string | null>(null);
   const [conversationError, setConversationError] = useState<string | null>(null);
-  const [lifecycleAction, setLifecycleAction] = useState<"close" | "delete" | null>(null);
+  const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const pendingActionRef = useRef<string | null>(null);
   const [forkAction, setForkAction] = useState<{
     readonly conversationId: string;
     readonly entryId: string;
@@ -75,6 +81,12 @@ export function App() {
     ),
     [chat.conversations],
   );
+  const selectedWorkspace = chat.workspaces.find(
+    (workspace) => workspace.id === chat.selectedWorkspaceId,
+  );
+  const selectedWorkspaceUnavailable = selectedWorkspace !== undefined && (
+    !selectedWorkspace.available || chat.historyError?.code === "workspace_unavailable"
+  );
   const selectedProjection = chat.selectedConversationId === null
     ? undefined
     : chat.conversations[chat.selectedConversationId];
@@ -96,14 +108,79 @@ export function App() {
     runnable: true,
   });
 
-  async function createConversation(workspaceId: string): Promise<void> {
-    setConversationError(null);
-    const result = await client.send<"conversation.create">({
-      type: "conversation.create",
+  async function runExclusive<T>(
+    action: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    if (pendingActionRef.current !== null) {
+      throw new Error("Wait for the current action to finish.");
+    }
+    pendingActionRef.current = action;
+    setPendingAction(action);
+    try {
+      return await operation();
+    } finally {
+      pendingActionRef.current = null;
+      setPendingAction(null);
+    }
+  }
+
+  async function createWorkspace(values: WorkspaceFormValues): Promise<void> {
+    const knownIds = new Set(chat.workspaces.map((workspace) => workspace.id));
+    const result = await runExclusive("workspace.create", () => client.send<"workspace.create">({
+      type: "workspace.create",
+      name: values.name,
+      path: values.path,
+    }));
+    const created = result.workspaces.find((workspace) => !knownIds.has(workspace.id));
+    if (created !== undefined) {
+      void client.selectWorkspace(created.id).catch(() => undefined);
+    }
+  }
+
+  async function updateWorkspace(
+    workspaceId: string,
+    values: { readonly name: string; readonly path?: string },
+  ): Promise<void> {
+    await runExclusive("workspace.update", () => client.send({
+      type: "workspace.update",
       workspaceId,
-    });
-    client.selectConversation(result.conversation.id);
-    setSidebarOpen(false);
+      name: values.name,
+      ...(values.path === undefined ? {} : { path: values.path }),
+    }));
+    if (values.path !== undefined && chat.selectedWorkspaceId === workspaceId) {
+      await client.selectWorkspace(null);
+      void client.selectWorkspace(workspaceId).catch(() => undefined);
+    }
+  }
+
+  async function removeWorkspace(workspace: WorkspaceSummary): Promise<void> {
+    await runExclusive("workspace.delete", () => client.send({
+      type: "workspace.delete",
+      workspaceId: workspace.id,
+    }));
+    if (client.getState().selectedWorkspaceId === workspace.id) {
+      await client.selectWorkspace(null);
+    }
+  }
+
+  async function createConversation(): Promise<void> {
+    const workspace = selectedWorkspace;
+    if (workspace === undefined || !workspace.available || selectedWorkspaceUnavailable) {
+      setConversationError("Select an available workspace before creating a conversation.");
+      return;
+    }
+    setConversationError(null);
+    try {
+      const result = await runExclusive("conversation.create", () => client.send<"conversation.create">({
+        type: "conversation.create",
+        workspaceId: workspace.id,
+      }));
+      client.selectConversation(result.conversation.id);
+      setSidebarOpen(false);
+    } catch (error) {
+      setConversationError(errorMessage(error, "Unable to create the conversation."));
+    }
   }
 
   function selectConversation(summary: ConversationSummary): void {
@@ -124,14 +201,13 @@ export function App() {
     }
 
     setLoadingConversationId(summary.id);
-    const command = summary.status === "closed"
+    void runExclusive("conversation.open", () => summary.status === "closed"
       ? client.send({
           type: "conversation.open",
           workspaceId: summary.workspaceId,
           conversationId: summary.id,
         })
-      : client.send({ type: "conversation.state", conversationId: summary.id });
-    void command
+      : client.send({ type: "conversation.state", conversationId: summary.id }))
       .catch((error: unknown) => {
         if (client.getState().selectedConversationId === summary.id) {
           setConversationError(errorMessage(error, "Unable to open the conversation."));
@@ -149,6 +225,7 @@ export function App() {
   ): Promise<void> {
     const conversationId = selectedConversation?.id;
     if (conversationId === undefined) throw new Error("The conversation is not open.");
+    if (selectedWorkspaceUnavailable) throw new Error("The workspace directory is unavailable.");
     setConversationError(null);
     const input = { conversationId, text, images: [...images] };
     switch (action) {
@@ -165,26 +242,32 @@ export function App() {
   }
 
   async function abortConversation(): Promise<void> {
-    if (selectedConversation === undefined) return;
+    if (selectedConversation === undefined || pendingActionRef.current !== null) return;
     setConversationError(null);
-    await client.send({
-      type: "conversation.abort",
-      conversationId: selectedConversation.id,
-    });
+    try {
+      await runExclusive("conversation.abort", () => client.send({
+        type: "conversation.abort",
+        conversationId: selectedConversation.id,
+      }));
+    } catch (error) {
+      setConversationError(errorMessage(error, "Unable to abort the conversation."));
+    }
   }
 
   async function forkConversation(entryId: string): Promise<void> {
     if (
       selectedConversation === undefined ||
       selectedConversation.status !== "idle" ||
-      forkAction !== null
+      forkAction !== null ||
+      pendingActionRef.current !== null ||
+      selectedWorkspaceUnavailable
     ) return;
 
     const conversationId = selectedConversation.id;
     setForkAction({ conversationId, entryId });
     setConversationError(null);
     try {
-      await client.forkConversation(conversationId, entryId);
+      await runExclusive("conversation.fork", () => client.forkConversation(conversationId, entryId));
       setSidebarOpen(false);
     } catch (error) {
       setConversationError(errorMessage(error, "Unable to fork the conversation."));
@@ -194,49 +277,45 @@ export function App() {
   }
 
   async function closeConversation(): Promise<void> {
-    if (selectedConversation === undefined || lifecycleAction !== null) return;
-    setLifecycleAction("close");
+    if (selectedConversation === undefined || pendingActionRef.current !== null) return;
     setConversationError(null);
     try {
-      await client.send({
+      await runExclusive("conversation.close", () => client.send({
         type: "conversation.close",
         conversationId: selectedConversation.id,
-      });
+      }));
       client.selectConversation(null);
     } catch (error) {
       setConversationError(errorMessage(error, "Unable to close the conversation."));
-    } finally {
-      setLifecycleAction(null);
     }
   }
 
   async function deleteConversation(): Promise<void> {
-    if (selectedSummary === undefined || lifecycleAction !== null) return;
+    if (selectedSummary === undefined || pendingActionRef.current !== null) return;
     const confirmed = window.confirm(
       `Delete “${selectedSummary.title.trim() || "Untitled conversation"}”? This cannot be undone.`,
     );
     if (!confirmed) return;
 
-    setLifecycleAction("delete");
     setConversationError(null);
     try {
-      if (selectedConversation !== undefined) {
+      await runExclusive("conversation.delete", async () => {
+        if (selectedConversation !== undefined) {
+          await client.send({
+            type: "conversation.close",
+            conversationId: selectedConversation.id,
+          });
+        }
         await client.send({
-          type: "conversation.close",
-          conversationId: selectedConversation.id,
+          type: "conversation.delete",
+          workspaceId: selectedSummary.workspaceId,
+          conversationId: selectedSummary.id,
         });
-      }
-      await client.send({
-        type: "conversation.delete",
-        workspaceId: selectedSummary.workspaceId,
-        conversationId: selectedSummary.id,
       });
       client.clearDraft(selectedSummary.id);
       client.selectConversation(null);
     } catch (error) {
       setConversationError(errorMessage(error, "Unable to delete the conversation."));
-    } finally {
-      setLifecycleAction(null);
     }
   }
 
@@ -244,21 +323,36 @@ export function App() {
 
   return (
     <div className="app-shell">
-      <ConversationSidebar
-        conversations={chat.history}
+      <WorkspaceSidebar
+        workspaces={chat.workspaces}
+        selectedWorkspaceId={chat.selectedWorkspaceId}
+        conversations={chat.historyWorkspaceId === chat.selectedWorkspaceId ? chat.history : []}
         liveStatuses={liveStatuses}
         selectedConversationId={chat.selectedConversationId}
         connected={connected}
+        historyPending={chat.pendingHistoryWorkspaceId === chat.selectedWorkspaceId}
+        historyError={chat.historyError?.workspaceId === chat.selectedWorkspaceId
+          ? chat.historyError.message
+          : null}
+        actionPending={pendingAction !== null}
         open={sidebarOpen}
         onDismiss={() => setSidebarOpen(false)}
-        onCreate={createConversation}
-        onSelect={selectConversation}
+        onSelectWorkspace={(workspaceId) => {
+          setConversationError(null);
+          void client.selectWorkspace(workspaceId).catch(() => undefined);
+          setSidebarOpen(false);
+        }}
+        onCreateWorkspace={createWorkspace}
+        onUpdateWorkspace={updateWorkspace}
+        onRemoveWorkspace={removeWorkspace}
+        onCreateConversation={createConversation}
+        onSelectConversation={selectConversation}
       />
       {sidebarOpen && (
         <button
           className="sidebar-backdrop"
           type="button"
-          aria-label="Close conversations"
+          aria-label="Close workspaces and conversations"
           onClick={() => setSidebarOpen(false)}
         />
       )}
@@ -268,7 +362,7 @@ export function App() {
           <button
             className="icon-button menu-button"
             type="button"
-            aria-label="Open conversations"
+            aria-label="Open workspaces and conversations"
             aria-expanded={sidebarOpen}
             onClick={() => setSidebarOpen(true)}
           >
@@ -278,13 +372,27 @@ export function App() {
           <span className={`connection-dot${connected ? " is-connected" : ""}`} title={connected ? "Connected" : "Disconnected"} />
         </div>
 
-        {selectedSummary === undefined ? (
+        {selectedSummary === undefined || selectedWorkspace === undefined ? (
           <section className="welcome-panel">
             <div className="welcome-mark" aria-hidden="true">W</div>
             <p className="eyebrow">Pi coding agent</p>
-            <h1>Start a conversation</h1>
+            <h1>
+              {chat.workspaces.length === 0
+                ? "Add your first workspace"
+                : selectedWorkspace === undefined
+                  ? "Select a workspace"
+                  : selectedWorkspaceUnavailable
+                    ? "Workspace unavailable"
+                    : `Start in ${selectedWorkspace.name}`}
+            </h1>
             <p>
-              Create a session for a workspace, or choose a conversation from your history.
+              {chat.workspaces.length === 0
+                ? "Register a named project directory to create and find its conversations."
+                : selectedWorkspace === undefined
+                  ? "Choose a workspace to load only its Pi conversation history."
+                  : selectedWorkspaceUnavailable
+                    ? `Restore the directory at ${selectedWorkspace.path} before loading or creating conversations.`
+                    : "Create a new conversation, or choose one from this workspace's history."}
             </p>
             <button
               className="primary-button welcome-create"
@@ -292,7 +400,7 @@ export function App() {
               disabled={!connected}
               onClick={() => setSidebarOpen(true)}
             >
-              Browse conversations
+              Manage workspaces
             </button>
             <small className="server-version">
               {connected ? "Server connected" : "Connecting to server…"}
@@ -309,9 +417,16 @@ export function App() {
             <ConversationHeader
               conversation={selectedConversation}
               summary={selectedSummary}
+              workspace={selectedWorkspace}
               loading={loadingConversationId === selectedSummary.id}
               connected={connected}
-              actionPending={lifecycleAction}
+              actionPending={pendingAction === null
+                ? null
+                : pendingAction === "conversation.close"
+                  ? "close"
+                  : pendingAction === "conversation.delete"
+                    ? "delete"
+                    : "other"}
               onClose={() => void closeConversation()}
               onDelete={() => void deleteConversation()}
             />
@@ -341,7 +456,7 @@ export function App() {
                     queue={selectedConversation.queue}
                     streaming={selectedConversation.status === "streaming"}
                     cwd={selectedConversation.cwd}
-                    canFork={connected && selectedConversation.status === "idle"}
+                    canFork={connected && !selectedWorkspaceUnavailable && pendingAction === null && selectedConversation.status === "idle"}
                     forkingEntryId={forkAction?.conversationId === selectedConversation.id
                       ? forkAction.entryId
                       : null}
@@ -352,7 +467,7 @@ export function App() {
                     status={selectedConversation.status}
                     draft={chat.drafts[selectedConversation.id] ?? ""}
                     queue={selectedConversation.queue}
-                    connected={connected}
+                    connected={connected && !selectedWorkspaceUnavailable && pendingAction === null}
                     {...(server.config === undefined ? {} : {
                       imageLimits: {
                         maxImages: server.config.maxImages,

@@ -5,18 +5,19 @@ export const DEFAULT_CWD = "/tmp/chatwca-browser-workspace";
 export async function waitForConnected(page: Page): Promise<void> {
   await page.goto("/");
   await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  const mobileMenu = page.getByRole("button", { name: "Open workspaces and conversations" });
+  if (await mobileMenu.isVisible()) await mobileMenu.click();
+  await page.getByRole("button", { name: /Browser workspace/ }).first().click();
+  await expect(page.getByRole("heading", { name: "Conversations" })).toBeVisible();
 }
 
 export async function createConversation(
   page: Page,
-  cwd: string,
+  _legacyCwd?: string,
 ): Promise<void> {
-  await page.getByRole("button", { name: "New conversation" }).click();
-  const input = page.getByLabel("Working directory");
-  await input.fill(cwd);
-  await page.getByRole("button", { name: "Create", exact: true }).click();
+  await page.getByRole("button", { name: /New conversation in Browser workspace/ }).click();
   await expect(page.getByRole("textbox", { name: "Message" })).toBeEnabled();
-  await expect(page.locator(".conversation-cwd")).toContainText(cwd);
+  await expect(page.locator(".conversation-cwd")).toContainText(DEFAULT_CWD);
 }
 
 export async function submitAndWait(
@@ -36,5 +37,5 @@ export async function submitAndWait(
 export async function deleteSelectedConversation(page: Page): Promise<void> {
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "Delete", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Start a conversation" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Start in Browser workspace" })).toBeVisible();
 }

@@ -43,6 +43,8 @@ const WORKSPACE: WorkspaceSummary = {
   updatedAt: 1,
   available: true,
 };
+let workspaceSequence = 0;
+let workspaceRows: WorkspaceSummary[] = [WORKSPACE];
 const IMAGE_LIMITS = {
   maxImages: 4,
   maxImageBytes: 2 * 1024 * 1024,
@@ -77,14 +79,18 @@ function model() {
   } as const;
 }
 
-function emptyState(id: string, title: string, cwd = CWD): ConversationState {
+function emptyState(
+  id: string,
+  title: string,
+  workspace: Pick<WorkspaceSummary, "id" | "path"> = WORKSPACE,
+): ConversationState {
   const now = nextTime();
   return {
     id,
-    workspaceId: WORKSPACE_ID,
+    workspaceId: workspace.id,
     sessionFile: `${SESSION_ROOT}/${id}.jsonl`,
     title,
-    cwd,
+    cwd: workspace.path,
     model: model(),
     status: "idle",
     createdAt: now,
@@ -173,8 +179,9 @@ function summary(fixture: FixtureConversation): ConversationSummary {
   };
 }
 
-function listedHistory(): ConversationSummary[] {
+function listedHistory(workspaceId: string): ConversationSummary[] {
   return [...conversations.values()]
+    .filter((fixture) => fixture.state.workspaceId === workspaceId)
     .map(summary)
     .sort((left, right) => right.modifiedAt - left.modifiedAt);
 }
@@ -183,7 +190,10 @@ function emit(fixture: FixtureConversation, event: ConversationEvent): void {
   for (const listener of listeners) {
     listener({
       type: "conversation.event",
-      record: { id: fixture.state.id } as never,
+      record: {
+        id: fixture.state.id,
+        workspaceId: fixture.state.workspaceId,
+      } as never,
       event,
     });
   }
@@ -356,7 +366,7 @@ const registry: ProtocolRegistry = {
   async create(workspace) {
     conversationSequence += 1;
     const id = `browser-created-${String(conversationSequence)}`;
-    addFixture(emptyState(id, "Untitled conversation", workspace.path));
+    addFixture(emptyState(id, "Untitled conversation", workspace));
     return { id };
   },
   async open(_workspace, sessionFile) {
@@ -392,7 +402,10 @@ const registry: ProtocolRegistry = {
 
     conversationSequence += 1;
     const id = `browser-fork-${String(conversationSequence)}`;
-    const fork = emptyState(id, `Fork of ${source.state.title}`, source.state.cwd);
+    const fork = emptyState(id, `Fork of ${source.state.title}`, {
+      id: source.state.workspaceId,
+      path: source.state.cwd,
+    });
     const forkState: ConversationState = {
       ...fork,
       messages: source.state.messages.slice(0, index),
@@ -455,31 +468,60 @@ const registry: ProtocolRegistry = {
 };
 
 const history: ProtocolHistory = {
-  async list(_workspaceId) {
-    return listedHistory();
+  async list(workspace) {
+    return listedHistory(workspace.id);
   },
-  async resolve(_workspaceId, conversationId) {
+  async resolve(workspace, conversationId) {
     const fixture = fixtureById(conversationId);
+    if (fixture.state.workspaceId !== workspace.id) throw new Error("Wrong fixture workspace");
     return { summary: { sessionFile: fixture.state.sessionFile } };
   },
-  async delete(_workspaceId, conversationId) {
+  async delete(workspace, conversationId) {
     const fixture = fixtureById(conversationId);
+    if (fixture.state.workspaceId !== workspace.id) throw new Error("Wrong fixture workspace");
     if (!fixture.closed) throw new Error("Close the fixture conversation before deleting it");
     for (const timer of fixture.timers) clearTimeout(timer);
     conversations.delete(conversationId);
-    return listedHistory();
+    return listedHistory(workspace.id);
   },
 };
 
 const workspaces: ProtocolWorkspaceRepository = {
-  list: () => [WORKSPACE],
+  list: () => [...workspaceRows],
   requireAvailable: (workspaceId) => {
-    if (workspaceId !== WORKSPACE_ID) throw new Error("Unknown fixture workspace");
-    return WORKSPACE;
+    const workspace = workspaceRows.find((item) => item.id === workspaceId);
+    if (workspace === undefined || !workspace.available) throw new Error("Unknown fixture workspace");
+    return workspace;
   },
-  create: () => WORKSPACE,
-  update: () => WORKSPACE,
-  delete: () => undefined,
+  create: (input) => {
+    workspaceSequence += 1;
+    const workspace: WorkspaceSummary = {
+      id: `browser-workspace-${String(workspaceSequence)}`,
+      name: input.name.trim(),
+      path: input.path.trim(),
+      createdAt: nextTime(),
+      updatedAt: nextTime(),
+      available: true,
+    };
+    workspaceRows = [...workspaceRows, workspace];
+    return workspace;
+  },
+  update: (workspaceId, changes) => {
+    const current = workspaceRows.find((item) => item.id === workspaceId);
+    if (current === undefined) throw new Error("Unknown fixture workspace");
+    const updated: WorkspaceSummary = {
+      ...current,
+      ...(changes.name === undefined ? {} : { name: changes.name.trim() }),
+      ...(changes.path === undefined ? {} : { path: changes.path.trim() }),
+      updatedAt: nextTime(),
+    };
+    workspaceRows = workspaceRows.map((item) => item.id === workspaceId ? updated : item);
+    return updated;
+  },
+  delete: (workspaceId) => {
+    if (!workspaceRows.some((item) => item.id === workspaceId)) throw new Error("Unknown fixture workspace");
+    workspaceRows = workspaceRows.filter((item) => item.id !== workspaceId);
+  },
 };
 
 const config = loadConfig(

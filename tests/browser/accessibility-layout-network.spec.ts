@@ -19,20 +19,22 @@ function lanAddress(): string {
 
 test("keyboard focus and primary chat controls remain operable", async ({ page }) => {
   await waitForConnected(page);
-  const newButton = page.getByRole("button", { name: "New conversation" });
-  await newButton.focus();
+  const addButton = page.getByRole("button", { name: "Add", exact: true });
+  await addButton.focus();
   await page.keyboard.press("Enter");
+  const name = page.getByLabel("Name");
+  await expect(name).toBeFocused();
+  await name.fill("Keyboard workspace");
   await page.keyboard.press("Tab");
-  const cwd = page.getByLabel("Working directory");
-  await expect(cwd).toBeFocused();
-  await cwd.fill("/tmp/chatwca-browser-keyboard");
-
+  const path = page.getByLabel("Directory path");
+  await expect(path).toBeFocused();
+  await path.fill("/tmp/chatwca-browser-keyboard");
   await page.keyboard.press("Tab");
   await expect(page.getByRole("button", { name: "Cancel" })).toBeFocused();
-  await page.keyboard.press("Tab");
-  await expect(page.getByRole("button", { name: "Create", exact: true })).toBeFocused();
   await page.keyboard.press("Enter");
+  await expect(addButton).toBeFocused();
 
+  await createConversation(page);
   const composer = page.getByRole("textbox", { name: "Message" });
   await expect(composer).toBeEnabled();
   await composer.focus();
@@ -62,7 +64,7 @@ test("responsive layout stays dark-only and exposes mobile navigation", async ({
   await page.setViewportSize({ width: 390, height: 844 });
   await waitForConnected(page);
 
-  await expect(page.getByRole("button", { name: "Open conversations" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open workspaces and conversations" })).toBeVisible();
   await expect(page.locator(".conversation-sidebar")).not.toBeInViewport();
   const palette = await page.evaluate(() => ({
     colorScheme: getComputedStyle(document.documentElement).colorScheme,
@@ -75,10 +77,10 @@ test("responsive layout stays dark-only and exposes mobile navigation", async ({
     fits: true,
   });
 
-  await page.getByRole("button", { name: "Open conversations" }).click();
+  await page.getByRole("button", { name: "Open workspaces and conversations" }).click();
   await expect(page.locator(".conversation-sidebar")).toBeInViewport();
-  await expect(page.getByRole("button", { name: "Close conversations" }).first()).toBeVisible();
-  await page.getByRole("button", { name: "Close conversations" }).first().click();
+  await expect(page.getByRole("button", { name: "Close workspaces and conversations" }).first()).toBeVisible();
+  await page.getByRole("button", { name: "Close workspaces and conversations" }).first().click();
   await expect(page.locator(".conversation-sidebar")).not.toBeInViewport();
 });
 
@@ -87,7 +89,7 @@ test("serves HTTP and same-authority WebSockets through a non-loopback host", as
   expect(host).not.toMatch(/^127\./);
   await page.goto(`http://${host}:8787/`);
   await expect(page.getByText("Connected", { exact: true })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Start a conversation" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Select a workspace" })).toBeVisible();
   const health = await page.request.get(`http://${host}:8787/api/health`);
   expect(health.ok()).toBe(true);
   await expect(health.json()).resolves.toMatchObject({ ready: true, version: "browser-fixture" });

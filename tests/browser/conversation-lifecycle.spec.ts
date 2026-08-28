@@ -7,30 +7,53 @@ import {
   waitForConnected,
 } from "./helpers.js";
 
-test("create, switch, close, reopen, and delete persisted conversations", async ({ page }) => {
-  const alphaCwd = "/tmp/chatwca-browser-lifecycle-alpha";
-  const betaCwd = "/tmp/chatwca-browser-lifecycle-beta";
+test("creates, edits, selects, and removes a workspace with retention confirmation", async ({ page }) => {
+  await waitForConnected(page);
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await page.getByLabel("Name").fill("Temporary project");
+  await page.getByLabel("Directory path").fill("/tmp/chatwca-browser-temporary-project");
+  await page.getByRole("button", { name: "Add workspace", exact: true }).click();
+
+  const workspaceRow = page.getByRole("button", { name: /Temporary project.*chatwca-browser-temporary-project/ });
+  await expect(workspaceRow).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Start in Temporary project" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Edit workspace Temporary project" }).click();
+  await page.getByLabel("Name").fill("Renamed project");
+  await page.getByLabel("Directory path").fill("/tmp/chatwca-browser-renamed-project");
+  await page.getByRole("button", { name: "Save changes" }).click();
+  await expect(page.getByRole("button", { name: /Renamed project.*chatwca-browser-renamed-project/ })).toBeVisible();
+
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("Pi sessions will be retained");
+    expect(dialog.message()).toContain("will not be deleted");
+    await dialog.accept();
+  });
+  await page.getByRole("button", { name: "Remove workspace Renamed project" }).click();
+  await expect(page.getByRole("button", { name: /Renamed project/ })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Select a workspace" })).toBeVisible();
+});
+
+test("create, switch, close, reopen, and delete selected-workspace conversations", async ({ page }) => {
   const alphaPrompt = "Lifecycle alpha conversation";
   const betaPrompt = "Lifecycle beta conversation";
 
   await waitForConnected(page);
-  await createConversation(page, alphaCwd);
+  await createConversation(page);
   await submitAndWait(page, alphaPrompt);
   const alphaRow = page.getByRole("button", { name: new RegExp(alphaPrompt) });
   await expect(alphaRow).toContainText("Idle");
 
-  await createConversation(page, betaCwd);
+  await createConversation(page);
   await submitAndWait(page, betaPrompt);
   const betaRow = page.getByRole("button", { name: new RegExp(betaPrompt) });
 
   await alphaRow.click();
-  await expect(page.locator(".conversation-cwd")).toContainText(alphaCwd);
   await expect(page.locator(".message-user")).toContainText(alphaPrompt);
 
   await betaRow.click();
-  await expect(page.locator(".conversation-cwd")).toContainText(betaCwd);
   await page.getByRole("button", { name: "Close", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Start a conversation" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Start in Browser workspace" })).toBeVisible();
   await expect(betaRow).toContainText("Closed");
 
   await betaRow.click();

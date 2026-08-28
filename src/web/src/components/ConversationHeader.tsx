@@ -1,6 +1,7 @@
 import type {
   ConversationState,
   ConversationSummary,
+  WorkspaceSummary,
 } from "../../../shared/protocol.js";
 import {
   canCloseConversation,
@@ -11,9 +12,10 @@ import { conversationTitle } from "./conversation-list.js";
 export interface ConversationHeaderProps {
   readonly conversation: ConversationState | undefined;
   readonly summary: ConversationSummary;
+  readonly workspace: WorkspaceSummary;
   readonly loading: boolean;
   readonly connected: boolean;
-  readonly actionPending: "close" | "delete" | null;
+  readonly actionPending: "close" | "delete" | "other" | null;
   readonly onClose: () => void;
   readonly onDelete: () => void;
 }
@@ -40,6 +42,7 @@ function headerStatus(
 export function ConversationHeader({
   conversation,
   summary,
+  workspace,
   loading,
   connected,
   actionPending,
@@ -61,10 +64,14 @@ export function ConversationHeader({
   return (
     <header className="conversation-header">
       <div className="conversation-heading">
-        <h1>{conversation?.title.trim() || conversationTitle(summary)}</h1>
-        <p className="conversation-cwd" title={conversation?.cwd ?? summary.cwd}>
+        <p className="conversation-workspace-name">
+          <span>{workspace.name}</span>
+          {!workspace.available && <strong>Workspace unavailable</strong>}
+        </p>
+        <h1>{conversationTitle(summary)}</h1>
+        <p className="conversation-cwd" title={workspace.path}>
           <span aria-hidden="true">⌁</span>
-          {conversation?.cwd ?? summary.cwd}
+          {workspace.path}
         </p>
       </div>
       <div className="conversation-header-end">

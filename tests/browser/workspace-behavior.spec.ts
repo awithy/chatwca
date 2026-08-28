@@ -65,6 +65,19 @@ test("does not request Pi history before a workspace is selected", async ({ page
   await expect.poll(() => frames.sent.filter(({ type }) => type === "history.list")).toHaveLength(1);
 });
 
+test("orders workspaces by most recently selected", async ({ page }) => {
+  await waitForConnected(page);
+  await addWorkspace(page, "Recent workspace A", "/tmp/chatwca-recent-a");
+  await addWorkspace(page, "Recent workspace B", "/tmp/chatwca-recent-b");
+
+  const items = page.locator(".workspace-item");
+  await expect(items.first()).toContainText("Recent workspace B");
+
+  await page.getByRole("button", { name: /Recent workspace A.*chatwca-recent-a/ }).click();
+  await expect(items.first()).toContainText("Recent workspace A");
+  await expect(items.nth(1)).toContainText("Recent workspace B");
+});
+
 test("creates immutable workspace-local storage and shows it in workspace info", async ({ page }) => {
   const name = "Local session project";
   const directoryPath = "/tmp/chatwca-local-session-project";

@@ -93,7 +93,7 @@ ChatWCA starts with no selected workspace. Before creating or opening a conversa
 4. Select the workspace. Only then does ChatWCA ask Pi for sessions whose exact working directory is that workspace path.
 5. Create a new conversation or open one from the selected workspace's history. An open conversation's title can be edited from its header; the custom title is stored in Pi's native session metadata.
 
-Workspace definitions persist across browser and server restarts, but browser selection is intentionally in memory only and resets after a full page load. Starting ChatWCA or connecting a browser loads the small SQLite workspace list; it does **not** scan Pi session history. ChatWCA performs no automatic discovery or import of directories from existing global Pi history.
+Workspace definitions persist across browser and server restarts, but browser selection is intentionally in memory only and resets after a full page load. During a browser session, the workspace list is ordered by most recently selected; that usage order resets with the browser selection after a full page load. Starting ChatWCA or connecting a browser loads the small SQLite workspace list; it does **not** scan Pi session history. ChatWCA performs no automatic discovery or import of directories from existing global Pi history.
 
 You can use **Workspace Info** to inspect a workspace's path, availability, session-storage policy, and workspace-local session directory. You can rename a workspace at any time. Changing its path or removing it requires closing all live conversations in that workspace first. The session-storage policy cannot be edited. Removing a workspace unregisters only its ChatWCA metadata: the directory, its contents, and all Pi JSONL sessions are retained.
 

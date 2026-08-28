@@ -6,6 +6,7 @@ import type { WorkspaceSummary } from "../../src/shared/protocol.js";
 import { WorkspaceForm } from "../../src/web/src/components/WorkspaceForm.js";
 import {
   WorkspaceSidebar,
+  sortWorkspacesByMostRecentlyUsed,
   workspaceRemovalConfirmation,
 } from "../../src/web/src/components/WorkspaceSidebar.js";
 
@@ -69,6 +70,24 @@ describe("workspace-first sidebar", () => {
     expect(html).toContain("Unavailable");
     expect(html).toContain("Workspace unavailable");
     expect(html).toMatch(/<button class="new-conversation-button"[^>]*disabled=""[^>]*aria-label="New conversation in Deep Project"/);
+  });
+
+  it("sorts workspaces by most recent use without disturbing unseen workspace order", () => {
+    const workspaces = [
+      { ...workspace, id: "workspace-a", name: "A" },
+      { ...workspace, id: "workspace-b", name: "B" },
+      { ...workspace, id: "workspace-c", name: "C" },
+    ];
+
+    expect(
+      sortWorkspacesByMostRecentlyUsed(workspaces, ["workspace-c", "workspace-a"])
+        .map(({ id }) => id),
+    ).toEqual(["workspace-c", "workspace-a", "workspace-b"]);
+    expect(workspaces.map(({ id }) => id)).toEqual([
+      "workspace-a",
+      "workspace-b",
+      "workspace-c",
+    ]);
   });
 
   it("states retention explicitly before workspace removal", () => {

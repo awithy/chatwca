@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type {
   ConversationSummary,
@@ -53,6 +53,28 @@ export function workspaceRemovalConfirmation(workspace: WorkspaceSummary): strin
   return `Remove workspace “${workspace.name}”? The directory at ${workspace.path} and all Pi sessions will be retained and will not be deleted.`;
 }
 
+export function sortWorkspacesByMostRecentlyUsed(
+  workspaces: readonly WorkspaceSummary[],
+  recentWorkspaceIds: readonly string[],
+): WorkspaceSummary[] {
+  const rank = new Map<string, number>();
+  for (const workspaceId of recentWorkspaceIds) {
+    if (!rank.has(workspaceId)) rank.set(workspaceId, rank.size);
+  }
+
+  return workspaces
+    .map((workspace, index) => ({ workspace, index }))
+    .sort((left, right) => {
+      const leftRank = rank.get(left.workspace.id);
+      const rightRank = rank.get(right.workspace.id);
+      if (leftRank !== undefined && rightRank !== undefined) return leftRank - rightRank;
+      if (leftRank !== undefined) return -1;
+      if (rightRank !== undefined) return 1;
+      return left.index - right.index;
+    })
+    .map(({ workspace }) => workspace);
+}
+
 export function WorkspaceSidebar({
   workspaces,
   selectedWorkspaceId,
@@ -77,11 +99,36 @@ export function WorkspaceSidebar({
   const [removingId, setRemovingId] = useState<string | null>(null);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  const [recentWorkspaceIds, setRecentWorkspaceIds] = useState<readonly string[]>([]);
   const formReturnFocus = useRef<HTMLButtonElement | null>(null);
   const openMenu = useRef<HTMLDivElement | null>(null);
   const openMenuTrigger = useRef<HTMLButtonElement | null>(null);
   const formWasOpen = useRef(false);
   const selectedWorkspace = workspaces.find((item) => item.id === selectedWorkspaceId) ?? null;
+  const orderedWorkspaces = useMemo(
+    () => sortWorkspacesByMostRecentlyUsed(
+      workspaces,
+      selectedWorkspaceId === null
+        ? recentWorkspaceIds
+        : [selectedWorkspaceId, ...recentWorkspaceIds],
+    ),
+    [recentWorkspaceIds, selectedWorkspaceId, workspaces],
+  );
+
+  useEffect(() => {
+    const knownIds = new Set(workspaces.map((workspace) => workspace.id));
+    setRecentWorkspaceIds((current) => {
+      const candidates = selectedWorkspaceId === null
+        ? current
+        : [selectedWorkspaceId, ...current];
+      const next = candidates.filter(
+        (workspaceId, index) => knownIds.has(workspaceId) && candidates.indexOf(workspaceId) === index,
+      );
+      return next.length === current.length && next.every((id, index) => id === current[index])
+        ? current
+        : next;
+    });
+  }, [selectedWorkspaceId, workspaces]);
 
   useEffect(() => {
     if (formWasOpen.current && formMode === null) formReturnFocus.current?.focus();
@@ -286,7 +333,7 @@ export function WorkspaceSidebar({
           </div>
         ) : (
           <ul className="workspace-list">
-            {workspaces.map((workspace) => {
+            {orderedWorkspaces.map((workspace) => {
               const selected = workspace.id === selectedWorkspaceId;
               const busy = actionPending || submitting || removingId !== null;
               const menuOpen = openMenuId === workspace.id;

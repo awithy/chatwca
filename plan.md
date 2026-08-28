@@ -132,6 +132,8 @@ In `src/shared/errors.ts`:
 
 ### T2.3 Define state/revision semantics
 
+**Status:** Complete — revision rules, command success mappings, reconciliation helpers, and gap/schema tests are implemented in [`docs/revision-semantics.md`](docs/revision-semantics.md) and [`src/shared/revisions.ts`](src/shared/revisions.ts).
+
 - Specify which server-side changes increment a conversation revision.
 - Require monotonically increasing revisions on all conversation events and snapshots.
 - Define command success responses, including newly created/opened/forked state.

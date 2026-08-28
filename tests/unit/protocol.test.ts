@@ -245,13 +245,45 @@ describe("ServerMessageSchema", () => {
     }
   });
 
-  it("requires positive event revisions", () => {
+  it("requires safe non-negative snapshot and positive event revisions", () => {
+    expect(
+      Value.Check(ServerMessageSchema, {
+        type: "state",
+        conversation: { ...conversationState, revision: -1 },
+      }),
+    ).toBe(false);
+    expect(
+      Value.Check(ServerMessageSchema, {
+        type: "state",
+        conversation: {
+          ...conversationState,
+          revision: Number.MAX_SAFE_INTEGER + 1,
+        },
+      }),
+    ).toBe(false);
     expect(
       Value.Check(ServerMessageSchema, {
         type: "conversation.status",
         conversationId: "session-1",
         revision: 0,
         payload: { status: "streaming" },
+      }),
+    ).toBe(false);
+  });
+
+  it("acknowledges only commands whose success has no result payload", () => {
+    expect(
+      Value.Check(ServerMessageSchema, {
+        type: "ack",
+        requestId,
+        command: "conversation.close",
+      }),
+    ).toBe(true);
+    expect(
+      Value.Check(ServerMessageSchema, {
+        type: "ack",
+        requestId,
+        command: "conversation.create",
       }),
     ).toBe(false);
   });

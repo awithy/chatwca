@@ -17,6 +17,10 @@ const strictObject = <T extends Record<string, TSchema>>(properties: T) =>
 const NonEmptyStringSchema = Type.String({ minLength: 1 });
 const IdentifierSchema = Type.String({ minLength: 1, maxLength: 512 });
 export const RequestIdSchema = Type.String({ minLength: 1, maxLength: 128 });
+export const RevisionSchema = Type.Integer({
+  minimum: 0,
+  maximum: Number.MAX_SAFE_INTEGER,
+});
 
 export const ImageMimeTypeSchema = Type.Union([
   Type.Literal("image/png"),
@@ -205,7 +209,7 @@ export const ConversationStateSchema = strictObject({
   status: LiveConversationStatusSchema,
   createdAt: Type.Number({ minimum: 0 }),
   lastActiveAt: Type.Number({ minimum: 0 }),
-  revision: Type.Integer({ minimum: 0 }),
+  revision: RevisionSchema,
   durable: Type.Boolean(),
   messages: Type.Array(NormalizedMessageSchema),
   queue: QueueStateSchema,
@@ -316,22 +320,27 @@ export const ReadyMessageSchema = strictObject({
 });
 export type ReadyMessage = Static<typeof ReadyMessageSchema>;
 
+export const AcknowledgedCommandTypeSchema = Type.Union([
+  Type.Literal("conversation.close"),
+  Type.Literal("conversation.delete"),
+  Type.Literal("prompt.submit"),
+  Type.Literal("prompt.steer"),
+  Type.Literal("prompt.followUp"),
+  Type.Literal("conversation.abort"),
+]);
+export type AcknowledgedCommandType = Static<
+  typeof AcknowledgedCommandTypeSchema
+>;
+
+/**
+ * Commands without a result payload receive an acknowledgement. Commands
+ * which read or create state use their correlated history/state result as the
+ * success response instead of sending a second acknowledgement.
+ */
 export const AcknowledgementMessageSchema = strictObject({
   type: Type.Literal("ack"),
   requestId: RequestIdSchema,
-  command: Type.Union([
-    Type.Literal("history.list"),
-    Type.Literal("conversation.create"),
-    Type.Literal("conversation.open"),
-    Type.Literal("conversation.state"),
-    Type.Literal("conversation.close"),
-    Type.Literal("conversation.delete"),
-    Type.Literal("conversation.fork"),
-    Type.Literal("prompt.submit"),
-    Type.Literal("prompt.steer"),
-    Type.Literal("prompt.followUp"),
-    Type.Literal("conversation.abort"),
-  ]),
+  command: AcknowledgedCommandTypeSchema,
 });
 export type AcknowledgementMessage = Static<
   typeof AcknowledgementMessageSchema
@@ -359,6 +368,41 @@ export const StateMessageSchema = strictObject({
   editorText: Type.Optional(Type.String()),
 });
 export type StateMessage = Static<typeof StateMessageSchema>;
+
+/** A correlated successful response, selected by the originating command. */
+type Correlated<T extends { requestId?: string }> = Omit<T, "requestId"> & {
+  requestId: string;
+};
+type AckFor<TCommand extends AcknowledgedCommandType> = Omit<
+  AcknowledgementMessage,
+  "command"
+> & { command: TCommand };
+type ForkStateMessage = Omit<StateMessage, "requestId" | "editorText"> & {
+  requestId: string;
+  editorText: string;
+};
+
+/**
+ * The one success response expected for each command. Failures use a
+ * correlated ErrorMessage instead. Uncorrelated history/state messages remain
+ * valid server broadcasts and are not command responses.
+ */
+export type CommandSuccessByType = {
+  "history.list": Correlated<HistoryMessage>;
+  "conversation.create": Correlated<StateMessage>;
+  "conversation.open": Correlated<StateMessage>;
+  "conversation.state": Correlated<StateMessage>;
+  "conversation.close": AckFor<"conversation.close">;
+  "conversation.delete": AckFor<"conversation.delete">;
+  "conversation.fork": ForkStateMessage;
+  "prompt.submit": AckFor<"prompt.submit">;
+  "prompt.steer": AckFor<"prompt.steer">;
+  "prompt.followUp": AckFor<"prompt.followUp">;
+  "conversation.abort": AckFor<"conversation.abort">;
+};
+export type CommandSuccess<
+  TCommand extends ClientCommandType = ClientCommandType,
+> = CommandSuccessByType[TCommand];
 
 export const MessageStartedPayloadSchema = strictObject({
   message: NormalizedMessageSchema,
@@ -456,7 +500,7 @@ const eventEnvelope = <TType extends string, TPayload extends TSchema>(
   strictObject({
     type: Type.Literal(type),
     conversationId: IdentifierSchema,
-    revision: Type.Integer({ minimum: 1 }),
+    revision: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
     payload,
   });
 

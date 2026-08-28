@@ -451,6 +451,7 @@ export function App() {
               ) : (
                 <div className="conversation-workspace">
                   <MessageTimeline
+                    conversationId={selectedConversation.id}
                     messages={selectedConversation.messages}
                     notices={selectedProjection?.notices ?? []}
                     queue={selectedConversation.queue}

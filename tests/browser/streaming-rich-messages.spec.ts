@@ -50,4 +50,14 @@ test("thinking and linked tool details are collapsed until explicitly expanded",
   await expect(tool.getByText("deterministic tool output")).toBeVisible();
   await tool.locator("summary").click();
   await expect(tool.locator(".tool-card-body")).toBeHidden();
+
+  const generated = page.getByRole("img", { name: "Generated fixture" });
+  await expect(generated).toBeVisible();
+  await expect.poll(async () => await generated.evaluate(
+    (image) => (image as HTMLImageElement).naturalWidth,
+  )).toBeGreaterThan(0);
+  await expect(generated).toHaveAttribute(
+    "src",
+    "/api/conversations/browser-rich-conversation/workspace-images?path=generated.png",
+  );
 });

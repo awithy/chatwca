@@ -23,6 +23,8 @@ export const DEFAULT_MAX_TOOL_OUTPUT_BYTES = 64 * 1024;
 
 export interface SerializeOptions {
   readonly maxToolOutputBytes?: number;
+  /** Replace tool-result image data with a bounded same-origin HTTP reference. */
+  readonly toolImageUrl?: (entryId: string, imageIndex: number) => string;
 }
 
 type UnknownRecord = Record<string, unknown>;
@@ -84,6 +86,19 @@ function serializeImage(value: UnknownRecord): ImageBlock | undefined {
   return {
     type: "image",
     image: { mimeType, encoding: "base64", data },
+  };
+}
+
+function serializeImageReference(
+  value: UnknownRecord,
+  url: string,
+): ImageBlock | undefined {
+  const mimeType = imageMimeType(value.mimeType);
+  if (mimeType === undefined || url.length === 0) return undefined;
+  return {
+    type: "image",
+    image: { mimeType, url },
+    alt: "Generated image",
   };
 }
 
@@ -237,6 +252,7 @@ export function truncateUtf8(text: string, maximumBytes: number): {
 function serializeToolResult(
   message: UnknownRecord,
   maximumBytes: number,
+  imageUrl?: (imageIndex: number) => string,
 ): AssistantContentBlock[] | undefined {
   const toolCallId = nonEmptyString(message.toolCallId);
   if (toolCallId === undefined) return undefined;
@@ -251,21 +267,32 @@ function serializeToolResult(
     .map((item) => item.text as string)
     .join("\n");
   const bounded = truncateUtf8(text, maximumBytes);
+  let imageIndex = 0;
   const images = content.flatMap((item) => {
     const part = record(item);
     if (part?.type !== "image") return [];
-    const image = serializeImage(part);
+    const currentIndex = imageIndex;
+    imageIndex += 1;
+    const image = imageUrl === undefined
+      ? serializeImage(part)
+      : serializeImageReference(part, imageUrl(currentIndex));
     return image === undefined ? [] : [image];
   });
   const originalImageBytes = images.reduce(
-    (total, image) => total + Buffer.byteLength(image.image.data, "utf8"),
+    (total, image) => total + (
+      "data" in image.image
+        ? Buffer.byteLength(image.image.data, "utf8")
+        : 0
+    ),
     0,
   );
   let remainingBytes =
     maximumBytes - Buffer.byteLength(bounded.content, "utf8");
   const retainedImages: ImageBlock[] = [];
   for (const image of images) {
-    const imageBytes = Buffer.byteLength(image.image.data, "utf8");
+    const imageBytes = "data" in image.image
+      ? Buffer.byteLength(image.image.data, "utf8")
+      : 0;
     if (imageBytes > remainingBytes) continue;
     retainedImages.push(image);
     remainingBytes -= imageBytes;
@@ -291,6 +318,7 @@ function serializeEntry(
   value: unknown,
   outcomes: ReadonlyMap<string, ToolOutcome>,
   maximumBytes: number,
+  toolImageUrl?: (entryId: string, imageIndex: number) => string,
 ): NormalizedMessage | undefined {
   const entry = record(value);
   const entryId = nonEmptyString(entry?.id);
@@ -340,7 +368,13 @@ function serializeEntry(
   }
 
   if (message.role === "toolResult") {
-    const blocks = serializeToolResult(message, maximumBytes);
+    const blocks = serializeToolResult(
+      message,
+      maximumBytes,
+      toolImageUrl === undefined
+        ? undefined
+        : (imageIndex) => toolImageUrl(entryId, imageIndex),
+    );
     if (blocks === undefined) return undefined;
     return {
       entryId,
@@ -373,6 +407,7 @@ export function serializeLiveMessage(
     { type: "message", id: entryId, message },
     new Map(),
     maximumToolBytes(options),
+    options.toolImageUrl,
   );
 }
 
@@ -429,7 +464,12 @@ export function serializeSessionEntries(
   const maximumBytes = maximumToolBytes(options);
   const outcomes = collectToolOutcomes(entries);
   return entries.flatMap((entry) => {
-    const message = serializeEntry(entry, outcomes, maximumBytes);
+    const message = serializeEntry(
+      entry,
+      outcomes,
+      maximumBytes,
+      options.toolImageUrl,
+    );
     return message === undefined ? [] : [message];
   });
 }

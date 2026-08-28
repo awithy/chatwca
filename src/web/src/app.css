@@ -1308,6 +1308,37 @@ pre {
   animation: pulse-cursor 1s steps(2, jump-none) infinite;
 }
 
+.message-image {
+  display: grid;
+  gap: 0.4rem;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0;
+}
+
+.message-image > a {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: 0.6rem;
+  background: var(--panel);
+}
+
+.message-image img {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  max-height: min(42rem, 70vh);
+  object-fit: contain;
+}
+
+.message-image > a:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 3px;
+}
+
 .message-attachment {
   display: inline-flex;
   align-items: center;

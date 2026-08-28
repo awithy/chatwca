@@ -229,6 +229,53 @@ describe("session serialization", () => {
     }]);
   });
 
+  it("replaces large tool-result image data with a browser image reference", () => {
+    const messages = serializeSessionEntries(
+      [{
+        type: "message",
+        id: "tool-image-entry",
+        message: {
+          role: "toolResult",
+          toolCallId: "call-image",
+          toolName: "read",
+          content: [
+            { type: "text", text: "Read image file [image/png]" },
+            {
+              type: "image",
+              mimeType: "image/png",
+              data: "x".repeat(250_000),
+            },
+          ],
+          isError: false,
+        },
+      }],
+      {
+        maxToolOutputBytes: 64 * 1024,
+        toolImageUrl: (entryId, imageIndex) =>
+          `/api/test/${entryId}/${String(imageIndex)}`,
+      },
+    );
+
+    expect(messages[0]?.blocks).toEqual([
+      {
+        type: "tool-result",
+        toolCallId: "call-image",
+        toolName: "read",
+        content: "Read image file [image/png]",
+        isError: false,
+        truncated: false,
+      },
+      {
+        type: "image",
+        image: {
+          mimeType: "image/png",
+          url: "/api/test/tool-image-entry/0",
+        },
+        alt: "Generated image",
+      },
+    ]);
+  });
+
   it("omits usage when the SDK does not provide reliable integer token counts", () => {
     const messages = serializeSessionEntries([{
       type: "message",

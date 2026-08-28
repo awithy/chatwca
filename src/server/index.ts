@@ -12,6 +12,7 @@ import {
   type ServerConfig,
 } from "./config.js";
 import { ConversationRegistry } from "./conversation-registry.js";
+import type { ConversationImageOwner } from "./conversation-images.js";
 import {
   openDatabase,
   type ChatWcaDatabase,
@@ -57,6 +58,8 @@ export interface ChatWcaServer {
 export interface ChatWcaProtocolServices {
   readonly registry: ProtocolRegistry;
   readonly history: ProtocolHistory;
+  /** Optional HTTP owner for image blocks retained in live Pi sessions. */
+  readonly images?: ConversationImageOwner;
   /** Required authority for every browser workspace and conversation lifecycle command. */
   readonly workspaces: ProtocolWorkspaceRepository;
   readonly maxInboundMessageBytes?: number;
@@ -173,6 +176,63 @@ export function createChatWcaServer(
       maxTotalImageBytes: config.maxTotalImageBytes,
     });
   });
+
+  app.get(
+    "/api/conversations/:conversationId/workspace-images",
+    async (request, response) => {
+      const filePath = request.query.path;
+      if (typeof filePath !== "string") {
+        response.sendStatus(404);
+        return;
+      }
+      const image = await services?.images?.getWorkspaceImage(
+        request.params.conversationId,
+        filePath,
+      );
+      if (image === undefined) {
+        response.sendStatus(404);
+        return;
+      }
+
+      response.set({
+        "Cache-Control": "private, no-store",
+        "Content-Type": image.mimeType,
+        "Content-Length": String(image.data.byteLength),
+        "Content-Disposition": "inline",
+        "X-Content-Type-Options": "nosniff",
+      });
+      response.send(image.data);
+    },
+  );
+
+  app.get(
+    "/api/conversations/:conversationId/messages/:entryId/images/:imageIndex",
+    (request, response) => {
+      const rawIndex = request.params.imageIndex;
+      if (!/^(0|[1-9]\d*)$/.test(rawIndex)) {
+        response.sendStatus(404);
+        return;
+      }
+      const image = services?.images?.getImage(
+        request.params.conversationId,
+        request.params.entryId,
+        Number(rawIndex),
+      );
+      if (image === undefined) {
+        response.sendStatus(404);
+        return;
+      }
+
+      response.set({
+        "Cache-Control": "private, no-store",
+        "Content-Type": image.mimeType,
+        "Content-Length": String(image.data.byteLength),
+        "Content-Disposition": "inline",
+        "X-Content-Type-Options": "nosniff",
+      });
+      response.send(image.data);
+    },
+  );
 
   serveWebApp(app);
 
@@ -401,6 +461,7 @@ export async function startChatWcaServer(
       {
         registry,
         history,
+        images: registry,
         workspaces,
         shutdown: registry,
         closeStorage: () => database?.close(),

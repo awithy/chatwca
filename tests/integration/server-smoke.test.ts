@@ -6,12 +6,14 @@ import WebSocket from "ws";
 import { loadConfig } from "../../src/server/config.js";
 import {
   createChatWcaServer,
+  type ChatWcaProtocolServices,
   type ChatWcaServer,
 } from "../../src/server/index.js";
+import type { ConversationImageOwner } from "../../src/server/conversation-images.js";
 
 const openServers: ChatWcaServer[] = [];
 
-async function startServer(): Promise<{
+async function startServer(images?: ConversationImageOwner): Promise<{
   readonly server: ChatWcaServer;
   readonly baseUrl: string;
 }> {
@@ -25,7 +27,15 @@ async function startServer(): Promise<{
     },
     "/tmp",
   );
-  const server = createChatWcaServer(config, "test-version");
+  const services = images === undefined
+    ? undefined
+    : {
+        registry: { subscribe: () => () => undefined },
+        history: {},
+        workspaces: {},
+        images,
+      } as unknown as ChatWcaProtocolServices;
+  const server = createChatWcaServer(config, "test-version", services);
 
   await new Promise<void>((resolve, reject) => {
     server.httpServer.once("error", reject);
@@ -104,6 +114,42 @@ describe("server shell", () => {
     });
     expect(JSON.stringify(body)).not.toContain("/private/pi-data");
     expect(JSON.stringify(body)).not.toContain("/tmp/chatwca-smoke-data");
+  });
+
+  it("serves canonical conversation images with restrictive response headers", async () => {
+    const bytes = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    ]);
+    const { baseUrl } = await startServer({
+      getImage: (conversationId, entryId, imageIndex) =>
+        conversationId === "one" && entryId === "entry" && imageIndex === 0
+          ? { mimeType: "image/png", data: bytes }
+          : undefined,
+      getWorkspaceImage: async (conversationId, filePath) =>
+        conversationId === "one" && filePath === "generated.png"
+          ? { mimeType: "image/png", data: bytes }
+          : undefined,
+    });
+
+    const response = await fetch(
+      `${baseUrl}/api/conversations/one/messages/entry/images/0`,
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("image/png");
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(Buffer.from(await response.arrayBuffer())).toEqual(bytes);
+
+    const workspaceResponse = await fetch(
+      `${baseUrl}/api/conversations/one/workspace-images?path=generated.png`,
+    );
+    expect(workspaceResponse.status).toBe(200);
+    expect(workspaceResponse.headers.get("content-type")).toBe("image/png");
+    expect(Buffer.from(await workspaceResponse.arrayBuffer())).toEqual(bytes);
+
+    expect((await fetch(
+      `${baseUrl}/api/conversations/one/messages/entry/images/1`,
+    )).status).toBe(404);
   });
 
   it("accepts direct and same-authority browser WebSocket clients", async () => {

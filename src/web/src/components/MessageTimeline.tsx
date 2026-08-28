@@ -16,6 +16,7 @@ import { ThinkingBlock } from "./ThinkingBlock.js";
 import { ToolCallCard } from "./ToolCallCard.js";
 
 export interface MessageTimelineProps {
+  readonly conversationId?: string;
   readonly messages: readonly NormalizedMessage[];
   readonly notices: readonly StatusNotice[];
   readonly queue: QueueState;
@@ -106,14 +107,28 @@ function RunMetadata({
 
 function ImageAttachment({
   block,
+  assistant,
 }: {
   readonly block: Extract<UserContentBlock | AssistantContentBlock, { type: "image" }>;
+  readonly assistant: boolean;
 }) {
+  const source = "url" in block.image
+    ? block.image.url
+    : `data:${block.image.mimeType};base64,${block.image.data}`;
+  const label = block.alt ?? block.image.name ?? (
+    assistant ? "Generated image" : "Attached image"
+  );
+
   return (
-    <span className="message-attachment">
-      <span aria-hidden="true">▧</span>
-      {block.image.name ?? "Image attachment"}
-    </span>
+    <figure className="message-image">
+      <a href={source} target="_blank" rel="noreferrer" aria-label={`Open ${label}`}>
+        <img src={source} alt={label} decoding="async" />
+      </a>
+      <figcaption className="message-attachment">
+        <span aria-hidden="true">▧</span>
+        {label}
+      </figcaption>
+    </figure>
   );
 }
 
@@ -122,11 +137,13 @@ function MessageContent({
   markdown,
   toolCallIds,
   toolResults,
+  conversationId,
 }: {
   readonly blocks: readonly (UserContentBlock | AssistantContentBlock)[];
   readonly markdown: boolean;
   readonly toolCallIds: ReadonlySet<string>;
   readonly toolResults: ReadonlyMap<string, ToolResultBlock>;
+  readonly conversationId?: string;
 }) {
   return (
     <div className="message-blocks">
@@ -134,12 +151,22 @@ function MessageContent({
         switch (block.type) {
           case "text":
             return markdown ? (
-              <MarkdownContent text={block.text} key={`text-${index}`} />
+              <MarkdownContent
+                text={block.text}
+                {...(conversationId === undefined ? {} : { conversationId })}
+                key={`text-${index}`}
+              />
             ) : (
               <p className="message-text" key={`text-${index}`}>{block.text}</p>
             );
           case "image":
-            return <ImageAttachment block={block} key={`image-${index}`} />;
+            return (
+              <ImageAttachment
+                block={block}
+                assistant={markdown}
+                key={`image-${index}`}
+              />
+            );
           case "thinking":
             return <ThinkingBlock text={block.text} key={`thinking-${index}`} />;
           case "tool-call":
@@ -183,6 +210,7 @@ function hasVisibleContent(
 }
 
 export function MessageTimeline({
+  conversationId,
   messages,
   notices,
   queue,
@@ -286,6 +314,7 @@ export function MessageTimeline({
                 markdown={message.role === "assistant"}
                 toolCallIds={toolCallIds}
                 toolResults={toolResults}
+                {...(conversationId === undefined ? {} : { conversationId })}
               />
               {message.role === "assistant" && message.error !== undefined && (
                 <div className="message-error" role="alert">

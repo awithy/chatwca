@@ -57,11 +57,25 @@ export const ThinkingBlockSchema = strictObject({
 });
 export type ThinkingBlock = Static<typeof ThinkingBlockSchema>;
 
-export const ImageBlockSchema = strictObject({
-  type: Type.Literal("image"),
-  image: ImagePayloadSchema,
-  alt: Type.Optional(Type.String()),
+export const ImageReferenceSchema = strictObject({
+  mimeType: ImageMimeTypeSchema,
+  url: Type.String({ minLength: 1, maxLength: 2048 }),
+  name: Type.Optional(Type.String({ minLength: 1, maxLength: 255 })),
 });
+export type ImageReference = Static<typeof ImageReferenceSchema>;
+
+export const ImageBlockSchema = Type.Union([
+  strictObject({
+    type: Type.Literal("image"),
+    image: ImagePayloadSchema,
+    alt: Type.Optional(Type.String()),
+  }),
+  strictObject({
+    type: Type.Literal("image"),
+    image: ImageReferenceSchema,
+    alt: Type.Optional(Type.String()),
+  }),
+]);
 export type ImageBlock = Static<typeof ImageBlockSchema>;
 
 export const ToolCallBlockSchema = strictObject({

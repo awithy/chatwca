@@ -3,6 +3,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import type { NormalizedMessage } from "../../src/shared/protocol.js";
+import {
+  MarkdownContent,
+  markdownUrl,
+} from "../../src/web/src/components/MarkdownContent.js";
 import { MessageTimeline } from "../../src/web/src/components/MessageTimeline.js";
 import { ThinkingBlock } from "../../src/web/src/components/ThinkingBlock.js";
 import { ToolCallCard } from "../../src/web/src/components/ToolCallCard.js";
@@ -12,6 +16,26 @@ function render(component: ReturnType<typeof createElement>): string {
 }
 
 describe("rich message rendering", () => {
+  it("rewrites local Markdown image paths through the conversation image endpoint", () => {
+    expect(markdownUrl("penguin.png", "conversation one")).toBe(
+      "/api/conversations/conversation%20one/workspace-images?path=penguin.png",
+    );
+    expect(markdownUrl("file:///workspace/generated image.webp", "one")).toBe(
+      "/api/conversations/one/workspace-images?path=%2Fworkspace%2Fgenerated%20image.webp",
+    );
+    expect(markdownUrl("https://example.test/image.png", "one")).toBe(
+      "https://example.test/image.png",
+    );
+
+    const html = render(createElement(MarkdownContent, {
+      text: "![Penguin](penguin.png)",
+      conversationId: "one",
+    }));
+    expect(html).toContain(
+      'src="/api/conversations/one/workspace-images?path=penguin.png"',
+    );
+  });
+
   it("keeps thinking collapsed by default and renders it as untrusted text", () => {
     const html = render(createElement(ThinkingBlock, {
       text: '<script data-secret="yes">inspect()</script>',
@@ -113,6 +137,56 @@ describe("rich message rendering", () => {
     expect(html).toContain("/workspace");
     expect(html).not.toContain('data-entry-id="result-1"');
     expect(html).toContain('class="thinking-block"');
+  });
+
+  it("renders referenced tool-result images inline and keeps the full image link", () => {
+    const messages: NormalizedMessage[] = [
+      {
+        entryId: "assistant-image-call",
+        role: "assistant",
+        blocks: [{
+          type: "tool-call",
+          toolCallId: "call-image",
+          toolName: "read",
+          arguments: { path: "penguin.png" },
+          status: "succeeded",
+        }],
+      },
+      {
+        entryId: "tool-image-entry",
+        role: "assistant",
+        blocks: [
+          {
+            type: "tool-result",
+            toolCallId: "call-image",
+            toolName: "read",
+            content: "Read image file [image/png]",
+            isError: false,
+            truncated: false,
+          },
+          {
+            type: "image",
+            image: {
+              mimeType: "image/png",
+              url: "/api/conversations/one/messages/tool-image-entry/images/0",
+            },
+            alt: "Generated image",
+          },
+        ],
+      },
+    ];
+    const html = render(createElement(MessageTimeline, {
+      messages,
+      notices: [],
+      queue: { steering: [], followUp: [] },
+      streaming: false,
+      cwd: "/workspace",
+    }));
+
+    expect(html).toContain('class="message-image"');
+    expect(html).toContain('src="/api/conversations/one/messages/tool-image-entry/images/0"');
+    expect(html).toContain('alt="Generated image"');
+    expect(html).toContain('aria-label="Open Generated image"');
   });
 
   it("renders final stop, reliable usage, and message failures as run metadata", () => {

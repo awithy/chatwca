@@ -78,6 +78,8 @@ Operational endpoints are:
 ```text
 GET /api/health
 GET /api/config
+GET /api/conversations/:conversationId/messages/:entryId/images/:imageIndex
+GET /api/conversations/:conversationId/workspace-images?path=<image-path>
 WS  /ws
 ```
 
@@ -140,14 +142,14 @@ npm start
 | Decoded bytes per image | 8 MiB |
 | Aggregate decoded image bytes per prompt | 24 MiB |
 | Complete inbound WebSocket command | 41943040 bytes (40 MiB), fixed |
-| Tool-result output exposed in a browser snapshot/event | 65536 UTF-8 bytes (64 KiB), fixed |
+| Tool-result text exposed in a browser snapshot/event | 65536 UTF-8 bytes (64 KiB), fixed |
 | WebSocket outbound high-water mark per client | 524288 bytes (512 KiB), fixed |
 | Additional outbound application queue per client | 4194304 bytes (4 MiB), fixed |
 | Persistent slow-client timeout | 5000 ms, fixed |
 
 Image count and byte defaults are controlled by the corresponding environment variables and are returned to the browser by `/api/config`. The browser performs preliminary checks and resizing; the server remains authoritative, validates canonical padded base64 and file signatures, and counts actual decoded bytes. Image data on the wire is raw base64 without a `data:` URL prefix. Raising image limits does **not** raise the fixed 40 MiB WebSocket command limit.
 
-Tool output is bounded only in the browser projection; Pi's native session remains canonical. Under backpressure, cumulative tool/history updates may be coalesced. A client that remains slow is closed and can reconnect to obtain an authoritative snapshot; its disconnect does not stop server-side runs.
+Tool-result text is bounded only in the browser projection; Pi's native session remains canonical. Supported images attached to tool results are displayed inline through a same-origin, no-store HTTP URL backed by the open conversation's canonical Pi entry, so their base64 data is not repeated in WebSocket snapshots. Markdown image and image-link destinations ending in PNG, JPEG, or WebP are resolved against the open conversation's workspace and rewritten to a same-origin endpoint. Absolute, `file:`, and `sandbox:` image paths are accepted only when their canonical target remains inside that workspace; symlink escapes, unsupported formats, oversized files, and non-image signatures are rejected. This allows a generated workspace image to appear from ordinary Markdown without exposing a general workspace file server. Under backpressure, cumulative tool/history updates may be coalesced. A client that remains slow is closed and can reconnect to obtain an authoritative snapshot; its disconnect does not stop server-side runs.
 
 ## Network and security behavior
 

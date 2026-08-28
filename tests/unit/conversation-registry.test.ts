@@ -365,6 +365,75 @@ describe("ConversationRegistry", () => {
     );
   });
 
+  it("serves validated images from canonical tool-result entries", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessionFile = path.join(root, "sessions", "tool-image.jsonl");
+    await Promise.all([mkdir(cwd), mkdir(path.dirname(sessionFile))]);
+    const bytes = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00,
+    ]);
+    const runtime = new FakeRuntime(identity("tool-image", sessionFile, cwd), {
+      branch: [{
+        type: "message",
+        id: "tool-result-entry",
+        message: {
+          role: "toolResult",
+          toolCallId: "call-image",
+          toolName: "read",
+          content: [
+            { type: "text", text: "Read image file [image/png]" },
+            {
+              type: "image",
+              mimeType: "image/png",
+              data: bytes.toString("base64"),
+            },
+          ],
+          isError: false,
+        },
+      }],
+    });
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(runtime);
+    const registry = new ConversationRegistry({ runtimeFactory: factory });
+    await registry.create(ownership(cwd));
+    const workspaceImage = path.join(cwd, "generated.png");
+    const outsideImage = path.join(root, "outside.png");
+    await Promise.all([
+      writeFile(workspaceImage, bytes),
+      writeFile(outsideImage, bytes),
+    ]);
+    await symlink(outsideImage, path.join(cwd, "outside-link.png"));
+
+    const state = await registry.getState("tool-image");
+    expect(state.messages[0]?.blocks[1]).toEqual({
+      type: "image",
+      image: {
+        mimeType: "image/png",
+        url: "/api/conversations/tool-image/messages/tool-result-entry/images/0",
+      },
+      alt: "Generated image",
+    });
+    expect(registry.getImage("tool-image", "tool-result-entry", 0)).toEqual({
+      mimeType: "image/png",
+      data: bytes,
+    });
+    expect(registry.getImage("tool-image", "tool-result-entry", 1)).toBeUndefined();
+    expect(registry.getImage("tool-image", "missing", 0)).toBeUndefined();
+    expect(await registry.getWorkspaceImage("tool-image", "generated.png")).toEqual({
+      mimeType: "image/png",
+      data: bytes,
+    });
+    expect(await registry.getWorkspaceImage("tool-image", workspaceImage)).toEqual({
+      mimeType: "image/png",
+      data: bytes,
+    });
+    expect(await registry.getWorkspaceImage("tool-image", "outside-link.png"))
+      .toBeUndefined();
+    expect(await registry.getWorkspaceImage("tool-image", "../outside.png"))
+      .toBeUndefined();
+  });
+
   it("rejects image prompts for a text-only model with a stable error", async () => {
     const root = await temporaryRoot();
     const cwd = path.join(root, "workspace");

@@ -454,7 +454,7 @@ Revisions are monotonic per conversation. If the browser detects a gap, reconnec
 
 Streaming text deltas are high-priority messages. Workspace-scoped history is sent only on workspace selection, reconnect, fork, or explicit resynchronization. A `history.list` command establishes that socket's current workspace-history subscription; subsequent history updates are sent only for that workspace and include its `workspaceId`. The server does not serialize the complete conversation on every token and never performs a global history scan to produce an update.
 
-Tool output sent to the browser is bounded and may be visually truncated. Pi remains responsible for the canonical persisted result and model context.
+Tool-result text sent to the browser is bounded and may be visually truncated. Supported image blocks in canonical tool-result entries are represented by same-origin image URLs rather than copied into WebSocket snapshots; the HTTP handler resolves only an image on the open conversation's active branch, validates its encoded data and signature, and returns it with `Cache-Control: private, no-store`. Markdown destinations for supported image formats are rewritten to a separate conversation-scoped endpoint that resolves relative paths against the workspace and admits absolute, `file:`, or `sandbox:` paths only when their real canonical target remains inside that workspace. It rejects symlink escapes, unsupported formats, oversized files, and invalid signatures. Pi remains responsible for the canonical persisted result and model context; ChatWCA does not expose a general workspace file server.
 
 ## 13. WebSocket protocol
 
@@ -463,6 +463,8 @@ The HTTP server provides static assets and two operational endpoints:
 ```text
 GET /api/health
 GET /api/config
+GET /api/conversations/:conversationId/messages/:entryId/images/:imageIndex
+GET /api/conversations/:conversationId/workspace-images?path=<image-path>
 WS  /ws
 ```
 
@@ -558,7 +560,7 @@ Minimum UI requirements:
 - responsive sidebar collapse;
 - reduced-motion support;
 - no raw HTML rendering from model output; and
-- bounded, scrollable tool output.
+- bounded, scrollable tool text output and responsive inline tool-result images.
 
 ### 15.3 Message rendering
 

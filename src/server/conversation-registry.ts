@@ -1,4 +1,4 @@
-import { access, realpath, unlink } from "node:fs/promises";
+import { access, readFile, realpath, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 
 import type {
@@ -17,6 +17,7 @@ import {
 import type {
   ConversationEvent,
   ConversationState,
+  ImageMimeType,
   LiveConversationStatus,
   ModelInfo,
   QueueState,
@@ -31,6 +32,10 @@ import {
   type ImageValidationLimits,
 } from "./images.js";
 import { isActiveBranchUserEntry } from "./fork-target.js";
+import {
+  conversationImageUrl,
+  type ConversationImage,
+} from "./conversation-images.js";
 import { serializeActiveBranch } from "./serialize.js";
 import type {
   PiConversationRuntimePort,
@@ -441,9 +446,144 @@ export class ConversationRegistry {
       lastActiveAt: record.lastActiveAt,
       revision: record.revision,
       durable: record.durable,
-      messages: serializeActiveBranch(record.session.sessionManager),
+      messages: serializeActiveBranch(record.session.sessionManager, {
+        toolImageUrl: (entryId, imageIndex) =>
+          conversationImageUrl(record.id, entryId, imageIndex),
+      }),
       queue: queueOf(record.session),
     };
+  }
+
+  /** Resolve a browser image reference from this runtime's canonical active branch. */
+  getImage(
+    conversationId: string,
+    entryId: string,
+    imageIndex: number,
+  ): ConversationImage | undefined {
+    if (!Number.isSafeInteger(imageIndex) || imageIndex < 0) return undefined;
+    const conversation = this.#byId.get(conversationId);
+    if (conversation === undefined || this.#pendingCloses.has(conversation)) {
+      return undefined;
+    }
+
+    const entry = conversation.session.sessionManager.getBranch().find(
+      (candidate) => candidate.type === "message" && candidate.id === entryId,
+    );
+    const message = entry?.type === "message"
+      ? entry.message as unknown as {
+          readonly role?: unknown;
+          readonly content?: unknown;
+        }
+      : undefined;
+    if (message?.role !== "toolResult" || !Array.isArray(message.content)) {
+      return undefined;
+    }
+
+    let currentIndex = 0;
+    for (const value of message.content) {
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        continue;
+      }
+      const part = value as {
+        readonly type?: unknown;
+        readonly mimeType?: unknown;
+        readonly data?: unknown;
+      };
+      if (part.type !== "image") continue;
+      if (currentIndex !== imageIndex) {
+        currentIndex += 1;
+        continue;
+      }
+      if (
+        (part.mimeType !== "image/png" &&
+          part.mimeType !== "image/jpeg" &&
+          part.mimeType !== "image/webp") ||
+        typeof part.data !== "string"
+      ) {
+        return undefined;
+      }
+
+      try {
+        const [validated] = validatePromptImages(
+          [{
+            mimeType: part.mimeType as ImageMimeType,
+            encoding: "base64",
+            data: part.data,
+          }],
+          { supportsImages: true, limits: this.#imageLimits },
+        );
+        if (validated === undefined) return undefined;
+        return {
+          mimeType: part.mimeType as ImageMimeType,
+          data: Buffer.from(validated.data, "base64"),
+        };
+      } catch {
+        return undefined;
+      }
+    }
+    return undefined;
+  }
+
+  /** Resolve a Markdown image path without exposing files outside the workspace. */
+  async getWorkspaceImage(
+    conversationId: string,
+    filePath: string,
+  ): Promise<ConversationImage | undefined> {
+    const conversation = this.#byId.get(conversationId);
+    if (
+      conversation === undefined ||
+      this.#pendingCloses.has(conversation) ||
+      filePath.length === 0 ||
+      filePath.includes("\0")
+    ) {
+      return undefined;
+    }
+
+    let mimeType: ImageMimeType;
+    switch (path.extname(filePath).toLowerCase()) {
+      case ".png":
+        mimeType = "image/png";
+        break;
+      case ".jpg":
+      case ".jpeg":
+        mimeType = "image/jpeg";
+        break;
+      case ".webp":
+        mimeType = "image/webp";
+        break;
+      default:
+        return undefined;
+    }
+
+    try {
+      const candidate = path.isAbsolute(filePath)
+        ? filePath
+        : path.resolve(conversation.workspacePath, filePath);
+      const canonical = await realpath(candidate);
+      const relative = path.relative(conversation.workspacePath, canonical);
+      if (
+        relative === "" ||
+        relative === ".." ||
+        relative.startsWith(`..${path.sep}`) ||
+        path.isAbsolute(relative)
+      ) {
+        return undefined;
+      }
+
+      const metadata = await stat(canonical);
+      if (!metadata.isFile() || metadata.size > this.#imageLimits.maxImageBytes) {
+        return undefined;
+      }
+      const bytes = await readFile(canonical);
+      const [validated] = validatePromptImages(
+        [{ mimeType, encoding: "base64", data: bytes.toString("base64") }],
+        { supportsImages: true, limits: this.#imageLimits },
+      );
+      if (validated === undefined) return undefined;
+      return { mimeType, data: bytes };
+    } catch {
+      return undefined;
+    }
   }
 
   /** Deliver a validated text/image prompt using Pi's explicit streaming behavior. */
@@ -1151,6 +1291,8 @@ export class ConversationRegistry {
       emit: (event) => this.#emitConversationEvent(record, event),
       onMessagePersisted: (message) => this.#messagePersisted(record, message),
       onMetadataChanged: () => this.#metadataChanged(record),
+      toolImageUrl: (entryId, imageIndex) =>
+        conversationImageUrl(record.id, entryId, imageIndex),
     });
   }
 

@@ -2,6 +2,7 @@ import type { AddressInfo } from "node:net";
 
 import { loadConfig } from "../../src/server/config.js";
 import type { ConversationRegistryListener } from "../../src/server/conversation-registry.js";
+import type { ConversationImageOwner } from "../../src/server/conversation-images.js";
 import { validatePromptImages } from "../../src/server/images.js";
 import {
   createChatWcaServer,
@@ -141,7 +142,10 @@ function richState(): ConversationState {
             isError: false,
             truncated: false,
           },
-          { type: "text", text: "The fixture inspection is complete." },
+          {
+            type: "text",
+            text: "The fixture inspection is complete.\n\n![Generated fixture](generated.png)",
+          },
         ],
         timestamp: nextTime(),
         stopReason: "stop",
@@ -558,6 +562,18 @@ const workspaces: ProtocolWorkspaceRepository = {
   },
 };
 
+const fixtureImage = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  "base64",
+);
+const images: ConversationImageOwner = {
+  getImage: () => undefined,
+  getWorkspaceImage: async (conversationId, filePath) =>
+    conversationId === "browser-rich-conversation" && filePath === "generated.png"
+      ? { mimeType: "image/png", data: fixtureImage }
+      : undefined,
+};
+
 const config = loadConfig(
   {
     CHATWCA_HOST: HOST,
@@ -573,6 +589,7 @@ const config = loadConfig(
 server = createChatWcaServer(config, "browser-fixture", {
   registry,
   history,
+  images,
   workspaces,
   onInternalError(error) {
     if (error !== null && error !== undefined) {

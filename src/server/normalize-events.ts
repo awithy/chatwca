@@ -29,6 +29,8 @@ export interface PiEventNormalizerOptions {
   readonly onMessagePersisted?: (message: unknown) => void;
   /** Called when Pi metadata changed but has no delta event in the wire protocol. */
   readonly onMetadataChanged?: () => void;
+  /** Build a same-origin URL for an image retained in a tool-result entry. */
+  readonly toolImageUrl?: (entryId: string, imageIndex: number) => string;
 }
 
 type UnknownRecord = Record<string, unknown>;
@@ -111,6 +113,9 @@ export class PiEventNormalizer {
   readonly #streamIds = new WeakMap<object, string>();
   readonly #streamIdsByKey = new Map<string, string>();
   readonly #sessionId: string;
+  readonly #toolImageUrl:
+    | ((entryId: string, imageIndex: number) => string)
+    | undefined;
   #nextStreamId = 0;
   #lastAssistantEntryId: string | undefined;
   #active = true;
@@ -121,6 +126,7 @@ export class PiEventNormalizer {
     this.#emit = options.emit;
     this.#onMessagePersisted = options.onMessagePersisted ?? (() => undefined);
     this.#onMetadataChanged = options.onMetadataChanged ?? (() => undefined);
+    this.#toolImageUrl = options.toolImageUrl;
   }
 
   dispose(): void {
@@ -145,7 +151,11 @@ export class PiEventNormalizer {
         return;
       case "message_start": {
         const entryId = this.#streamId(event.message);
-        const message = serializeLiveMessage(event.message, entryId);
+        const message = serializeLiveMessage(event.message, entryId, {
+          ...(this.#toolImageUrl === undefined
+            ? {}
+            : { toolImageUrl: this.#toolImageUrl }),
+        });
         if (message !== undefined) {
           this.#emit({ type: "message.started", payload: { message } });
         }
@@ -172,7 +182,11 @@ export class PiEventNormalizer {
         queueMicrotask(() => {
           if (!this.#active) return;
           const entryId = persistedEntryId(this.#getSession(), event.message) ?? streamId;
-          const message = serializeLiveMessage(event.message, entryId);
+          const message = serializeLiveMessage(event.message, entryId, {
+            ...(this.#toolImageUrl === undefined
+              ? {}
+              : { toolImageUrl: this.#toolImageUrl }),
+          });
           if (message !== undefined) {
             if (message.role === "assistant" && record(event.message)?.role === "assistant") {
               this.#lastAssistantEntryId = entryId;

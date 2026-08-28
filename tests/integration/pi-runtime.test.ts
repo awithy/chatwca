@@ -12,8 +12,9 @@ import {
   ModelRuntime,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { ConversationRegistry } from "../../src/server/conversation-registry.js";
 import {
   PiRuntimeFactory,
   type PiConversationRuntime,
@@ -103,6 +104,54 @@ describe("PiRuntimeFactory", () => {
       ).toHaveLength(2);
     } finally {
       await runtime?.dispose();
+      await reopened?.dispose();
+    }
+  });
+
+  it("validates image prompts and persists Pi image content for reopening", async () => {
+    const { cwd, factory, faux } = await isolatedFactory();
+    faux.setResponses([fauxAssistantMessage("I received the image")]);
+    const registry = new ConversationRegistry({
+      runtimeFactory: factory,
+      imageLimits: {
+        maxImages: 1,
+        maxImageBytes: 32,
+        maxTotalImageBytes: 32,
+      },
+    });
+    let reopened: PiConversationRuntime | undefined;
+
+    try {
+      const record = await registry.create(cwd);
+      const identity = record.runtime.identity;
+      const data = Buffer.from([
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+      ]).toString("base64");
+      await registry.prompt(record.id, "Describe this image", [
+        { mimeType: "image/png", encoding: "base64", data },
+      ]);
+      await vi.waitFor(() => {
+        expect(record.status).toBe("idle");
+        expect(record.durable).toBe(true);
+      });
+
+      await registry.dispose();
+      reopened = await factory.openPersistent(identity.sessionFile);
+      const userEntry = reopened.session.sessionManager
+        .getBranch()
+        .find(
+          (entry) => entry.type === "message" && entry.message.role === "user",
+        );
+      expect(userEntry).toMatchObject({
+        message: {
+          content: [
+            { type: "text", text: "Describe this image" },
+            { type: "image", mimeType: "image/png", data },
+          ],
+        },
+      });
+    } finally {
+      await registry.dispose();
       await reopened?.dispose();
     }
   });

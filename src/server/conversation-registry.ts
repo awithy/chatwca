@@ -8,7 +8,12 @@ import type {
 
 import { AppError, ERROR_CODES, toAppError } from "../shared/errors.js";
 import { nextRevision } from "../shared/revisions.js";
-import { DEFAULT_MAX_LIVE_CONVERSATIONS } from "./config.js";
+import {
+  DEFAULT_MAX_IMAGE_BYTES,
+  DEFAULT_MAX_IMAGES,
+  DEFAULT_MAX_LIVE_CONVERSATIONS,
+  DEFAULT_MAX_TOTAL_IMAGE_BYTES,
+} from "./config.js";
 import type {
   ConversationEvent,
   ConversationState,
@@ -21,6 +26,10 @@ import {
   PiEventNormalizer,
   type NormalizedPiEvent,
 } from "./normalize-events.js";
+import {
+  validatePromptImages,
+  type ImageValidationLimits,
+} from "./images.js";
 import { serializeActiveBranch } from "./serialize.js";
 import type {
   PiConversationRuntimePort,
@@ -87,6 +96,8 @@ export interface ConversationRegistryOptions {
   readonly now?: () => number;
   /** Maximum number of runtime records owned at once. */
   readonly maxLiveConversations?: number;
+  /** Authoritative decoded image limits applied before prompts reach Pi. */
+  readonly imageLimits?: Readonly<ImageValidationLimits>;
   /** Registry observers are isolated from Pi callbacks; failures are reported here. */
   readonly onListenerError?: (error: unknown) => void;
   /** Refreshes the Pi-native history projection after lifecycle changes. */
@@ -207,6 +218,7 @@ export class ConversationRegistry {
   readonly #runtimeFactory: PiRuntimeFactoryPort;
   readonly #now: () => number;
   readonly #maxLiveConversations: number;
+  readonly #imageLimits: Readonly<ImageValidationLimits>;
   readonly #onListenerError: (error: unknown) => void;
   readonly #refreshHistoryCallback: () => void | Promise<void>;
   readonly #byId = new Map<string, ConversationRecord>();
@@ -235,6 +247,11 @@ export class ConversationRegistry {
     ) {
       throw new RangeError("maxLiveConversations must be a positive integer");
     }
+    this.#imageLimits = options.imageLimits ?? {
+      maxImages: DEFAULT_MAX_IMAGES,
+      maxImageBytes: DEFAULT_MAX_IMAGE_BYTES,
+      maxTotalImageBytes: DEFAULT_MAX_TOTAL_IMAGE_BYTES,
+    };
     this.#onListenerError = options.onListenerError ?? (() => undefined);
     this.#refreshHistoryCallback = options.refreshHistory ?? (() => undefined);
   }
@@ -353,13 +370,7 @@ export class ConversationRegistry {
     };
   }
 
-  /**
-   * Deliver a text prompt using Pi's explicit streaming behavior.
-   *
-   * Image payload validation/conversion belongs to the image boundary added in
-   * milestone 8; until then, image-bearing commands fail closed instead of
-   * forwarding unverified base64 to Pi.
-   */
+  /** Deliver a validated text/image prompt using Pi's explicit streaming behavior. */
   async prompt(
     conversationId: string,
     text: string,
@@ -379,13 +390,10 @@ export class ConversationRegistry {
     if (!text.trim() && images.length === 0) {
       throw new AppError(ERROR_CODES.INVALID_PROMPT);
     }
-    if (images.length > 0) {
-      throw new AppError(
-        record.runtime.supportsImages
-          ? ERROR_CODES.INVALID_IMAGE
-          : ERROR_CODES.IMAGE_NOT_SUPPORTED,
-      );
-    }
+    const piImages = validatePromptImages(images, {
+      supportsImages: record.runtime.supportsImages,
+      limits: this.#imageLimits,
+    });
 
     this.#touch(record);
 
@@ -396,6 +404,7 @@ export class ConversationRegistry {
       let accepted = false;
       let settled = false;
       const options: PromptOptions = {
+        ...(piImages.length === 0 ? {} : { images: piImages }),
         ...(streamingBehavior === undefined ? {} : { streamingBehavior }),
         preflightResult: (success) => {
           if (!success || settled) return;

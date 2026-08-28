@@ -399,6 +399,8 @@ In the composer:
 
 ### T8.2 Validate images on the server
 
+**Status:** Complete — strict encoded prechecks, MIME signature validation, configured decoded-byte/count limits, Pi conversion, capability rejection, and focused server coverage are implemented in [`src/server/images.ts`](src/server/images.ts).
+
 In `src/server/images.ts`:
 
 - Validate the data URL/base64 shape and declared MIME type.

@@ -151,6 +151,11 @@ async function main(): Promise<void> {
     registry = new ConversationRegistry({
       runtimeFactory,
       maxLiveConversations: config.maxLiveConversations,
+      imageLimits: {
+        maxImages: config.maxImages,
+        maxImageBytes: config.maxImageBytes,
+        maxTotalImageBytes: config.maxTotalImageBytes,
+      },
       refreshHistory: async () => {
         await history.refresh();
       },

@@ -297,6 +297,73 @@ describe("ConversationRegistry", () => {
     finishRun?.();
   });
 
+  it("validates and converts images before forwarding them to Pi", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessionFile = path.join(root, "sessions", "images.jsonl");
+    await Promise.all([mkdir(cwd), mkdir(path.dirname(sessionFile))]);
+
+    const runtime = new FakeRuntime(identity("images", sessionFile, cwd));
+    Object.defineProperty(runtime, "supportsImages", { value: true });
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(runtime);
+    const registry = new ConversationRegistry({
+      runtimeFactory: factory,
+      imageLimits: {
+        maxImages: 1,
+        maxImageBytes: 16,
+        maxTotalImageBytes: 16,
+      },
+    });
+    const record = await registry.create(cwd);
+    const data = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    ]).toString("base64");
+
+    await expect(
+      registry.prompt(record.id, "describe", [
+        {
+          mimeType: "image/png",
+          encoding: "base64",
+          data,
+          name: "browser-name.png",
+          byteSize: 1,
+        },
+      ]),
+    ).resolves.toBeUndefined();
+    expect(runtime.promptSpy).toHaveBeenCalledWith(
+      "describe",
+      expect.objectContaining({
+        images: [{ type: "image", mimeType: "image/png", data }],
+        preflightResult: expect.any(Function),
+      }),
+    );
+  });
+
+  it("rejects image prompts for a text-only model with a stable error", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessionFile = path.join(root, "sessions", "text-only.jsonl");
+    await Promise.all([mkdir(cwd), mkdir(path.dirname(sessionFile))]);
+
+    const runtime = new FakeRuntime(identity("text-only", sessionFile, cwd));
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(runtime);
+    const registry = new ConversationRegistry({ runtimeFactory: factory });
+    const record = await registry.create(cwd);
+
+    await expect(
+      registry.prompt(record.id, "describe", [
+        {
+          mimeType: "image/jpeg",
+          encoding: "base64",
+          data: "/9j/4A==",
+        },
+      ]),
+    ).rejects.toMatchObject({ code: ERROR_CODES.IMAGE_NOT_SUPPORTED });
+    expect(runtime.promptSpy).not.toHaveBeenCalled();
+  });
+
   it("fails rejected prompt preflight but reports post-acceptance runtime failure as an event", async () => {
     const root = await temporaryRoot();
     const cwd = path.join(root, "workspace");

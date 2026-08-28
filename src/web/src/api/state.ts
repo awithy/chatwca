@@ -6,6 +6,7 @@ import type {
   StatusNotice,
   ToolCallBlock,
   ToolResultBlock,
+  WorkspaceSummary,
 } from "../../../shared/protocol.js";
 import {
   decideEventRevision,
@@ -23,6 +24,10 @@ export interface ClientErrorState {
   readonly message: string;
 }
 
+export interface WorkspaceClientErrorState extends ClientErrorState {
+  readonly workspaceId: string;
+}
+
 export interface ConversationProjection {
   readonly conversation: ConversationState;
   readonly notices: readonly StatusNotice[];
@@ -31,7 +36,16 @@ export interface ConversationProjection {
 export interface ChatClientState {
   readonly connection: ConnectionStatus;
   readonly serverVersion: string | null;
+  /** The latest authoritative SQLite-backed workspace list. */
+  readonly workspaces: readonly WorkspaceSummary[];
+  /** Browser-local, in-memory selection. */
+  readonly selectedWorkspaceId: string | null;
+  /** Identifies the workspace which produced the current history projection. */
+  readonly historyWorkspaceId: string | null;
   readonly history: readonly ConversationSummary[];
+  readonly pendingHistoryWorkspaceId: string | null;
+  readonly historyError: WorkspaceClientErrorState | null;
+  /** Live projections are retained for selected and background workspaces. */
   readonly conversations: Readonly<Record<string, ConversationProjection>>;
   readonly selectedConversationId: string | null;
   readonly drafts: Readonly<Record<string, string>>;
@@ -42,18 +56,34 @@ export interface ChatClientState {
 export type ChatClientAction =
   | { readonly type: "connection"; readonly status: ConnectionStatus }
   | { readonly type: "ready"; readonly serverVersion: string }
-  | { readonly type: "history"; readonly conversations: readonly ConversationSummary[] }
+  | { readonly type: "workspaces"; readonly workspaces: readonly WorkspaceSummary[] }
+  | { readonly type: "workspace.select"; readonly workspaceId: string | null }
+  | { readonly type: "history.pending"; readonly workspaceId: string }
+  | { readonly type: "history.failed"; readonly error: WorkspaceClientErrorState }
+  | {
+      readonly type: "history";
+      readonly workspaceId: string;
+      readonly conversations: readonly ConversationSummary[];
+    }
   | { readonly type: "snapshot"; readonly conversation: ConversationState }
   | { readonly type: "event"; readonly event: ConversationEvent }
   | { readonly type: "select"; readonly conversationId: string | null }
+  | { readonly type: "conversation.closed"; readonly conversationId: string }
+  | { readonly type: "conversation.deleted"; readonly conversationId: string }
   | { readonly type: "draft"; readonly conversationId: string; readonly text: string }
+  | { readonly type: "draft.delete"; readonly conversationId: string }
   | { readonly type: "error"; readonly error: ClientErrorState | null };
 
 export function createInitialChatClientState(): ChatClientState {
   return {
     connection: "disconnected",
     serverVersion: null,
+    workspaces: [],
+    selectedWorkspaceId: null,
+    historyWorkspaceId: null,
     history: [],
+    pendingHistoryWorkspaceId: null,
+    historyError: null,
     conversations: {},
     selectedConversationId: null,
     drafts: {},
@@ -287,26 +317,93 @@ export function reduceChatClientState(
         serverVersion: action.serverVersion,
         lastError: null,
       };
+    case "workspaces": {
+      const selectedStillExists = state.selectedWorkspaceId === null ||
+        action.workspaces.some((workspace) => workspace.id === state.selectedWorkspaceId);
+      if (!selectedStillExists) {
+        return {
+          ...state,
+          workspaces: [...action.workspaces],
+          selectedWorkspaceId: null,
+          selectedConversationId: null,
+          historyWorkspaceId: null,
+          history: [],
+          pendingHistoryWorkspaceId: null,
+          historyError: null,
+          lastError: state.lastError === state.historyError ? null : state.lastError,
+        };
+      }
+      return { ...state, workspaces: [...action.workspaces] };
+    }
+    case "workspace.select":
+      if (action.workspaceId === state.selectedWorkspaceId) return state;
+      return {
+        ...state,
+        selectedWorkspaceId: action.workspaceId,
+        selectedConversationId: null,
+        historyWorkspaceId: null,
+        history: [],
+        pendingHistoryWorkspaceId: null,
+        historyError: null,
+        lastError: null,
+      };
+    case "history.pending":
+      if (action.workspaceId !== state.selectedWorkspaceId) return state;
+      return {
+        ...state,
+        pendingHistoryWorkspaceId: action.workspaceId,
+        historyError: null,
+        lastError: state.lastError === state.historyError ? null : state.lastError,
+      };
+    case "history.failed":
+      if (action.error.workspaceId !== state.selectedWorkspaceId) return state;
+      return {
+        ...state,
+        pendingHistoryWorkspaceId: null,
+        historyError: action.error,
+        lastError: action.error,
+      };
     case "history": {
-      const live = new Set(
+      if (
+        action.workspaceId !== state.selectedWorkspaceId ||
+        action.conversations.some((item) => item.workspaceId !== action.workspaceId)
+      ) {
+        return state;
+      }
+
+      const closed = new Set(
         action.conversations
-          .filter((item) => item.status !== "closed")
+          .filter((item) => item.status === "closed")
           .map((item) => item.id),
       );
-      // A close acknowledgement has no conversation event. History is the
-      // authoritative lifecycle projection, so discard stale live snapshots
-      // when a listed session becomes closed (as well as when it is deleted).
-      // Selecting that row will then follow the normal open + fresh snapshot path.
+      // History is authoritative for the selected workspace's persisted
+      // lifecycle, but it says nothing about other workspaces or a new live
+      // session which is not durable yet. Only listed closed snapshots are
+      // discarded here; explicit delete acknowledgements handle deletions.
       const conversations = Object.fromEntries(
-        Object.entries(state.conversations).filter(([id]) => live.has(id)),
+        Object.entries(state.conversations).filter(([id, projection]) =>
+          projection.conversation.workspaceId !== action.workspaceId || !closed.has(id)
+        ),
       );
-      return { ...state, history: [...action.conversations], conversations };
+      return {
+        ...state,
+        historyWorkspaceId: action.workspaceId,
+        history: [...action.conversations],
+        pendingHistoryWorkspaceId: null,
+        historyError: null,
+        lastError: state.lastError === state.historyError ? null : state.lastError,
+        conversations,
+        resyncConversationIds: state.resyncConversationIds.filter(
+          (id) => !closed.has(id),
+        ),
+      };
     }
     case "snapshot": {
       const current = state.conversations[action.conversation.id];
       if (
+        current?.conversation.workspaceId === action.conversation.workspaceId &&
         decideSnapshotRevision(
-          current?.conversation.revision,
+          current.conversation.revision,
           action.conversation.revision,
         ) === "ignore"
       ) {
@@ -314,12 +411,19 @@ export function reduceChatClientState(
       }
       return replaceConversation(state, {
         conversation: action.conversation,
-        notices: current?.notices ?? [],
+        notices: current?.conversation.workspaceId === action.conversation.workspaceId
+          ? current.notices
+          : [],
       });
     }
     case "event": {
       const current = state.conversations[action.event.conversationId];
-      if (current === undefined) return requestResync(state, action.event.conversationId);
+      if (
+        current === undefined ||
+        current.conversation.workspaceId !== action.event.workspaceId
+      ) {
+        return requestResync(state, action.event.conversationId);
+      }
       const decision = decideEventRevision(
         current.conversation.revision,
         action.event.revision,
@@ -337,11 +441,43 @@ export function reduceChatClientState(
     }
     case "select":
       return { ...state, selectedConversationId: action.conversationId };
+    case "conversation.closed": {
+      if (state.conversations[action.conversationId] === undefined) return state;
+      const { [action.conversationId]: _closed, ...conversations } = state.conversations;
+      return {
+        ...state,
+        conversations,
+        resyncConversationIds: state.resyncConversationIds.filter(
+          (id) => id !== action.conversationId,
+        ),
+      };
+    }
+    case "conversation.deleted": {
+      const { [action.conversationId]: _deleted, ...conversations } = state.conversations;
+      const { [action.conversationId]: _draft, ...drafts } = state.drafts;
+      return {
+        ...state,
+        conversations,
+        drafts,
+        history: state.history.filter((item) => item.id !== action.conversationId),
+        selectedConversationId: state.selectedConversationId === action.conversationId
+          ? null
+          : state.selectedConversationId,
+        resyncConversationIds: state.resyncConversationIds.filter(
+          (id) => id !== action.conversationId,
+        ),
+      };
+    }
     case "draft":
       return {
         ...state,
         drafts: { ...state.drafts, [action.conversationId]: action.text },
       };
+    case "draft.delete": {
+      if (!(action.conversationId in state.drafts)) return state;
+      const { [action.conversationId]: _draft, ...drafts } = state.drafts;
+      return { ...state, drafts };
+    }
     case "error":
       return { ...state, lastError: action.error };
   }

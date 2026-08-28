@@ -528,7 +528,7 @@ describe("complete conversation lifecycle integration", () => {
     await vi.waitFor(() => {
       expect(client.getState().connection).toBe("connected");
     });
-    await client.send({ type: "history.list", workspaceId: record.workspaceId });
+    await client.selectWorkspace(record.workspaceId);
     expect(client.getState().history.some(({ id }) => id === record.id)).toBe(true);
     await client.send({
       type: "conversation.state",

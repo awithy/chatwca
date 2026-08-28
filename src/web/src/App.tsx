@@ -231,7 +231,7 @@ export function App() {
         workspaceId: selectedSummary.workspaceId,
         conversationId: selectedSummary.id,
       });
-      client.setDraft(selectedSummary.id, "");
+      client.clearDraft(selectedSummary.id);
       client.selectConversation(null);
     } catch (error) {
       setConversationError(errorMessage(error, "Unable to delete the conversation."));

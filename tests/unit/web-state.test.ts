@@ -12,6 +12,7 @@ import {
 function conversation(revision = 0): ConversationState {
   return {
     id: "conversation-1",
+    workspaceId: "workspace-1",
     sessionFile: "/sessions/one.jsonl",
     title: "One",
     cwd: "/workspace",
@@ -45,6 +46,7 @@ describe("web chat state", () => {
     });
     const delta = event({
       type: "message.delta",
+      workspaceId: "workspace-1",
       conversationId: "conversation-1",
       revision: 4,
       payload: {
@@ -68,6 +70,7 @@ describe("web chat state", () => {
       type: "event",
       event: {
         type: "conversation.status",
+        workspaceId: "workspace-1",
         conversationId: "conversation-1",
         revision: 6,
         payload: { status: "streaming" },
@@ -85,6 +88,7 @@ describe("web chat state", () => {
     const events: ConversationEvent[] = [
       {
         type: "message.started",
+        workspaceId: "workspace-1",
         conversationId: "conversation-1",
         revision: 1,
         payload: {
@@ -97,6 +101,7 @@ describe("web chat state", () => {
       },
       {
         type: "message.completed",
+        workspaceId: "workspace-1",
         conversationId: "conversation-1",
         revision: 2,
         payload: {
@@ -109,6 +114,7 @@ describe("web chat state", () => {
       },
       {
         type: "tool.started",
+        workspaceId: "workspace-1",
         conversationId: "conversation-1",
         revision: 3,
         payload: {
@@ -124,12 +130,14 @@ describe("web chat state", () => {
       },
       {
         type: "tool.updated",
+        workspaceId: "workspace-1",
         conversationId: "conversation-1",
         revision: 4,
         payload: { toolCallId: "call-1", content: "/work", truncated: false },
       },
       {
         type: "tool.completed",
+        workspaceId: "workspace-1",
         conversationId: "conversation-1",
         revision: 5,
         payload: {
@@ -145,6 +153,7 @@ describe("web chat state", () => {
       },
       {
         type: "conversation.queue",
+        workspaceId: "workspace-1",
         conversationId: "conversation-1",
         revision: 6,
         payload: {
@@ -154,6 +163,7 @@ describe("web chat state", () => {
       },
       {
         type: "conversation.notice",
+        workspaceId: "workspace-1",
         conversationId: "conversation-1",
         revision: 7,
         payload: {
@@ -162,6 +172,7 @@ describe("web chat state", () => {
       },
       {
         type: "conversation.status",
+        workspaceId: "workspace-1",
         conversationId: "conversation-1",
         revision: 8,
         payload: { status: "streaming" },
@@ -203,6 +214,7 @@ describe("web chat state", () => {
     const events: ConversationEvent[] = [
       {
         type: "message.delta",
+        workspaceId: "workspace-1",
         conversationId: "conversation-1",
         revision: 1,
         payload: {
@@ -214,6 +226,7 @@ describe("web chat state", () => {
       },
       {
         type: "tool.started",
+        workspaceId: "workspace-1",
         conversationId: "conversation-1",
         revision: 2,
         payload: {
@@ -229,6 +242,7 @@ describe("web chat state", () => {
       },
       {
         type: "tool.updated",
+        workspaceId: "workspace-1",
         conversationId: "conversation-1",
         revision: 3,
         payload: {
@@ -239,6 +253,7 @@ describe("web chat state", () => {
       },
       {
         type: "tool.completed",
+        workspaceId: "workspace-1",
         conversationId: "conversation-1",
         revision: 4,
         payload: {
@@ -282,9 +297,15 @@ describe("web chat state", () => {
     });
 
     state = reduceChatClientState(state, {
+      type: "workspace.select",
+      workspaceId: "workspace-1",
+    });
+    state = reduceChatClientState(state, {
       type: "history",
+      workspaceId: "workspace-1",
       conversations: [{
         id: "conversation-1",
+        workspaceId: "workspace-1",
         sessionFile: "/sessions/one.jsonl",
         title: "One",
         cwd: "/workspace",
@@ -320,6 +341,121 @@ describe("web chat state", () => {
     expect(state.drafts).toEqual({
       "conversation-1": "unfinished",
       "conversation-2": "other",
+    });
+  });
+
+  it("scopes history to the selected workspace and rejects stale responses", () => {
+    let state = createInitialChatClientState();
+    state = reduceChatClientState(state, {
+      type: "workspaces",
+      workspaces: [
+        { id: "workspace-1", name: "One", path: "/one", createdAt: 1, updatedAt: 1, available: true },
+        { id: "workspace-2", name: "Two", path: "/two", createdAt: 2, updatedAt: 2, available: true },
+      ],
+    });
+    expect(state.history).toEqual([]);
+    expect(state.selectedWorkspaceId).toBeNull();
+
+    state = reduceChatClientState(state, {
+      type: "workspace.select",
+      workspaceId: "workspace-1",
+    });
+    state = reduceChatClientState(state, {
+      type: "workspace.select",
+      workspaceId: "workspace-2",
+    });
+    const stale = reduceChatClientState(state, {
+      type: "history",
+      workspaceId: "workspace-1",
+      conversations: [],
+    });
+    expect(stale).toBe(state);
+
+    state = reduceChatClientState(state, {
+      type: "history",
+      workspaceId: "workspace-2",
+      conversations: [],
+    });
+    expect(state.historyWorkspaceId).toBe("workspace-2");
+  });
+
+  it("preserves background projections and drafts across workspace switches", () => {
+    let state = reduceChatClientState(createInitialChatClientState(), {
+      type: "snapshot",
+      conversation: conversation(2),
+    });
+    state = reduceChatClientState(state, {
+      type: "snapshot",
+      conversation: {
+        ...conversation(5),
+        id: "conversation-2",
+        workspaceId: "workspace-2",
+        sessionFile: "/sessions/two.jsonl",
+      },
+    });
+    state = reduceChatClientState(state, {
+      type: "draft",
+      conversationId: "conversation-1",
+      text: "background draft",
+    });
+    state = reduceChatClientState(state, {
+      type: "workspace.select",
+      workspaceId: "workspace-2",
+    });
+    state = reduceChatClientState(state, {
+      type: "history",
+      workspaceId: "workspace-2",
+      conversations: [],
+    });
+    state = reduceChatClientState(state, {
+      type: "event",
+      event: {
+        type: "conversation.status",
+        workspaceId: "workspace-1",
+        conversationId: "conversation-1",
+        revision: 3,
+        payload: { status: "streaming" },
+      },
+    });
+
+    expect(state.conversations["conversation-1"]?.conversation.status).toBe("streaming");
+    expect(state.conversations["conversation-2"]).toBeDefined();
+    expect(state.drafts["conversation-1"]).toBe("background draft");
+  });
+
+  it("clears removed selection and explicitly deleted conversation drafts", () => {
+    let state = reduceChatClientState(createInitialChatClientState(), {
+      type: "workspaces",
+      workspaces: [{
+        id: "workspace-1",
+        name: "One",
+        path: "/one",
+        createdAt: 1,
+        updatedAt: 1,
+        available: true,
+      }],
+    });
+    state = reduceChatClientState(state, {
+      type: "workspace.select",
+      workspaceId: "workspace-1",
+    });
+    state = reduceChatClientState(state, {
+      type: "draft",
+      conversationId: "conversation-1",
+      text: "draft",
+    });
+    state = reduceChatClientState(state, {
+      type: "conversation.deleted",
+      conversationId: "conversation-1",
+    });
+    expect(state.drafts["conversation-1"]).toBeUndefined();
+
+    state = reduceChatClientState(state, { type: "workspaces", workspaces: [] });
+    expect(state).toMatchObject({
+      selectedWorkspaceId: null,
+      selectedConversationId: null,
+      historyWorkspaceId: null,
+      history: [],
     });
   });
 });

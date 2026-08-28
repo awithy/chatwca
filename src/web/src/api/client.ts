@@ -29,7 +29,7 @@ export type ClientCommandInput<T extends ClientCommandType> =
     : never;
 
 interface PendingCommand {
-  readonly commandType: ClientCommandType;
+  readonly command: ClientCommand;
   readonly resolve: (message: CommandSuccessByType[ClientCommandType]) => void;
   readonly reject: (error: unknown) => void;
   readonly timer: ReturnType<typeof setTimeout>;
@@ -70,21 +70,32 @@ function isConversationEvent(message: ServerMessage): message is ConversationEve
 }
 
 function isExpectedResponse(
-  commandType: ClientCommandType,
+  command: ClientCommand,
   message: ServerMessage,
 ): message is CommandSuccessByType[ClientCommandType] {
-  switch (commandType) {
+  switch (command.type) {
     case "workspace.list":
     case "workspace.create":
     case "workspace.update":
       return message.type === "workspaces";
     case "history.list":
-      return message.type === "history";
+      return message.type === "history" &&
+        message.workspaceId === command.workspaceId &&
+        message.conversations.every(
+          (conversation) => conversation.workspaceId === command.workspaceId,
+        );
     case "conversation.create":
+      return message.type === "state" &&
+        message.conversation.workspaceId === command.workspaceId;
     case "conversation.open":
+      return message.type === "state" &&
+        message.conversation.workspaceId === command.workspaceId &&
+        message.conversation.id === command.conversationId;
     case "conversation.state":
+      return message.type === "state" &&
+        message.conversation.id === command.conversationId;
     case "conversation.fork":
-      return message.type === "state";
+      return message.type === "state" && message.editorText !== undefined;
     case "workspace.delete":
     case "conversation.close":
     case "conversation.delete":
@@ -92,7 +103,7 @@ function isExpectedResponse(
     case "prompt.steer":
     case "prompt.followUp":
     case "conversation.abort":
-      return message.type === "ack" && message.command === commandType;
+      return message.type === "ack" && message.command === command.type;
   }
 }
 
@@ -118,6 +129,7 @@ export class ChatSocketClient {
   #requestCounter = 0;
   #stopped = true;
   #generation = 0;
+  #workspaceSelectionRevision = 0;
 
   constructor(options: ChatSocketClientOptions = {}) {
     this.#url = options.url ?? defaultSocketUrl();
@@ -184,14 +196,13 @@ export class ChatSocketClient {
 
     const requestId = this.#requestId();
     const command = { ...(input as object), requestId } as CommandFor<T>;
-    const commandType = (input as { readonly type: ClientCommandType }).type;
     return new Promise<CommandSuccessByType[T]>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#pending.delete(requestId);
         reject(new ChatTransportError("The server command timed out."));
       }, this.#commandTimeoutMs);
       this.#pending.set(requestId, {
-        commandType,
+        command,
         resolve: resolve as PendingCommand["resolve"],
         reject,
         timer,
@@ -206,12 +217,39 @@ export class ChatSocketClient {
     });
   }
 
+  /**
+   * Change the browser-local workspace selection. The selection is immediate;
+   * only a connected, non-null selection causes a scoped Pi history request.
+   */
+  async selectWorkspace(workspaceId: string | null): Promise<void> {
+    this.#workspaceSelectionRevision += 1;
+    const selectionRevision = this.#workspaceSelectionRevision;
+    this.#dispatch({ type: "workspace.select", workspaceId });
+    if (workspaceId === null || this.#state.connection !== "connected") return;
+    await this.#requestHistory(workspaceId, selectionRevision);
+  }
+
   selectConversation(conversationId: string | null): void {
+    if (conversationId !== null) {
+      const summary = this.#state.history.find((item) => item.id === conversationId);
+      const projection = this.#state.conversations[conversationId];
+      const workspaceId = projection?.conversation.workspaceId ?? summary?.workspaceId;
+      if (
+        workspaceId === undefined ||
+        workspaceId !== this.#state.selectedWorkspaceId
+      ) {
+        return;
+      }
+    }
     this.#dispatch({ type: "select", conversationId });
   }
 
   setDraft(conversationId: string, text: string): void {
     this.#dispatch({ type: "draft", conversationId, text });
+  }
+
+  clearDraft(conversationId: string): void {
+    this.#dispatch({ type: "draft.delete", conversationId });
   }
 
   /**
@@ -337,62 +375,157 @@ export class ChatSocketClient {
       return;
     }
 
-    if (message.type === "history") {
-      this.#dispatch({ type: "history", conversations: message.conversations });
+    const requestId = "requestId" in message ? message.requestId : undefined;
+    if (requestId !== undefined) {
+      const pending = this.#pending.get(requestId);
+      if (pending !== undefined) {
+        this.#pending.delete(requestId);
+        clearTimeout(pending.timer);
+        if (message.type === "error") {
+          pending.reject(new ChatCommandError(message));
+          return;
+        }
+        if (!isExpectedResponse(pending.command, message)) {
+          pending.reject(
+            new ChatTransportError("The server response did not match the command."),
+          );
+          return;
+        }
+        this.#projectMessage(message);
+        this.#applyCommandSuccess(pending.command);
+        pending.resolve(message);
+        return;
+      }
+    }
+
+    // Unknown correlated responses are stale and cannot mutate projections.
+    if (requestId !== undefined) return;
+    this.#projectMessage(message);
+  }
+
+  #projectMessage(message: ServerMessage): void {
+    if (message.type === "workspaces") {
+      this.#dispatch({ type: "workspaces", workspaces: message.workspaces });
+    } else if (message.type === "history") {
+      this.#dispatch({
+        type: "history",
+        workspaceId: message.workspaceId,
+        conversations: message.conversations,
+      });
     } else if (message.type === "state") {
       this.#dispatch({ type: "snapshot", conversation: message.conversation });
     } else if (isConversationEvent(message)) {
       this.#dispatch({ type: "event", event: message });
-    } else if (message.type === "error" && message.requestId === undefined) {
+    } else if (message.type === "error") {
       this.#dispatch({
         type: "error",
         error: { code: message.code, message: message.message },
       });
     }
+  }
 
-    if (!("requestId" in message) || message.requestId === undefined) return;
-    const pending = this.#pending.get(message.requestId);
-    if (pending === undefined) return;
-    this.#pending.delete(message.requestId);
-    clearTimeout(pending.timer);
+  #applyCommandSuccess(command: ClientCommand): void {
+    if (command.type === "conversation.close") {
+      this.#dispatch({
+        type: "conversation.closed",
+        conversationId: command.conversationId,
+      });
+    } else if (command.type === "conversation.delete") {
+      this.#dispatch({
+        type: "conversation.deleted",
+        conversationId: command.conversationId,
+      });
+    }
+  }
 
-    if (message.type === "error") {
-      pending.reject(new ChatCommandError(message));
-    } else if (isExpectedResponse(pending.commandType, message)) {
-      pending.resolve(message);
-    } else {
-      pending.reject(new ChatTransportError("The server response did not match the command."));
+  async #requestHistory(
+    workspaceId: string,
+    selectionRevision: number,
+  ): Promise<void> {
+    if (
+      selectionRevision !== this.#workspaceSelectionRevision ||
+      workspaceId !== this.#state.selectedWorkspaceId ||
+      this.#state.connection !== "connected"
+    ) return;
+
+    this.#dispatch({ type: "history.pending", workspaceId });
+    try {
+      await this.send({ type: "history.list", workspaceId });
+    } catch (error) {
+      if (
+        selectionRevision === this.#workspaceSelectionRevision &&
+        workspaceId === this.#state.selectedWorkspaceId
+      ) {
+        this.#dispatch({
+          type: "history.failed",
+          error: {
+            workspaceId,
+            code: error instanceof ChatCommandError ? error.code : "transport_error",
+            message: error instanceof Error
+              ? error.message
+              : "Unable to load workspace history.",
+          },
+        });
+      }
+      throw error;
     }
   }
 
   async #recover(generation: number): Promise<void> {
     if (generation !== this.#generation || this.#state.connection !== "connected") return;
+    const selectionRevision = this.#workspaceSelectionRevision;
+    const selectedWorkspaceId = this.#state.selectedWorkspaceId;
+    const selectedConversationId = this.#state.selectedConversationId;
     try {
-      // Workspace selection/reconnect recovery is introduced in Phase 7. A
-      // connection now lists only SQLite workspace rows and never scans Pi history.
+      // A full page load starts with no selection, so this is the only initial
+      // command. Reconnect retains browser memory and restores only that scope.
       await this.send({ type: "workspace.list" });
-      const selected = this.#state.selectedConversationId;
-      const summary = selected === null
-        ? undefined
-        : this.#state.history.find((item) => item.id === selected);
       if (
-        selected !== null &&
-        summary !== undefined &&
-        generation === this.#generation &&
-        this.#state.connection === "connected"
-      ) {
-        if (summary.status === "closed") {
-          await this.send({
-            type: "conversation.open",
-            workspaceId: summary.workspaceId,
-            conversationId: selected,
-          });
-        } else {
-          await this.send({ type: "conversation.state", conversationId: selected });
-        }
+        generation !== this.#generation ||
+        selectionRevision !== this.#workspaceSelectionRevision ||
+        this.#state.connection !== "connected" ||
+        selectedWorkspaceId === null ||
+        this.#state.selectedWorkspaceId !== selectedWorkspaceId
+      ) return;
+
+      await this.#requestHistory(selectedWorkspaceId, selectionRevision);
+      if (
+        generation !== this.#generation ||
+        selectionRevision !== this.#workspaceSelectionRevision ||
+        this.#state.connection !== "connected" ||
+        selectedConversationId === null ||
+        this.#state.selectedConversationId !== selectedConversationId
+      ) return;
+
+      const summary = this.#state.historyWorkspaceId === selectedWorkspaceId
+        ? this.#state.history.find((item) => item.id === selectedConversationId)
+        : undefined;
+      const projection = this.#state.conversations[selectedConversationId];
+      const conversationWorkspaceId = projection?.conversation.workspaceId ??
+        summary?.workspaceId;
+      if (conversationWorkspaceId !== selectedWorkspaceId) {
+        this.#dispatch({ type: "select", conversationId: null });
+        return;
+      }
+
+      if (summary?.status === "closed") {
+        await this.send({
+          type: "conversation.open",
+          workspaceId: selectedWorkspaceId,
+          conversationId: selectedConversationId,
+        });
+      } else {
+        await this.send({
+          type: "conversation.state",
+          conversationId: selectedConversationId,
+        });
       }
     } catch (error) {
-      if (generation === this.#generation && !this.#stopped) {
+      if (
+        generation === this.#generation &&
+        !this.#stopped &&
+        !(error instanceof ChatCommandError && selectedWorkspaceId !== null)
+      ) {
         this.#setTransportError(error);
       }
     }

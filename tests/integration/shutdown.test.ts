@@ -117,7 +117,7 @@ describe("server graceful shutdown", () => {
     };
     const config = loadConfig(
       {
-        CHATWCA_DEFAULT_CWD: "/tmp",
+        CHATWCA_DATA_DIR: "/tmp",
         CHATWCA_SHUTDOWN_GRACE_MS: "500",
       },
       "/tmp",

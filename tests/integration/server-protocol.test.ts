@@ -139,7 +139,7 @@ describe("WebSocket command server", () => {
       resolve: vi.fn(async () => ({ summary })),
       delete: vi.fn(async () => []),
     };
-    const config = loadConfig({ CHATWCA_DEFAULT_CWD: "/tmp" }, "/tmp");
+    const config = loadConfig({ CHATWCA_DATA_DIR: "/tmp" }, "/tmp");
     const server = createChatWcaServer(config, "reconnect-test", {
       registry,
       history,
@@ -246,7 +246,7 @@ describe("WebSocket command server", () => {
       resolve: vi.fn(async () => ({ summary })),
       delete: vi.fn(async () => [summary]),
     };
-    const config = loadConfig({ CHATWCA_DEFAULT_CWD: "/tmp" }, "/tmp");
+    const config = loadConfig({ CHATWCA_DATA_DIR: "/tmp" }, "/tmp");
     const server = createChatWcaServer(config, "protocol-test", {
       registry,
       history,
@@ -335,7 +335,7 @@ describe("WebSocket command server", () => {
       resolve: vi.fn(async () => ({ summary })),
       delete: vi.fn(async () => []),
     };
-    const config = loadConfig({ CHATWCA_DEFAULT_CWD: "/tmp" }, "/tmp");
+    const config = loadConfig({ CHATWCA_DATA_DIR: "/tmp" }, "/tmp");
     const server = createChatWcaServer(config, "payload-limit-test", {
       registry,
       history,

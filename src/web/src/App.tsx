@@ -14,7 +14,6 @@ interface HealthResponse {
 }
 
 interface BrowserConfig {
-  readonly defaultCwd: string;
   readonly maxImages: number;
   readonly maxImageBytes: number;
   readonly maxTotalImageBytes: number;
@@ -243,7 +242,6 @@ export function App() {
         conversations={chat.history}
         liveStatuses={liveStatuses}
         selectedConversationId={chat.selectedConversationId}
-        defaultCwd={server.config?.defaultCwd ?? ""}
         connected={connected}
         open={sidebarOpen}
         onDismiss={() => setSidebarOpen(false)}

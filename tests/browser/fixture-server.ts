@@ -456,7 +456,7 @@ const config = loadConfig(
   {
     CHATWCA_HOST: HOST,
     CHATWCA_PORT: String(PORT),
-    CHATWCA_DEFAULT_CWD: CWD,
+    CHATWCA_DATA_DIR: CWD,
     CHATWCA_MAX_IMAGES: String(IMAGE_LIMITS.maxImages),
     CHATWCA_MAX_IMAGE_BYTES: String(IMAGE_LIMITS.maxImageBytes),
     CHATWCA_MAX_TOTAL_IMAGE_BYTES: String(IMAGE_LIMITS.maxTotalImageBytes),

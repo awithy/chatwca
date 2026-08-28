@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useMemo, useState, type FormEvent } from "react";
 
 import type {
   ConversationSummary,
@@ -15,7 +15,6 @@ export interface ConversationSidebarProps {
   readonly conversations: readonly ConversationSummary[];
   readonly liveStatuses: Readonly<Record<string, LiveConversationStatus>>;
   readonly selectedConversationId: string | null;
-  readonly defaultCwd: string;
   readonly connected: boolean;
   readonly open: boolean;
   readonly onDismiss: () => void;
@@ -51,7 +50,6 @@ export function ConversationSidebar({
   conversations,
   liveStatuses,
   selectedConversationId,
-  defaultCwd,
   connected,
   open,
   onDismiss,
@@ -59,15 +57,10 @@ export function ConversationSidebar({
   onSelect,
 }: ConversationSidebarProps) {
   const [showCreate, setShowCreate] = useState(false);
-  const [cwd, setCwd] = useState(defaultCwd);
-  const [cwdEdited, setCwdEdited] = useState(false);
+  const [cwd, setCwd] = useState("");
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [cwdFilter, setCwdFilter] = useState("all");
-
-  useEffect(() => {
-    if (!cwdEdited) setCwd(defaultCwd);
-  }, [cwdEdited, defaultCwd]);
 
   const workspaces = useMemo(
     () => [...new Set(conversations.map((item) => item.cwd))].sort(),
@@ -91,8 +84,7 @@ export function ConversationSidebar({
     try {
       await onCreate(requestedCwd);
       setShowCreate(false);
-      setCwd(defaultCwd);
-      setCwdEdited(false);
+      setCwd("");
     } catch (error: unknown) {
       setCreateError(
         error instanceof Error ? error.message : "Unable to create the conversation.",
@@ -145,7 +137,6 @@ export function ConversationSidebar({
               aria-invalid={createError !== null}
               onChange={(event) => {
                 setCwd(event.target.value);
-                setCwdEdited(true);
                 setCreateError(null);
               }}
             />

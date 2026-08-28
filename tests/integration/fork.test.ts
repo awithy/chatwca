@@ -273,7 +273,7 @@ describe("conversation fork integration", () => {
     const sourceBytes = await readFile(source.sessionFile);
     const sourceModifiedAt = (await stat(source.sessionFile)).mtimeMs;
 
-    const config = loadConfig({ CHATWCA_DEFAULT_CWD: cwd }, cwd);
+    const config = loadConfig({ CHATWCA_DATA_DIR: cwd }, cwd);
     const server = createChatWcaServer(config, "fork-integration", {
       registry,
       history,

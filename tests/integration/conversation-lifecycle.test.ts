@@ -422,7 +422,7 @@ describe("complete conversation lifecycle integration", () => {
 
     const config = loadConfig(
       {
-        CHATWCA_DEFAULT_CWD: cwd,
+        CHATWCA_DATA_DIR: cwd,
         CHATWCA_SHUTDOWN_GRACE_MS: "100",
       },
       cwd,

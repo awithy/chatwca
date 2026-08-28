@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ConfigurationError,
+  DEFAULT_DATA_DIR,
   DEFAULT_HOST,
   DEFAULT_MAX_IMAGE_BYTES,
   DEFAULT_MAX_IMAGES,
@@ -22,7 +23,7 @@ describe("loadConfig", () => {
     expect(loadConfig({}, cwd)).toEqual({
       host: DEFAULT_HOST,
       port: DEFAULT_PORT,
-      defaultCwd: cwd,
+      dataDir: path.resolve(cwd, DEFAULT_DATA_DIR),
       maxLiveConversations: DEFAULT_MAX_LIVE_CONVERSATIONS,
       maxImages: DEFAULT_MAX_IMAGES,
       maxImageBytes: DEFAULT_MAX_IMAGE_BYTES,
@@ -39,7 +40,7 @@ describe("loadConfig", () => {
       {
         CHATWCA_HOST: "127.0.0.1",
         CHATWCA_PORT: "9000",
-        CHATWCA_DEFAULT_CWD: "workspace",
+        CHATWCA_DATA_DIR: "storage",
         CHATWCA_MAX_LIVE_CONVERSATIONS: "3",
         CHATWCA_MAX_IMAGES: "4",
         CHATWCA_MAX_IMAGE_BYTES: "1024",
@@ -54,7 +55,7 @@ describe("loadConfig", () => {
     expect(config).toEqual({
       host: "127.0.0.1",
       port: 9000,
-      defaultCwd: path.join(cwd, "workspace"),
+      dataDir: path.join(cwd, "storage"),
       maxLiveConversations: 3,
       maxImages: 4,
       maxImageBytes: 1024,
@@ -64,6 +65,12 @@ describe("loadConfig", () => {
       piOffline: true,
     });
     expect(Object.isFrozen(config)).toBe(true);
+  });
+
+  it("preserves an absolute data-directory override", () => {
+    expect(
+      loadConfig({ CHATWCA_DATA_DIR: "/var/lib/chatwca" }, "/tmp/base").dataDir,
+    ).toBe(path.resolve("/var/lib/chatwca"));
   });
 
   it.each(["0", "-1", "1.5", "Infinity", "not-a-number"])(
@@ -108,8 +115,8 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ CHATWCA_HOST: "  " }, "/tmp")).toThrow(
       /CHATWCA_HOST must not be empty/,
     );
-    expect(() => loadConfig({ CHATWCA_DEFAULT_CWD: "" }, "/tmp")).toThrow(
-      /CHATWCA_DEFAULT_CWD must not be empty/,
+    expect(() => loadConfig({ CHATWCA_DATA_DIR: "" }, "/tmp")).toThrow(
+      /CHATWCA_DATA_DIR must not be empty/,
     );
     expect(() => loadConfig({ PI_CODING_AGENT_DIR: " " }, "/tmp")).toThrow(
       /PI_CODING_AGENT_DIR must not be empty/,

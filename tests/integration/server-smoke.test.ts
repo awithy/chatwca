@@ -17,7 +17,7 @@ async function startServer(): Promise<{
 }> {
   const config = loadConfig(
     {
-      CHATWCA_DEFAULT_CWD: "/tmp/chatwca-smoke-workspace",
+      CHATWCA_DATA_DIR: "/tmp/chatwca-smoke-data",
       CHATWCA_MAX_IMAGES: "3",
       CHATWCA_MAX_IMAGE_BYTES: "1024",
       CHATWCA_MAX_TOTAL_IMAGE_BYTES: "2048",
@@ -98,12 +98,12 @@ describe("server shell", () => {
     expect(configResponse.status).toBe(200);
     const body = await configResponse.json();
     expect(body).toEqual({
-      defaultCwd: "/tmp/chatwca-smoke-workspace",
       maxImages: 3,
       maxImageBytes: 1024,
       maxTotalImageBytes: 2048,
     });
     expect(JSON.stringify(body)).not.toContain("/private/pi-data");
+    expect(JSON.stringify(body)).not.toContain("/tmp/chatwca-smoke-data");
   });
 
   it("accepts direct and same-authority browser WebSocket clients", async () => {

@@ -148,7 +148,6 @@ export function createChatWcaServer(
 
   app.get("/api/config", (_request, response) => {
     response.json({
-      defaultCwd: config.defaultCwd,
       maxImages: config.maxImages,
       maxImageBytes: config.maxImageBytes,
       maxTotalImageBytes: config.maxTotalImageBytes,

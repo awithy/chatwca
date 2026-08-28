@@ -1,0 +1,104 @@
+import { mkdirSync } from "node:fs";
+import path from "node:path";
+
+import Database from "better-sqlite3";
+
+export const DATABASE_FILENAME = "chatwca.sqlite";
+export const DATABASE_SCHEMA_VERSION = 1;
+export const DATABASE_BUSY_TIMEOUT_MS = 5_000;
+
+const INITIAL_SCHEMA = `
+  CREATE TABLE workspaces (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    path       TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+`;
+
+export class UnsupportedDatabaseVersionError extends Error {
+  override readonly name = "UnsupportedDatabaseVersionError";
+  readonly version: number;
+
+  constructor(version: number) {
+    super(
+      `Unsupported ChatWCA database schema version ${String(version)}; expected ${String(DATABASE_SCHEMA_VERSION)}`,
+    );
+    this.version = version;
+  }
+}
+
+/** Owns the process-wide SQLite connection and closes it at most once. */
+export class ChatWcaDatabase {
+  readonly connection: Database.Database;
+  readonly filename: string;
+  #closed = false;
+
+  constructor(connection: Database.Database, filename: string) {
+    this.connection = connection;
+    this.filename = filename;
+  }
+
+  get closed(): boolean {
+    return this.#closed;
+  }
+
+  close(): void {
+    if (this.#closed) return;
+    if (this.connection.open) this.connection.close();
+    this.#closed = true;
+  }
+}
+
+function schemaVersion(connection: Database.Database): number {
+  return connection.pragma("user_version", { simple: true }) as number;
+}
+
+function initializeSchema(connection: Database.Database): void {
+  connection.transaction(() => {
+    connection.exec(INITIAL_SCHEMA);
+    connection.pragma(`user_version = ${String(DATABASE_SCHEMA_VERSION)}`);
+  })();
+}
+
+/**
+ * Create/open and initialize ChatWCA's SQLite database.
+ *
+ * `filename` is injectable so focused tests can use SQLite's `:memory:` target;
+ * production always uses the default `<dataDir>/chatwca.sqlite` path.
+ */
+export function openDatabase(
+  dataDir: string,
+  filename: string = DATABASE_FILENAME,
+): ChatWcaDatabase {
+  mkdirSync(dataDir, { recursive: true });
+  const databasePath =
+    filename === ":memory:" ? filename : path.join(dataDir, filename);
+  let connection: Database.Database | undefined;
+
+  try {
+    connection = new Database(databasePath);
+    connection.pragma(`busy_timeout = ${String(DATABASE_BUSY_TIMEOUT_MS)}`);
+    connection.pragma("foreign_keys = ON");
+    connection.pragma("journal_mode = WAL");
+
+    const version = schemaVersion(connection);
+    if (version === 0) {
+      initializeSchema(connection);
+    } else if (version !== DATABASE_SCHEMA_VERSION) {
+      throw new UnsupportedDatabaseVersionError(version);
+    }
+
+    return new ChatWcaDatabase(connection, databasePath);
+  } catch (error) {
+    if (connection?.open === true) {
+      try {
+        connection.close();
+      } catch {
+        // Preserve the initialization failure, which is the actionable cause.
+      }
+    }
+    throw error;
+  }
+}

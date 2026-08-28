@@ -2,6 +2,7 @@ import path from "node:path";
 
 export const DEFAULT_HOST = "0.0.0.0";
 export const DEFAULT_PORT = 8787;
+export const DEFAULT_DATA_DIR = "./data";
 export const DEFAULT_MAX_LIVE_CONVERSATIONS = 8;
 export const DEFAULT_MAX_IMAGES = 8;
 export const DEFAULT_MAX_IMAGE_BYTES = 8 * 1024 * 1024;
@@ -13,7 +14,8 @@ export const MAX_SHUTDOWN_GRACE_MS = 5 * 60 * 1_000;
 export interface ServerConfig {
   readonly host: string;
   readonly port: number;
-  readonly defaultCwd: string;
+  /** Server-only directory containing ChatWCA's SQLite database. */
+  readonly dataDir: string;
   readonly maxLiveConversations: number;
   readonly maxImages: number;
   readonly maxImageBytes: number;
@@ -82,9 +84,9 @@ export function loadConfig(
     );
   }
 
-  const configuredCwd = environment.CHATWCA_DEFAULT_CWD ?? processCwd;
-  if (configuredCwd.trim().length === 0) {
-    throw new ConfigurationError("CHATWCA_DEFAULT_CWD must not be empty");
+  const configuredDataDir = environment.CHATWCA_DATA_DIR ?? DEFAULT_DATA_DIR;
+  if (configuredDataDir.trim().length === 0) {
+    throw new ConfigurationError("CHATWCA_DATA_DIR must not be empty");
   }
 
   const shutdownGraceMs = positiveInteger(
@@ -101,7 +103,7 @@ export function loadConfig(
   return Object.freeze({
     host,
     port,
-    defaultCwd: path.resolve(processCwd, configuredCwd),
+    dataDir: path.resolve(processCwd, configuredDataDir),
     maxLiveConversations: positiveInteger(
       environment,
       "CHATWCA_MAX_LIVE_CONVERSATIONS",

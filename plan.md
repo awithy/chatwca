@@ -307,6 +307,8 @@ In `src/server/protocol.ts`:
 
 ### T6.1 Build the socket client and reducer
 
+**Status:** Complete — the typed browser client, correlated command lifecycle, capped reconnect recovery, revision-aware reducer/resync, local selection, and per-conversation drafts are implemented in [`src/web/src/api/`](src/web/src/api/).
+
 In `src/web/api/`:
 
 - Implement connection state, command request IDs, pending request correlation, and timeout/error handling.

@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 
+import { useChatSocket } from "./api/index.js";
+
 interface HealthResponse {
   readonly ready: boolean;
   readonly version: string;
@@ -12,20 +14,15 @@ interface BrowserConfig {
 interface ServerStatus {
   readonly health?: HealthResponse;
   readonly config?: BrowserConfig;
-  readonly socketReady: boolean;
   readonly error?: string;
 }
 
 export function App() {
-  const [status, setStatus] = useState<ServerStatus>({ socketReady: false });
+  const [status, setStatus] = useState<ServerStatus>({});
+  const { state: chat } = useChatSocket();
 
   useEffect(() => {
     const abortController = new AbortController();
-    const socketProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const socket = new WebSocket(
-      `${socketProtocol}//${window.location.host}/ws`,
-    );
-
     void Promise.all([
       fetch("/api/health", { signal: abortController.signal }),
       fetch("/api/config", { signal: abortController.signal }),
@@ -37,44 +34,24 @@ export function App() {
 
         const health = (await healthResponse.json()) as HealthResponse;
         const config = (await configResponse.json()) as BrowserConfig;
-        setStatus((current) => ({ ...current, health, config }));
+        setStatus({ health, config });
       })
       .catch((error: unknown) => {
         if (!abortController.signal.aborted) {
-          setStatus((current) => ({
-            ...current,
+          setStatus({
             error: error instanceof Error ? error.message : "Unable to reach the server",
-          }));
+          });
         }
       });
 
-    socket.addEventListener("message", (event) => {
-      try {
-        const message = JSON.parse(String(event.data)) as { type?: unknown };
-        if (message.type === "ready") {
-          setStatus((current) => ({ ...current, socketReady: true }));
-        }
-      } catch {
-        setStatus((current) => ({
-          ...current,
-          error: "The server sent an invalid readiness message",
-        }));
-      }
-    });
-    socket.addEventListener("error", () => {
-      setStatus((current) => ({
-        ...current,
-        error: "Unable to open the server connection",
-      }));
-    });
-
-    return () => {
-      abortController.abort();
-      socket.close();
-    };
+    return () => abortController.abort();
   }, []);
 
-  const connected = status.health?.ready === true && status.socketReady;
+  const connected = status.health?.ready === true && chat.connection === "connected";
+  const connectionLabel = chat.connection === "reconnecting"
+    ? "Reconnecting to server…"
+    : "Connecting to server…";
+  const error = status.error ?? chat.lastError?.message;
 
   return (
     <main>
@@ -84,14 +61,14 @@ export function App() {
       <section aria-live="polite" className="server-status">
         <span className={connected ? "status-dot connected" : "status-dot"} />
         <div>
-          <strong>{connected ? "Server connected" : "Connecting to server…"}</strong>
+          <strong>{connected ? "Server connected" : connectionLabel}</strong>
           {status.health !== undefined && (
-            <small>ChatWCA {status.health.version}</small>
+            <small>ChatWCA {chat.serverVersion ?? status.health.version}</small>
           )}
           {status.config !== undefined && (
             <small>Default workspace: {status.config.defaultCwd}</small>
           )}
-          {status.error !== undefined && <small className="error">{status.error}</small>}
+          {error !== undefined && <small className="error">{error}</small>}
         </div>
       </section>
     </main>

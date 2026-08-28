@@ -46,6 +46,8 @@ describe("workspace-first sidebar", () => {
 
     expect(html).toContain('aria-label="Workspaces and conversations"');
     expect(html).toContain(workspace.path);
+    expect(html).toContain('aria-label="Workspace actions for Deep Project"');
+    expect(html).toContain('aria-expanded="false"');
     expect(html).toContain('aria-label="Edit workspace Deep Project"');
     expect(html).toContain('aria-label="Remove workspace Deep Project"');
     expect(html).toContain('aria-current="true"');

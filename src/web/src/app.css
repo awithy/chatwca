@@ -434,9 +434,13 @@ pre {
 }
 
 .workspace-item {
-  overflow: hidden;
+  position: relative;
   border: 1px solid transparent;
   border-radius: 0.5rem;
+}
+
+.workspace-item.has-open-menu {
+  z-index: 2;
 }
 
 .workspace-item:hover {
@@ -453,7 +457,7 @@ pre {
   gap: 0.28rem;
   width: 100%;
   min-width: 0;
-  padding: 0.55rem 0.6rem 0.35rem;
+  padding: 0.5rem 2.65rem 0.5rem 0.6rem;
   border: 0;
   color: var(--text);
   text-align: left;
@@ -493,30 +497,62 @@ pre {
   font-weight: 700;
 }
 
-.workspace-item-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 0.25rem;
-  padding: 0 0.45rem 0.4rem;
+.workspace-item-menu {
+  position: absolute;
+  top: 0.35rem;
+  right: 0.35rem;
 }
 
-.workspace-item-actions button {
-  min-height: 1.7rem;
-  padding: 0.2rem 0.4rem;
+.workspace-menu-trigger {
+  display: grid;
+  place-items: center;
+  width: 1.85rem;
+  height: 1.85rem;
+  padding: 0;
   border: 1px solid transparent;
-  border-radius: 0.32rem;
+  border-radius: 0.38rem;
   color: var(--muted);
-  font-size: 0.65rem;
+  font-size: 1.2rem;
+  line-height: 1;
   background: transparent;
 }
 
-.workspace-item-actions button:hover:not(:disabled) {
+.workspace-menu-trigger:hover:not(:disabled),
+.workspace-menu-trigger[aria-expanded="true"] {
   color: var(--text);
   border-color: var(--border-strong);
   background: var(--panel-raised);
 }
 
-.workspace-item-actions .workspace-remove-button {
+.workspace-actions-menu:not([hidden]) {
+  position: absolute;
+  top: calc(100% + 0.25rem);
+  right: 0;
+  display: grid;
+  min-width: 7.5rem;
+  padding: 0.25rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 0.45rem;
+  background: var(--panel-raised);
+  box-shadow: 0 0.6rem 1.5rem rgb(0 0 0 / 35%);
+}
+
+.workspace-actions-menu button {
+  min-height: 1.9rem;
+  padding: 0.3rem 0.55rem;
+  border: 0;
+  border-radius: 0.32rem;
+  color: var(--text);
+  font-size: 0.7rem;
+  text-align: left;
+  background: transparent;
+}
+
+.workspace-actions-menu button:hover:not(:disabled) {
+  background: var(--panel-hover);
+}
+
+.workspace-actions-menu .workspace-remove-button {
   color: var(--danger-text);
 }
 

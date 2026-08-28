@@ -71,6 +71,7 @@ test("marks an unavailable workspace and disables path-dependent actions", async
   await expect(page.getByRole("button", { name: /New conversation in Unavailable project/ })).toBeDisabled();
 
   page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Workspace actions for Unavailable project" }).click();
   await page.getByRole("button", { name: "Remove workspace Unavailable project" }).click();
   await expect(workspace).toHaveCount(0);
 });
@@ -151,6 +152,7 @@ test("busy workspace mutation is rejected and removal retains closed sessions", 
   await createSelectedConversation(page, workspaceName, workspacePath);
   await submitAndWait(page, prompt);
 
+  await page.getByRole("button", { name: `Workspace actions for ${workspaceName}` }).click();
   await page.getByRole("button", { name: `Edit workspace ${workspaceName}` }).click();
   await page.getByLabel("Directory path").fill(`${workspacePath}-changed`);
   await page.getByRole("button", { name: "Save changes" }).click();
@@ -160,11 +162,13 @@ test("busy workspace mutation is rejected and removal retains closed sessions", 
   await page.getByRole("button", { name: "Cancel" }).click();
 
   page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: `Workspace actions for ${workspaceName}` }).click();
   await page.getByRole("button", { name: `Remove workspace ${workspaceName}` }).click();
   await expect(page.getByRole("alert")).toContainText("Close the workspace's live conversations");
 
   await page.getByRole("button", { name: "Close", exact: true }).click();
   page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: `Workspace actions for ${workspaceName}` }).click();
   await page.getByRole("button", { name: `Remove workspace ${workspaceName}` }).click();
   await expect(page.locator("button.workspace-select-button").filter({ hasText: workspaceName })).toHaveCount(0);
 

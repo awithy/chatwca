@@ -69,8 +69,11 @@ export function WorkspaceSidebar({
   const [formMode, setFormMode] = useState<FormMode | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [removingId, setRemovingId] = useState<string | null>(null);
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
   const formReturnFocus = useRef<HTMLButtonElement | null>(null);
+  const openMenu = useRef<HTMLDivElement | null>(null);
+  const openMenuTrigger = useRef<HTMLButtonElement | null>(null);
   const formWasOpen = useRef(false);
   const selectedWorkspace = workspaces.find((item) => item.id === selectedWorkspaceId) ?? null;
 
@@ -87,7 +90,33 @@ export function WorkspaceSidebar({
       setFormMode(null);
       setWorkspaceError("The workspace was removed in another browser tab.");
     }
-  }, [formMode, workspaces]);
+    if (openMenuId !== null && !workspaces.some((item) => item.id === openMenuId)) {
+      setOpenMenuId(null);
+    }
+  }, [formMode, openMenuId, workspaces]);
+
+  useEffect(() => {
+    if (openMenuId === null) return;
+
+    function dismissOnOutsidePress(event: PointerEvent): void {
+      if (event.target instanceof Node && !openMenu.current?.contains(event.target)) {
+        setOpenMenuId(null);
+      }
+    }
+
+    function dismissOnEscape(event: KeyboardEvent): void {
+      if (event.key !== "Escape") return;
+      setOpenMenuId(null);
+      openMenuTrigger.current?.focus();
+    }
+
+    document.addEventListener("pointerdown", dismissOnOutsidePress);
+    document.addEventListener("keydown", dismissOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", dismissOnOutsidePress);
+      document.removeEventListener("keydown", dismissOnEscape);
+    };
+  }, [openMenuId]);
 
   async function submitWorkspace(values: WorkspaceFormValues): Promise<void> {
     if (formMode === null || submitting || actionPending) return;
@@ -115,6 +144,7 @@ export function WorkspaceSidebar({
     const confirmed = window.confirm(workspaceRemovalConfirmation(workspace));
     if (!confirmed) return;
 
+    setOpenMenuId(null);
     setRemovingId(workspace.id);
     setWorkspaceError(null);
     try {
@@ -204,8 +234,13 @@ export function WorkspaceSidebar({
             {workspaces.map((workspace) => {
               const selected = workspace.id === selectedWorkspaceId;
               const busy = actionPending || submitting || removingId !== null;
+              const menuOpen = openMenuId === workspace.id;
+              const menuId = `workspace-actions-${workspace.id}`;
               return (
-                <li className={`workspace-item${selected ? " is-selected" : ""}`} key={workspace.id}>
+                <li
+                  className={`workspace-item${selected ? " is-selected" : ""}${menuOpen ? " has-open-menu" : ""}`}
+                  key={workspace.id}
+                >
                   <button
                     className="workspace-select-button"
                     type="button"
@@ -219,28 +254,54 @@ export function WorkspaceSidebar({
                     </span>
                     <code title={workspace.path}>{workspace.path}</code>
                   </button>
-                  <div className="workspace-item-actions">
+                  <div
+                    className="workspace-item-menu"
+                    ref={menuOpen ? openMenu : undefined}
+                  >
                     <button
+                      className="workspace-menu-trigger"
                       type="button"
                       disabled={!connected || busy}
-                      aria-label={`Edit workspace ${workspace.name}`}
+                      aria-label={`Workspace actions for ${workspace.name}`}
+                      aria-expanded={menuOpen}
+                      aria-controls={menuId}
                       onClick={(event) => {
-                        formReturnFocus.current = event.currentTarget;
-                        setFormMode({ type: "edit", workspace });
-                        setWorkspaceError(null);
+                        openMenuTrigger.current = event.currentTarget;
+                        setOpenMenuId(menuOpen ? null : workspace.id);
                       }}
                     >
-                      Edit
+                      <span aria-hidden="true">…</span>
                     </button>
-                    <button
-                      className="workspace-remove-button"
-                      type="button"
-                      disabled={!connected || busy}
-                      aria-label={`Remove workspace ${workspace.name}`}
-                      onClick={() => void removeWorkspace(workspace)}
+                    <div
+                      className="workspace-actions-menu"
+                      id={menuId}
+                      role="group"
+                      aria-label={`Actions for ${workspace.name}`}
+                      hidden={!menuOpen}
                     >
-                      {removingId === workspace.id ? "Removing…" : "Remove"}
-                    </button>
+                      <button
+                        type="button"
+                        disabled={!connected || busy}
+                        aria-label={`Edit workspace ${workspace.name}`}
+                        onClick={() => {
+                          formReturnFocus.current = openMenuTrigger.current;
+                          setOpenMenuId(null);
+                          setFormMode({ type: "edit", workspace });
+                          setWorkspaceError(null);
+                        }}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        className="workspace-remove-button"
+                        type="button"
+                        disabled={!connected || busy}
+                        aria-label={`Remove workspace ${workspace.name}`}
+                        onClick={() => void removeWorkspace(workspace)}
+                      >
+                        {removingId === workspace.id ? "Removing…" : "Remove"}
+                      </button>
+                    </div>
                   </div>
                 </li>
               );

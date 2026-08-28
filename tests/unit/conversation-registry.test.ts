@@ -79,6 +79,7 @@ class FakeRuntime implements PiConversationRuntimePort {
   disposed = false;
   readonly events = new Set<AgentSessionEventListener>();
   readonly replacements = new Set<PiRuntimeReplacementListener>();
+  readonly abortSpy = vi.fn(async () => undefined);
   readonly disposeSpy = vi.fn(async () => {
     this.disposed = true;
     this.events.clear();
@@ -108,7 +109,7 @@ class FakeRuntime implements PiConversationRuntimePort {
   }
 
   abort(): Promise<void> {
-    return Promise.resolve();
+    return this.abortSpy();
   }
 
   fork(): Promise<{ cancelled: boolean }> {
@@ -190,10 +191,82 @@ describe("ConversationRegistry", () => {
     runtime.emit({ type: "queue_update", steering: [], followUp: [] });
     expect(events.map(({ type }) => type)).toEqual([
       "conversation.registered",
-      "conversation.session-event",
+      "conversation.event",
     ]);
+    expect(events[1]).toMatchObject({
+      event: {
+        type: "conversation.queue",
+        conversationId: "one",
+        revision: 1,
+        payload: { steering: [], followUp: [] },
+      },
+    });
+    expect(record.revision).toBe(1);
     expect(record.lastActiveAt).toBe(clock);
     expect(onListenerError).toHaveBeenCalledWith(listenerFailure);
+  });
+
+  it("applies normalized lifecycle transitions in monotonic revision order", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessionFile = path.join(root, "sessions", "events.jsonl");
+    await Promise.all([mkdir(cwd), mkdir(path.dirname(sessionFile))]);
+
+    const runtime = new FakeRuntime(identity("events", sessionFile, cwd));
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(runtime);
+    const registry = new ConversationRegistry({ runtimeFactory: factory });
+    const normalized: ConversationRegistryEvent[] = [];
+    registry.subscribe((item) => {
+      if (item.type === "conversation.event") normalized.push(item);
+    });
+    const record = await registry.create(cwd);
+
+    runtime.emit({ type: "agent_start" });
+    runtime.emit({ type: "queue_update", steering: ["steer"], followUp: [] });
+    runtime.emit({ type: "agent_end", messages: [], willRetry: false });
+    runtime.emit({ type: "agent_end", messages: [], willRetry: false });
+
+    expect(record.status).toBe("idle");
+    expect(record.revision).toBe(3);
+    expect(
+      normalized.map((item) =>
+        item.type === "conversation.event"
+          ? [item.event.type, item.event.revision]
+          : [],
+      ),
+    ).toEqual([
+      ["conversation.status", 1],
+      ["conversation.queue", 2],
+      ["conversation.status", 3],
+    ]);
+  });
+
+  it("marks active runs aborting and returns to idle when abort settles", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessionFile = path.join(root, "sessions", "abort.jsonl");
+    await Promise.all([mkdir(cwd), mkdir(path.dirname(sessionFile))]);
+
+    const runtime = new FakeRuntime(identity("abort", sessionFile, cwd));
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(runtime);
+    const registry = new ConversationRegistry({ runtimeFactory: factory });
+    const statuses: string[] = [];
+    registry.subscribe((item) => {
+      if (item.type === "conversation.event" && item.event.type === "conversation.status") {
+        statuses.push(item.event.payload.status);
+      }
+    });
+    const record = await registry.create(cwd);
+    record.status = "streaming";
+
+    await registry.abort(record.id);
+    await registry.abort(record.id);
+
+    expect(runtime.abortSpy).toHaveBeenCalledOnce();
+    expect(statuses).toEqual(["aborting", "idle"]);
+    expect(record).toMatchObject({ status: "idle", revision: 2 });
   });
 
   it("canonicalizes aliases and shares one in-flight open", async () => {
@@ -560,9 +633,13 @@ describe("ConversationRegistry", () => {
     expect(record.session).toBe(runtime.session);
     expect(record.session).not.toBe(oldSession);
     expect(record.revision).toBe(1);
+
+    runtime.emit({ type: "queue_update", steering: [], followUp: ["after"] });
+    expect(record.revision).toBe(2);
     expect(eventTypes).toEqual([
       "conversation.registered",
       "conversation.replaced",
+      "conversation.event",
     ]);
   });
 });

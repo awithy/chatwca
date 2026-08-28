@@ -232,6 +232,8 @@ In `src/server/conversation-registry.ts`:
 
 ### T4.4 Normalize Pi events
 
+**Status:** Complete — Pi lifecycle, message, tool, queue, retry, compaction, metadata, and abort events are normalized into revisioned wire events with bounded output and canonical completion IDs in [`src/server/normalize-events.ts`](src/server/normalize-events.ts).
+
 - Subscribe once per active `AgentSession`.
 - Map Pi events to message, tool, queue, status, retry, and compaction events.
 - Increment revisions in emission order.

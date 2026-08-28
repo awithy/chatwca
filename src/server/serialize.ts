@@ -200,7 +200,7 @@ function serializeAssistantBlocks(
   return blocks;
 }
 
-function truncateUtf8(text: string, maximumBytes: number): {
+export function truncateUtf8(text: string, maximumBytes: number): {
   readonly content: string;
   readonly originalBytes: number;
   readonly truncated: boolean;
@@ -336,6 +336,52 @@ function maximumToolBytes(options: SerializeOptions): number {
     throw new RangeError("maxToolOutputBytes must be a positive safe integer");
   }
   return maximum;
+}
+
+/** Normalize a live Pi message using a caller-provided stream or session ID. */
+export function serializeLiveMessage(
+  message: unknown,
+  entryId: string,
+  options: SerializeOptions = {},
+): NormalizedMessage | undefined {
+  return serializeEntry(
+    { type: "message", id: entryId, message },
+    new Map(),
+    maximumToolBytes(options),
+  );
+}
+
+/** Normalize the text-bearing portion of a partial/final Pi tool result. */
+export function serializeLiveToolResult(
+  toolCallId: string,
+  toolName: string,
+  result: unknown,
+  isError: boolean,
+  options: SerializeOptions = {},
+): ToolResultBlock {
+  const source = record(result);
+  const content = Array.isArray(source?.content)
+    ? source.content
+    : typeof result === "string"
+      ? [{ type: "text", text: result }]
+      : [];
+  const blocks = serializeToolResult(
+    { role: "toolResult", toolCallId, toolName, content, isError },
+    maximumToolBytes(options),
+  );
+  const normalized = blocks?.find(
+    (block): block is ToolResultBlock => block.type === "tool-result",
+  );
+  return (
+    normalized ?? {
+      type: "tool-result",
+      toolCallId,
+      toolName,
+      content: "",
+      isError,
+      truncated: false,
+    }
+  );
 }
 
 /**

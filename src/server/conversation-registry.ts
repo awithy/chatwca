@@ -1,20 +1,22 @@
 import { access, realpath } from "node:fs/promises";
 import path from "node:path";
 
-import type {
-  AgentSession,
-  AgentSessionEvent,
-} from "@earendil-works/pi-coding-agent";
+import type { AgentSession } from "@earendil-works/pi-coding-agent";
 
 import { AppError, ERROR_CODES, toAppError } from "../shared/errors.js";
 import { nextRevision } from "../shared/revisions.js";
 import { DEFAULT_MAX_LIVE_CONVERSATIONS } from "./config.js";
 import type {
+  ConversationEvent,
   ConversationState,
   LiveConversationStatus,
   ModelInfo,
   QueueState,
 } from "../shared/protocol.js";
+import {
+  PiEventNormalizer,
+  type NormalizedPiEvent,
+} from "./normalize-events.js";
 import { serializeActiveBranch } from "./serialize.js";
 import type {
   PiConversationRuntimePort,
@@ -52,9 +54,9 @@ export type ConversationRegistryEvent =
       readonly record: ConversationRecord;
     }
   | {
-      readonly type: "conversation.session-event";
+      readonly type: "conversation.event";
       readonly record: ConversationRecord;
-      readonly event: AgentSessionEvent;
+      readonly event: ConversationEvent;
     }
   | {
       readonly type: "conversation.replaced";
@@ -212,6 +214,7 @@ export class ConversationRegistry {
     ConversationRecord,
     () => void
   >();
+  readonly #normalizers = new WeakMap<ConversationRecord, PiEventNormalizer>();
   #capacityReservations = 0;
   #capacityTail = Promise.resolve();
   #disposePromise: Promise<void> | undefined;
@@ -343,6 +346,33 @@ export class ConversationRegistry {
       messages: serializeActiveBranch(record.session.sessionManager),
       queue: queueOf(record.session),
     };
+  }
+
+  /** Request cancellation of an active run. Repeated idle aborts are no-ops. */
+  async abort(conversationId: string): Promise<void> {
+    const record = this.#required(conversationId);
+    if (!isBusy(record)) return;
+    if (record.status !== "aborting") {
+      this.#emitConversationEvent(record, {
+        type: "conversation.status",
+        payload: { status: "aborting" },
+      });
+    }
+
+    try {
+      await record.runtime.abort();
+      // Pi normally emits agent_end before abort() resolves. Keep the registry
+      // deterministic if an injected/custom runtime does not emit lifecycle.
+      if (record.status === "aborting") {
+        this.#emitConversationEvent(record, {
+          type: "conversation.status",
+          payload: { status: "idle" },
+        });
+      }
+    } catch (error) {
+      this.#handleRuntimeFailure(record, error);
+      throw toAppError(error, { source: "internal" });
+    }
   }
 
   /** Close one idle/error conversation while retaining its persisted history. */
@@ -483,9 +513,14 @@ export class ConversationRegistry {
 
     this.#byId.set(record.id, record);
     this.#bySessionFile.set(record.sessionFile, record);
+    this.#normalizers.set(record, this.#createNormalizer(record));
     record.unsubscribe = runtime.subscribe((event) => {
       this.#touch(record);
-      this.#emit({ type: "conversation.session-event", record, event });
+      try {
+        this.#normalizers.get(record)?.handle(event);
+      } catch (error) {
+        this.#handleRuntimeFailure(record, error);
+      }
     });
     this.#replacementUnsubscribes.set(
       record,
@@ -553,6 +588,8 @@ export class ConversationRegistry {
       let disposalError: unknown;
       record.unsubscribe();
       record.unsubscribe = () => undefined;
+      this.#normalizers.get(record)?.dispose();
+      this.#normalizers.delete(record);
       this.#replacementUnsubscribes.get(record)?.();
       this.#replacementUnsubscribes.delete(record);
 
@@ -611,11 +648,89 @@ export class ConversationRegistry {
     record.cwd = path.resolve(current.cwd);
     record.session = record.runtime.session;
     record.title = titleOf(record.session);
+    this.#normalizers.get(record)?.dispose();
+    this.#normalizers.set(record, this.#createNormalizer(record));
     record.revision = nextRevision(record.revision);
     this.#touch(record);
     this.#byId.set(record.id, record);
     this.#bySessionFile.set(record.sessionFile, record);
     this.#emit({ type: "conversation.replaced", record, replacement });
+  }
+
+  #createNormalizer(record: ConversationRecord): PiEventNormalizer {
+    return new PiEventNormalizer({
+      sessionId: record.id,
+      getSession: () => record.session,
+      emit: (event) => this.#emitConversationEvent(record, event),
+      onMessagePersisted: (message) => this.#messagePersisted(record, message),
+      onMetadataChanged: () => this.#metadataChanged(record),
+    });
+  }
+
+  #emitConversationEvent(
+    record: ConversationRecord,
+    event: NormalizedPiEvent,
+  ): void {
+    if (this.#byId.get(record.id) !== record || this.#pendingCloses.has(record)) {
+      return;
+    }
+
+    if (event.type === "conversation.status") {
+      if (record.status === event.payload.status) return;
+      record.status = event.payload.status;
+    }
+
+    record.revision = nextRevision(record.revision);
+    this.#touch(record);
+    this.#emit({
+      type: "conversation.event",
+      record,
+      event: {
+        ...event,
+        conversationId: record.id,
+        revision: record.revision,
+      } as ConversationEvent,
+    });
+  }
+
+  #messagePersisted(record: ConversationRecord, message: unknown): void {
+    if (this.#byId.get(record.id) !== record || this.#pendingCloses.has(record)) {
+      return;
+    }
+    const source =
+      typeof message === "object" && message !== null
+        ? (message as { readonly role?: unknown })
+        : undefined;
+    const title = titleOf(record.session);
+    const becameDurable = source?.role === "assistant" && !record.durable;
+    if (title === record.title && !becameDurable) return;
+
+    record.title = title;
+    if (becameDurable) record.durable = true;
+    record.revision = nextRevision(record.revision);
+    this.#emit({ type: "conversation.state-changed", record });
+    void this.#refreshHistory();
+  }
+
+  #metadataChanged(record: ConversationRecord): void {
+    if (this.#byId.get(record.id) !== record || this.#pendingCloses.has(record)) {
+      return;
+    }
+    const title = titleOf(record.session);
+    if (title === record.title) return;
+    record.title = title;
+    record.revision = nextRevision(record.revision);
+    this.#emit({ type: "conversation.state-changed", record });
+    void this.#refreshHistory();
+  }
+
+  #handleRuntimeFailure(record: ConversationRecord, error: unknown): void {
+    this.#onListenerError(error);
+    if (record.status === "error" || this.#byId.get(record.id) !== record) return;
+    this.#emitConversationEvent(record, {
+      type: "conversation.status",
+      payload: { status: "error" },
+    });
   }
 
   #touch(record: ConversationRecord): void {

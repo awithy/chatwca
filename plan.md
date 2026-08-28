@@ -122,6 +122,8 @@ Use discriminated unions and reject unknown command types. Decide and document w
 
 ### T2.2 Define stable errors
 
+**Status:** Complete — stable public codes, boundary-specific safe conversion, closed error schemas, and redaction tests are implemented in [`src/shared/errors.ts`](src/shared/errors.ts).
+
 In `src/shared/errors.ts`:
 
 - Define error codes for every case in design section 16.

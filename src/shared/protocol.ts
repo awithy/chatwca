@@ -1,5 +1,7 @@
 import { type Static, Type, type TSchema } from "@sinclair/typebox";
 
+import { ErrorCodeSchema } from "./errors.js";
+
 /**
  * ChatWCA's JSON wire contract.
  *
@@ -108,7 +110,7 @@ export const UsageSchema = strictObject({
 export type Usage = Static<typeof UsageSchema>;
 
 const MessageErrorSchema = strictObject({
-  code: NonEmptyStringSchema,
+  code: ErrorCodeSchema,
   message: NonEmptyStringSchema,
 });
 
@@ -338,7 +340,7 @@ export type AcknowledgementMessage = Static<
 export const ErrorMessageSchema = strictObject({
   type: Type.Literal("error"),
   requestId: Type.Optional(RequestIdSchema),
-  code: NonEmptyStringSchema,
+  code: ErrorCodeSchema,
   message: NonEmptyStringSchema,
 });
 export type ErrorMessage = Static<typeof ErrorMessageSchema>;

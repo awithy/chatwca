@@ -1,6 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
+import type { ConversationSummary } from "../../shared/protocol.js";
 import { useChatSocket } from "./api/index.js";
+import { ConversationHeader } from "./components/ConversationHeader.js";
+import { ConversationSidebar } from "./components/ConversationSidebar.js";
 
 interface HealthResponse {
   readonly ready: boolean;
@@ -17,9 +20,16 @@ interface ServerStatus {
   readonly error?: string;
 }
 
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
+}
+
 export function App() {
-  const [status, setStatus] = useState<ServerStatus>({});
-  const { state: chat } = useChatSocket();
+  const [server, setServer] = useState<ServerStatus>({});
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [loadingConversationId, setLoadingConversationId] = useState<string | null>(null);
+  const [conversationError, setConversationError] = useState<string | null>(null);
+  const { client, state: chat } = useChatSocket();
 
   useEffect(() => {
     const abortController = new AbortController();
@@ -29,48 +39,188 @@ export function App() {
     ])
       .then(async ([healthResponse, configResponse]) => {
         if (!healthResponse.ok || !configResponse.ok) {
-          throw new Error("The ChatWCA server returned an error");
+          throw new Error("The ChatWCA server returned an error.");
         }
-
-        const health = (await healthResponse.json()) as HealthResponse;
-        const config = (await configResponse.json()) as BrowserConfig;
-        setStatus({ health, config });
+        setServer({
+          health: (await healthResponse.json()) as HealthResponse,
+          config: (await configResponse.json()) as BrowserConfig,
+        });
       })
       .catch((error: unknown) => {
         if (!abortController.signal.aborted) {
-          setStatus({
-            error: error instanceof Error ? error.message : "Unable to reach the server",
-          });
+          setServer({ error: errorMessage(error, "Unable to reach the server.") });
         }
       });
 
     return () => abortController.abort();
   }, []);
 
-  const connected = status.health?.ready === true && chat.connection === "connected";
-  const connectionLabel = chat.connection === "reconnecting"
-    ? "Reconnecting to server…"
-    : "Connecting to server…";
-  const error = status.error ?? chat.lastError?.message;
+  const connected = chat.connection === "connected";
+  const liveStatuses = useMemo(
+    () => Object.fromEntries(
+      Object.entries(chat.conversations).map(([id, projection]) => [
+        id,
+        projection.conversation.status,
+      ]),
+    ),
+    [chat.conversations],
+  );
+  const selectedSummary = chat.history.find(
+    (conversation) => conversation.id === chat.selectedConversationId,
+  );
+  const selectedConversation = chat.selectedConversationId === null
+    ? undefined
+    : chat.conversations[chat.selectedConversationId]?.conversation;
+
+  async function createConversation(cwd: string): Promise<void> {
+    setConversationError(null);
+    const result = await client.send<"conversation.create">({
+      type: "conversation.create",
+      cwd,
+    });
+    client.selectConversation(result.conversation.id);
+    setSidebarOpen(false);
+  }
+
+  function selectConversation(summary: ConversationSummary): void {
+    client.selectConversation(summary.id);
+    setSidebarOpen(false);
+    setConversationError(null);
+
+    if (!summary.runnable) {
+      setConversationError("This conversation's working directory is unavailable.");
+      return;
+    }
+    if (!connected) {
+      setConversationError("Reconnect to the server before opening this conversation.");
+      return;
+    }
+    if (summary.status !== "closed" && chat.conversations[summary.id] !== undefined) {
+      return;
+    }
+
+    setLoadingConversationId(summary.id);
+    const command = summary.status === "closed"
+      ? client.send({ type: "conversation.open", conversationId: summary.id })
+      : client.send({ type: "conversation.state", conversationId: summary.id });
+    void command
+      .catch((error: unknown) => {
+        if (client.getState().selectedConversationId === summary.id) {
+          setConversationError(errorMessage(error, "Unable to open the conversation."));
+        }
+      })
+      .finally(() => {
+        setLoadingConversationId((current) => current === summary.id ? null : current);
+      });
+  }
+
+  const visibleError = conversationError ?? server.error ?? chat.lastError?.message;
 
   return (
-    <main>
-      <p className="eyebrow">Pi coding agent</p>
-      <h1>ChatWCA</h1>
-      <p>Pi conversations from your browser.</p>
-      <section aria-live="polite" className="server-status">
-        <span className={connected ? "status-dot connected" : "status-dot"} />
-        <div>
-          <strong>{connected ? "Server connected" : connectionLabel}</strong>
-          {status.health !== undefined && (
-            <small>ChatWCA {chat.serverVersion ?? status.health.version}</small>
-          )}
-          {status.config !== undefined && (
-            <small>Default workspace: {status.config.defaultCwd}</small>
-          )}
-          {error !== undefined && <small className="error">{error}</small>}
+    <div className="app-shell">
+      <ConversationSidebar
+        conversations={chat.history}
+        liveStatuses={liveStatuses}
+        selectedConversationId={chat.selectedConversationId}
+        defaultCwd={server.config?.defaultCwd ?? ""}
+        connected={connected}
+        open={sidebarOpen}
+        onDismiss={() => setSidebarOpen(false)}
+        onCreate={createConversation}
+        onSelect={selectConversation}
+      />
+      {sidebarOpen && (
+        <button
+          className="sidebar-backdrop"
+          type="button"
+          aria-label="Close conversations"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
+      <main className="conversation-page">
+        <div className="mobile-app-bar">
+          <button
+            className="icon-button menu-button"
+            type="button"
+            aria-label="Open conversations"
+            aria-expanded={sidebarOpen}
+            onClick={() => setSidebarOpen(true)}
+          >
+            <span aria-hidden="true">☰</span>
+          </button>
+          <strong>ChatWCA</strong>
+          <span className={`connection-dot${connected ? " is-connected" : ""}`} title={connected ? "Connected" : "Disconnected"} />
         </div>
-      </section>
-    </main>
+
+        {selectedSummary === undefined ? (
+          <section className="welcome-panel">
+            <div className="welcome-mark" aria-hidden="true">W</div>
+            <p className="eyebrow">Pi coding agent</p>
+            <h1>Start a conversation</h1>
+            <p>
+              Create a session for a workspace, or choose a conversation from your history.
+            </p>
+            <button
+              className="primary-button welcome-create"
+              type="button"
+              disabled={!connected}
+              onClick={() => setSidebarOpen(true)}
+            >
+              Browse conversations
+            </button>
+            <small className="server-version">
+              {connected ? "Server connected" : "Connecting to server…"}
+              {chat.serverVersion !== null || server.health !== undefined
+                ? ` · ChatWCA ${chat.serverVersion ?? server.health?.version ?? ""}`
+                : ""}
+            </small>
+            {visibleError !== undefined && visibleError !== null && (
+              <p className="page-error" role="alert">{visibleError}</p>
+            )}
+          </section>
+        ) : (
+          <>
+            <ConversationHeader
+              conversation={selectedConversation}
+              summary={selectedSummary}
+              loading={loadingConversationId === selectedSummary.id}
+            />
+            <section className="conversation-content" aria-live="polite">
+              {visibleError !== undefined && visibleError !== null && (
+                <div className="page-error conversation-alert" role="alert">{visibleError}</div>
+              )}
+              {loadingConversationId === selectedSummary.id && selectedConversation === undefined ? (
+                <div className="content-empty">
+                  <span className="loading-spinner" aria-hidden="true" />
+                  <p>Opening conversation…</p>
+                </div>
+              ) : selectedConversation === undefined ? (
+                <div className="content-empty">
+                  <h2>{selectedSummary.runnable ? "Conversation closed" : "Workspace unavailable"}</h2>
+                  <p>
+                    {selectedSummary.runnable
+                      ? "Select it again to reopen the persisted session."
+                      : `Restore ${selectedSummary.cwd} before reopening this session.`}
+                  </p>
+                </div>
+              ) : selectedConversation.messages.length === 0 ? (
+                <div className="content-empty">
+                  <h2>Ready for a new prompt</h2>
+                  <p>This session is open in {selectedConversation.cwd}.</p>
+                </div>
+              ) : (
+                <div className="content-empty">
+                  <h2>Conversation loaded</h2>
+                  <p>
+                    {selectedConversation.messages.length} {selectedConversation.messages.length === 1 ? "message" : "messages"} in this session.
+                  </p>
+                </div>
+              )}
+            </section>
+          </>
+        )}
+      </main>
+    </div>
   );
 }

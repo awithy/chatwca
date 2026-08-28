@@ -320,6 +320,8 @@ In `src/web/api/`:
 
 ### T6.2 Build the application layout
 
+**Status:** Complete — the workspace-grouped/filterable sidebar, validated conversation creation flow, lazy session opening, conversation header, and responsive navigation are implemented in [`src/web/src/components/`](src/web/src/components/).
+
 Implement:
 
 - `ConversationSidebar` grouped/filterable by CWD with closed/idle/streaming/error states;

@@ -1,572 +1,574 @@
-# ChatWCA Implementation Plan
+# ChatWCA Workspace Changes Plan
 
-This plan implements the proposed design in `docs/design.md`. The repository currently contains documentation only, so the work begins with project scaffolding. Tasks are ordered by dependency; each milestone should leave the repository buildable and tested.
+This plan updates the existing ChatWCA implementation to match the workspace design in [`docs/design.md`](docs/design.md). The application is already implemented around a global Pi history list; this work replaces that behavior with SQLite-backed workspace definitions and workspace-scoped Pi session discovery.
+
+All tasks below are pending unless marked otherwise.
 
 ## Delivery principles
 
-- Keep Pi's JSONL session store canonical; do not add an application message database.
-- Keep one process-wide conversation registry and one shared Pi `ModelRuntime`.
-- Give each live conversation exactly one runtime and prevent duplicate writers for a session file.
-- Treat the server as authoritative. Browser state must be replaceable from a full conversation snapshot.
-- Preserve Pi session entry IDs through serialization so forking is reliable.
-- Validate all WebSocket input at runtime and expose stable application errors rather than raw SDK errors.
-- Bind to `0.0.0.0` by default, but do not add authentication or broad CORS support.
-- Introduce a narrow Pi adapter boundary so server behavior can be integration-tested with fake sessions/models.
+- A workspace is a ChatWCA-owned record containing a stable ID, name, and canonical directory path.
+- SQLite is canonical only for workspace definitions. Pi JSONL remains canonical for conversations and messages.
+- Opening ChatWCA or connecting a browser must not scan Pi session history.
+- Pi sessions are listed only after a browser selects a workspace, using `SessionManager.list(workspace.path)`.
+- Normal application code must not call `SessionManager.listAll()`.
+- Workspace selection is browser-local and is not persisted in SQLite.
+- Conversation runtimes remain process-wide and may continue running when another workspace is selected.
+- Workspace IDs and conversation IDs supplied by the browser are never trusted as filesystem authority. Open and delete operations use a fresh workspace-scoped Pi listing.
+- No migration or automatic import from the previous global-history behavior is required.
 
-## Milestone 0 — Validate Pi SDK assumptions
+## Out of scope
 
-### T0.1 Pin and inspect the SDK
+- Storing conversations, messages, or Pi session files in SQLite
+- Automatically discovering workspaces by scanning all Pi sessions
+- Migrating a pre-release workspace database or old browser state
+- Persisting the selected workspace across a full page reload
+- Deleting workspace directories or their Pi sessions when a workspace is removed
+- Supporting multiple ChatWCA processes writing the same database or Pi sessions
+- Recursive session discovery beneath a workspace path; a workspace maps to one exact Pi CWD
 
-**Status:** Complete — pinned 0.84.3; findings and adaptations are recorded in [`docs/pi-sdk-notes.md`](docs/pi-sdk-notes.md).
+## Phase 1 — SQLite foundation and configuration
 
-- Select and pin a compatible `@earendil-works/pi-coding-agent` version.
-- Verify the concrete APIs and event types for:
-  - `ModelRuntime` creation and refresh;
-  - `createAgentSessionServices()`;
-  - `createAgentSessionFromServices()`;
-  - `createAgentSessionRuntime()`;
-  - `SessionManager.create()`, `open()`, `list()`, and `listAll()`;
-  - runtime/session disposal and abort;
-  - `switchSession()`, `fork()`, and session replacement;
-  - prompt images and `streamingBehavior`;
-  - active-branch entry IDs and session metadata; and
-  - history deletion, if supported by the SDK.
-- Record any necessary adaptation from the conceptual APIs in the design as short implementation notes in the relevant source files or project documentation.
+### T1.1 Add SQLite dependencies and ignored storage
 
-### T0.2 Build a disposable SDK smoke test
+- Add `better-sqlite3` and its TypeScript declarations to `package.json` and `package-lock.json`.
+- Add `/data/` to `.gitignore` so the database, WAL, shared-memory, and journal files are ignored.
+- Do not commit a placeholder inside `data`; create the directory at runtime.
+- Verify `npm ci` works on the minimum supported Node.js version and in CI.
 
-**Status:** Complete — `npm run test:sdk-smoke` exercises persistence and reopening with Pi's faux provider in isolated temporary directories.
+### T1.2 Replace default-CWD configuration with data-directory configuration
 
-- Create a temporary-session script/test that creates a session in a temporary CWD, subscribes to events, disposes it, and reopens it.
-- Use a fake model/provider where the SDK supports one; the smoke test must not require paid model access in CI.
-- Confirm when session files and message entries become durable.
+Update `src/server/config.ts`:
 
-**Exit criteria:** The SDK version is locked, the required lifecycle operations are understood, and no core design requirement depends on a nonexistent API without an identified adapter or fallback.
+- Add `CHATWCA_DATA_DIR`, defaulting to `./data` relative to the server process CWD.
+- Resolve the configured value to an absolute path.
+- Reject an explicitly empty value.
+- Remove `CHATWCA_DEFAULT_CWD` and `ServerConfig.defaultCwd`.
+- Keep database paths out of `/api/config`; the browser does not need them.
+- Remove `defaultCwd` from the browser-safe config response and frontend config type.
 
-## Milestone 1 — Project foundation
+Update configuration tests to cover default, relative, absolute, and empty data-directory values, and remove default-CWD expectations.
 
-### T1.1 Scaffold the TypeScript application
+### T1.3 Implement database lifecycle
 
-**Status:** Complete — strict server/web TypeScript builds, Vite/React, Express static delivery, and Vitest/Playwright scaffolding are configured.
+Add `src/server/database.ts` with a narrow database-opening boundary:
 
-Create the initial structure:
+- Create the configured data directory recursively before opening the database.
+- Open `<dataDir>/chatwca.sqlite` with `better-sqlite3`.
+- Configure a bounded busy timeout, foreign keys, and WAL mode.
+- Initialize a new database transactionally when `PRAGMA user_version` is `0`.
+- Create the `workspaces` table and set `user_version` to `1`.
+- Accept schema version `1`; fail startup for unsupported versions rather than guessing or migrating.
+- Expose an idempotent `close()` operation.
+- Ensure startup failures close a partially opened database and produce a useful server-side diagnostic without exposing local details over WebSocket.
 
-```text
-src/server/
-src/shared/
-src/web/
-tests/unit/
-tests/integration/
-tests/browser/
+Initial schema:
+
+```sql
+CREATE TABLE workspaces (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  path       TEXT NOT NULL UNIQUE,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 ```
 
-- Add `package.json` and lockfile.
-- Configure strict TypeScript for server, shared code, and the Vite browser build.
-- Add React, Vite, Express, `ws`, TypeBox, `react-markdown`, `remark-gfm`, Vitest, and Playwright.
-- Add scripts for development, build, start, typecheck, unit/integration tests, and browser tests.
-- Configure production build output so Express serves the Vite assets and supports SPA fallback without intercepting `/api/*` or `/ws`.
-- Add `.gitignore` and test/build configuration.
+Add unit tests using temporary files and `:memory:` databases for initialization, reopening, unsupported versions, and close behavior.
 
-### T1.2 Implement typed configuration
+**Phase 1 exit criteria:** A clean checkout creates a gitignored `data/chatwca.sqlite` at startup, configuration no longer exposes a default CWD, and database initialization is deterministic and tested.
 
-**Status:** Complete — server-only environment parsing, defaults, startup errors, and validation tests are implemented in [`src/server/config.ts`](src/server/config.ts).
+## Phase 2 — Workspace domain and repository
 
-In `src/server/config.ts`:
+### T2.1 Define workspace wire types
 
-- Parse all variables defined in the design.
-- Validate ports, positive size/count limits, and the live-runtime limit.
-- Apply defaults for host, port, CWD, image limits, and aggregate image bytes.
-- Fail startup with a useful message for invalid configuration.
-- Keep Pi credentials and provider settings server-only.
+In `src/shared/protocol.ts`, add closed TypeBox schemas and inferred types for:
 
-### T1.3 Add the HTTP/server shell
+```ts
+interface Workspace {
+  id: string;
+  name: string;
+  path: string;
+  createdAt: number;
+  updatedAt: number;
+}
 
-**Status:** Complete — Express and WebSocket share one HTTP server, operational endpoints expose safe startup data, and the React shell verifies both HTTP and socket connectivity.
+interface WorkspaceSummary extends Workspace {
+  available: boolean;
+}
+```
 
-In `src/server/index.ts`:
+Add commands:
 
-- Create one HTTP server shared by Express and `ws`.
-- Implement `GET /api/health` with readiness and version information.
-- Implement `GET /api/config` with browser-safe settings only, such as image limits and default CWD; never expose credentials.
-- Listen on `0.0.0.0:8787` by default.
-- Add a placeholder WebSocket connection that sends `ready`.
-- Add a minimal React shell proving development proxying and production static serving work.
+```ts
+workspace.list
+workspace.create { name, path }
+workspace.update { workspaceId, name?, path? }
+workspace.delete { workspaceId }
+```
 
-### T1.4 Establish baseline automation
+Define exact correlated responses:
 
-**Status:** Complete — configuration coverage, an HTTP/WebSocket server smoke test, and CI build/typecheck/test gates are in place.
+- `workspace.list`, `workspace.create`, and `workspace.update` return a `workspaces` message containing the authoritative ordered workspace list.
+- `workspace.delete` returns an acknowledgement; the server also broadcasts an uncorrelated authoritative `workspaces` message.
+- Workspace create/update also broadcast the authoritative list to other sockets.
 
-- Add unit tests for configuration defaults and invalid values.
-- Add a build/typecheck test in CI.
-- Add a server smoke test for health, config, and WebSocket readiness.
+Make `requestId` optional only on server broadcasts and required on correlated responses, following the existing history-message pattern. Reject an update containing neither `name` nor `path`.
 
-**Exit criteria:** A production build starts on the configured host/port, serves the React shell, and accepts a same-authority WebSocket connection.
+### T2.2 Add workspace errors
 
-## Milestone 2 — Shared protocol and normalized state
+Extend `src/shared/errors.ts` with stable codes and safe messages for:
 
-### T2.1 Define protocol schemas
+- workspace not found;
+- invalid workspace name;
+- invalid workspace path;
+- duplicate workspace path;
+- unavailable workspace path;
+- workspace busy because it owns a live runtime; and
+- database operation failure.
 
-**Status:** Complete — the closed-object TypeBox wire contract, inferred types, normalized content model, snapshots, acknowledgements, and event envelopes are implemented in [`src/shared/protocol.ts`](src/shared/protocol.ts).
+Keep filesystem and SQLite details in server logs/causes. Do not return raw paths in generic errors.
 
-In `src/shared/protocol.ts`, create TypeBox schemas and inferred TypeScript types for:
+### T2.3 Implement the workspace repository
 
-- every command listed in the design;
-- required client-generated `requestId` values;
-- command acknowledgements and correlated errors;
-- `ready`, history, full state, normalized event envelopes, and status notices;
-- conversation summaries and full conversation state;
-- normalized user, assistant, thinking, image, tool-call, and tool-result blocks; and
-- image payload metadata and data encoding.
+Add `src/server/workspace-repository.ts`:
 
-Use discriminated unions and reject unknown command types. Decide and document whether extra object properties are rejected; apply the choice consistently.
+- Use prepared statements for list/get/insert/update/delete.
+- Generate stable UUIDs server-side; inject UUID, clock, and filesystem boundaries in tests.
+- Trim names and reject empty names.
+- Resolve paths against the server process CWD, require an existing accessible directory, and canonicalize with `realpath` before create or path update.
+- Enforce canonical-path uniqueness and map SQLite constraint failures to the duplicate-path error.
+- Sort workspace lists deterministically by case-insensitive name and then ID.
+- Compute `available` when projecting rows: the stored canonical path must currently exist, be a directory, and be searchable/readable.
+- Preserve rows when paths disappear; only path-dependent operations fail.
+- Rename without revalidating an unchanged path.
+- Update `updated_at` only after successful mutations.
 
-### T2.2 Define stable errors
+Workspace removal deletes only the row. Repository code must never recursively remove a path or unlink a Pi session.
 
-**Status:** Complete — stable public codes, boundary-specific safe conversion, closed error schemas, and redaction tests are implemented in [`src/shared/errors.ts`](src/shared/errors.ts).
+Add focused unit tests for CRUD, persistence after reopen, trimming, duplicate canonical paths, symlink canonicalization, missing/inaccessible paths, availability changes, ordering, and safe error conversion.
 
-In `src/shared/errors.ts`:
+**Phase 2 exit criteria:** Workspaces can be created, listed, renamed, repointed, and removed through a tested repository, while filesystem content remains untouched.
 
-- Define error codes for every case in design section 16.
-- Add safe conversion from validation, filesystem, registry, image, and Pi errors.
-- Ensure internal paths/stacks are not accidentally returned unless they are intentionally part of a requested CWD/session response.
+## Phase 3 — Workspace-scoped protocol
 
-### T2.3 Define state/revision semantics
+### T3.1 Make conversation protocol objects workspace-aware
 
-**Status:** Complete — revision rules, command success mappings, reconciliation helpers, and gap/schema tests are implemented in [`docs/revision-semantics.md`](docs/revision-semantics.md) and [`src/shared/revisions.ts`](src/shared/revisions.ts).
+Update shared schemas and types:
 
-- Specify which server-side changes increment a conversation revision.
-- Require monotonically increasing revisions on all conversation events and snapshots.
-- Define command success responses, including newly created/opened/forked state.
-- Define client behavior for stale/duplicate events and revision gaps.
-- Unit-test schema acceptance/rejection and revision-gap detection.
+- Add `workspaceId` to `ConversationSummary` and `ConversationState`.
+- Add `workspaceId` to every conversation event envelope.
+- Change `history.list` to require `workspaceId`.
+- Change `conversation.create` to require `workspaceId` and remove `cwd`.
+- Change `conversation.open` and `conversation.delete` to require both `workspaceId` and `conversationId`.
+- Add `workspaceId` to every history response/broadcast.
+- Extend acknowledgement and `CommandSuccessByType` mappings for workspace commands.
 
-**Exit criteria:** Client and server can import one wire contract, malformed commands are rejected predictably, and state/event revision rules are unambiguous.
+Conversation state/close/prompt/abort commands may continue using the live `conversationId`; the registry record supplies their authoritative workspace ownership.
 
-## Milestone 3 — Pi sessions, history, and serialization
+Update protocol schema tests first so server and browser compilation failures expose every affected call site.
 
-### T3.1 Implement CWD handling
+### T3.2 Implement workspace command dispatch
 
-**Status:** Complete — canonical CWD resolution, directory/access validation, stored-CWD availability inspection, and filesystem coverage are implemented in [`src/server/cwd.ts`](src/server/cwd.ts).
+Update `src/server/protocol.ts` to receive a `WorkspaceRepository` dependency and dispatch workspace CRUD commands.
 
-- Resolve requested paths to absolute paths.
-- Canonicalize with `realpath` when possible.
-- Require an existing directory for new conversations.
-- Preserve enough information to report a missing stored CWD when reopening history.
-- Unit-test relative paths, symlinks, files, missing paths, and permission failures.
+Before mutating a workspace path or deleting a workspace:
 
-### T3.2 Implement the shared Pi services and runtime factory
+- Ask the conversation registry whether that workspace owns any live record.
+- Reject path changes and deletion with `workspace_busy` when it does.
+- Permit a name-only update while conversations are live.
 
-**Status:** Complete — the process-wide model runtime, persistent create/open factory, replacement-safe conversation adapter, capability metadata, and isolated faux-provider integration coverage are implemented in [`src/server/pi-runtime.ts`](src/server/pi-runtime.ts).
+After successful workspace mutation, send/broadcast an authoritative workspace list. Keep per-socket command ordering and outbound flow-control behavior unchanged.
 
-In `src/server/pi-runtime.ts`:
+### T3.3 Track per-socket history subscriptions
 
-- Create one process-wide `ModelRuntime`.
-- Create CWD-bound services separately for every conversation runtime.
-- Support creating a persistent session and opening an existing session file.
-- Return a wrapper exposing the active `AgentSession`, session identity/file/CWD, prompt, abort, fork, subscribe, and dispose operations.
-- Centralize runtime replacement handling so old subscriptions are always removed and record metadata can be refreshed.
-- Expose model capability information needed for image validation and header display.
+Replace the single global history broadcast behavior:
 
-### T3.3 Implement session history
+- Track the most recent successful `history.list(workspaceId)` for each WebSocket.
+- Clear subscription state when the socket closes.
+- A history change carries an affected `workspaceId`.
+- Refresh and send history only to sockets subscribed to that workspace.
+- Include `workspaceId` in every history message so clients can reject stale responses.
+- Coalesce simultaneous refreshes per workspace, not globally.
+- Never refresh histories for unselected/unsubscribed workspaces merely because a runtime event occurs.
 
-**Status:** Complete — Pi-native listing normalization, canonical open/delete allow-sets, missing-CWD visibility, live deletion guards, and history tests are implemented in [`src/server/session-history.ts`](src/server/session-history.ts).
+Workspace-list broadcasts remain global because the SQLite row set is small and does not touch Pi history.
 
-In `src/server/session-history.ts`:
+**Phase 3 exit criteria:** The wire protocol is workspace-aware, workspace CRUD works over WebSocket, and history broadcasts are isolated by each socket's selected workspace.
 
-- Discover sessions only through Pi listing APIs.
-- Normalize them into `ConversationSummary` values.
-- Use the first non-empty user prompt as the fallback title while respecting an explicit Pi session name when present.
-- Report missing CWDs as visible but not runnable.
-- Build a canonical allow-set of listed session files for open/delete operations.
-- Delete only sessions returned by the current listing API and reject live-session deletion.
-- Refresh history after create, prompt/title derivation, close, fork, and delete.
+## Phase 4 — Replace global Pi history discovery
 
-### T3.4 Implement message serialization
+### T4.1 Refactor `SessionHistory`
 
-**Status:** Complete — active-branch projection, defensive normalized message conversion, linked tools, UTF-8-safe output bounds, and fixture-driven coverage are implemented in [`src/server/serialize.ts`](src/server/serialize.ts).
+Change `src/server/session-history.ts` from a process-wide `listAll()` service to a workspace-scoped service:
 
-In `src/server/serialize.ts`:
+- Inject a boundary equivalent to `(cwd) => SessionManager.list(cwd)` for tests.
+- Require a resolved, available workspace for `list`, `refresh`, `resolve`, and `delete`.
+- Normalize only sessions returned for that workspace.
+- Include `workspaceId` in summaries.
+- Retain newest-first deterministic sorting and canonical session-file allow-sets.
+- Key any latest snapshots/caches by workspace ID; do not keep one global snapshot.
+- For `resolve` and `delete`, always perform a fresh workspace-scoped listing before accepting the conversation ID.
+- Verify the listed session's canonical stored CWD equals the workspace's canonical path.
+- Reject cross-workspace session IDs even if a browser learned them elsewhere.
+- Keep live status decoration by session ID/file, but require the live record's workspace ID to agree.
+- Keep deletion limited to the canonical file returned by the fresh scoped listing.
 
-- Convert Pi session entries into the normalized UI model.
-- Preserve entry IDs, role, text, thinking, images, tool links/results, timestamps, stop reasons, and errors.
-- Serialize only the active branch for the v1 timeline.
-- Bound tool output sent to the browser while retaining truncation metadata.
-- Never render or pass raw HTML as trusted content.
-- Add fixture-driven unit tests for text, images, thinking, tools, failures, compaction/branch entries, and malformed optional fields.
+Remove normal application references to `SessionManager.listAll()`. The SDK smoke test and documentation may still mention the API when validating Pi itself, but server behavior must not use it.
 
-**Exit criteria:** Temporary Pi sessions can be created, listed, serialized, disposed, and reopened without directly parsing or rewriting JSONL application-side.
+### T4.2 Add no-global-scan regression tests
 
-## Milestone 4 — Conversation registry and lifecycle
+Add tests that fail if the global listing boundary is invoked during:
 
-### T4.1 Implement registry ownership and indexes
+- server construction/startup;
+- WebSocket connection and `ready`;
+- `workspace.list`;
+- workspace create/update/delete;
+- conversation events in a workspace with no subscribed socket; and
+- history refresh for a different selected workspace.
 
-**Status:** Complete — process-wide runtime ownership, canonical ID/file indexes, duplicate-writer suppression, record metadata, replacement refresh, and socket-independent registry events are implemented in [`src/server/conversation-registry.ts`](src/server/conversation-registry.ts).
+Also verify:
 
-In `src/server/conversation-registry.ts`:
+- selecting workspace A calls only `SessionManager.list(A.path)`;
+- switching to B then calls only `SessionManager.list(B.path)`;
+- open/delete perform a fresh listing for the supplied workspace;
+- a missing workspace path is reported unavailable without falling back to global history; and
+- stale session files removed between list and open remain safely rejected.
 
-- Store records by Pi session ID and canonical session-file path.
-- Return an existing record when opening an already-live session.
-- Track status, creation/activity times, revision, active session reference, and unsubscribe function.
-- Make create/open operations atomic enough that concurrent requests cannot create duplicate live writers.
-- Emit registry events independently of any browser connection.
+**Phase 4 exit criteria:** No normal startup, connection, or history-refresh path calls `SessionManager.listAll()`, and cross-workspace session access is prevented by fresh scoped listings.
 
-### T4.2 Implement lifecycle operations
+## Phase 5 — Runtime and registry ownership
 
-**Status:** Complete — authoritative snapshots, busy-safe close, full registry disposal, lifecycle history refresh hooks, and externally removed session handling are implemented in [`src/server/conversation-registry.ts`](src/server/conversation-registry.ts).
+### T5.1 Add workspace ownership to conversation records
 
-- Create, open, get state, close, and dispose conversations.
-- Refuse close while streaming/aborting unless the run has first completed or been aborted.
-- Keep persisted history after close.
-- Update indexes safely when a runtime replacement changes session ID or file.
-- Handle externally removed session files with a stable error and history refresh.
+Update `src/server/conversation-registry.ts`:
 
-### T4.3 Implement the live-runtime limit
+- Add `workspaceId` to `ConversationRecord`.
+- Accept an authoritative workspace ID/path when creating or opening a runtime.
+- Include `workspaceId` in full state snapshots and emitted events.
+- Add queries such as `hasLiveWorkspace(workspaceId)` for workspace mutation guards.
+- Preserve workspace ownership through runtime identity replacement.
+- Ensure duplicate-open suppression verifies workspace ownership as well as session ID/file identity.
+- Change history-refresh callbacks/events to carry the affected workspace ID.
+- Keep the live-runtime limit and idle LRU eviction process-wide.
 
-**Status:** Complete — capacity reservations, deterministic idle LRU eviction, active-run protection, and concurrent limit coverage are implemented in [`src/server/conversation-registry.ts`](src/server/conversation-registry.ts).
+### T5.2 Bind lifecycle operations to workspace resolution
 
-- Enforce `CHATWCA_MAX_LIVE_CONVERSATIONS` before opening/creating/forking.
-- Evict the least-recently-used idle record.
-- Never evict streaming or aborting records.
-- Return a stable error if no idle eviction candidate exists.
-- Update activity timestamps on open/state access, prompting, and relevant session activity.
+Update command dispatch and registry boundaries:
 
-### T4.4 Normalize Pi events
+- `conversation.create` resolves the workspace row, checks current availability, and passes its canonical path internally to `PiRuntimeFactory.createPersistent()`.
+- `conversation.open` first resolves the conversation through fresh scoped history, then registers the runtime under that workspace ID.
+- `conversation.delete` resolves and deletes only through scoped history.
+- `conversation.fork` inherits the source record's workspace ID and path.
+- Closing or evicting a runtime keeps the workspace row and Pi session intact.
+- Removing a workspace is blocked until all of its live runtimes are closed; active runs must finish or be aborted first.
 
-**Status:** Complete — Pi lifecycle, message, tool, queue, retry, compaction, metadata, and abort events are normalized into revisioned wire events with bounded output and canonical completion IDs in [`src/server/normalize-events.ts`](src/server/normalize-events.ts).
+The Pi runtime factory may retain CWD-based internal methods, but arbitrary browser CWD input must no longer reach it.
 
-- Subscribe once per active `AgentSession`.
-- Map Pi events to message, tool, queue, status, retry, and compaction events.
-- Increment revisions in emission order.
-- Set status to streaming on agent start, aborting on abort request, idle on agent end, and error only for unrecoverable runtime failures.
-- Ensure accepted-prompt model failures appear in the event/state stream rather than retroactively failing the command.
-- Replace subscriptions correctly after any session replacement.
+### T5.3 Update event normalization and outbound flow keys
 
-### T4.5 Add registry tests
+- Add authoritative `workspaceId` to normalized events at the registry/normalizer boundary.
+- Update outbound coalescing keys and tests where event identity now includes workspace ownership.
+- Ensure background events from live conversations in non-selected workspaces can still update client runtime projections without triggering Pi history scans for those workspaces.
 
-**Status:** Complete — registry and real-Pi integration coverage verifies duplicate/canonical indexing, independent runtimes, LRU and active-run capacity behavior, monotonic lifecycle revisions, replacement re-subscription, and leak-free disposal.
+**Phase 5 exit criteria:** Every live conversation has immutable workspace ownership, create/open/delete/fork obey that ownership, and switching workspaces does not stop background runs.
 
-Cover:
+## Phase 6 — Server startup and shutdown wiring
 
-- duplicate open suppression;
-- canonical path indexing;
-- independent simultaneous runtimes;
-- idle LRU order;
-- no eviction of active runs;
-- status transitions and revisions;
-- runtime replacement and re-subscription; and
-- full disposal without leaked listeners.
+### T6.1 Wire the database and workspace repository
 
-**Exit criteria:** Multiple conversations can remain live independently, with deterministic status, revisions, eviction, and cleanup.
+Update `src/server/index.ts`:
 
-## Milestone 5 — WebSocket command layer and core chat
+1. Parse configuration.
+2. Open/initialize SQLite.
+3. Create the process-wide workspace repository.
+4. Create shared Pi model/runtime services.
+5. Create workspace-scoped history and the conversation registry.
+6. Start HTTP/WebSocket listeners.
 
-### T5.1 Secure the WebSocket upgrade boundary
+Do not perform a Pi history list in these steps. If startup fails after opening SQLite, close the database before returning.
 
-**Status:** Complete — `/ws` uses an explicit no-server upgrade boundary with same-authority browser Origin enforcement, origin-free direct-client support, and rejection coverage.
+### T6.2 Extend graceful shutdown
 
-- Attach `ws` to `/ws` only.
-- Accept browser upgrades only when `Origin` authority matches `Host`.
-- Accept direct clients that omit `Origin` as designed.
-- Reject malformed origins and unrelated paths.
-- Do not enable broad CORS or introduce authentication.
+Update `src/server/shutdown.ts` and server ownership interfaces:
 
-### T5.2 Implement command dispatch
+- Stop command/network admission first.
+- Abort and dispose active Pi runtimes as today.
+- Dispose protocol subscriptions.
+- Close SQLite exactly once after no new workspace commands can run.
+- Preserve the existing bounded shutdown deadline and forced socket cleanup.
+- Add shutdown tests for normal close, repeated signals, and initialization/close failures.
 
-**Status:** Complete — bounded TypeBox command decoding, correlated lifecycle/prompt dispatch, isolated socket sends, normalized event broadcasts, and coalesced authoritative history updates are implemented in [`src/server/protocol.ts`](src/server/protocol.ts).
+### T6.3 Update operational endpoints
 
-In `src/server/protocol.ts`:
+- Remove `defaultCwd` from `/api/config`.
+- Keep `CHATWCA_DATA_DIR` and the resolved database path server-only.
+- Health readiness should become true only after SQLite and required Pi process-wide services initialize successfully.
+- Do not expose workspace rows through HTTP; use the validated WebSocket protocol.
 
-- Parse JSON safely, enforce an inbound message-size limit, validate against TypeBox, and dispatch by command type.
-- Implement history list, conversation create/open/state/close/delete, prompt submit/steer/follow-up, abort, and later fork.
-- Correlate every acknowledgement/error with `requestId`.
-- Require `conversationId` for conversation-specific commands.
-- Broadcast authoritative conversation events and history changes to connected clients.
-- Isolate socket send failures so they cannot affect Pi runs.
+**Phase 6 exit criteria:** Startup initializes SQLite without listing Pi sessions, partial startup cleans up correctly, and graceful shutdown closes both Pi runtimes and SQLite.
 
-### T5.3 Implement text prompt and abort flows
+## Phase 7 — Browser state and socket recovery
 
-**Status:** Complete — Pi preflight drives immediate prompt acknowledgement, delivery modes are state-guarded, queue events remain authoritative, and concurrent abort requests are coalesced with final idle reconciliation.
+### T7.1 Refactor client state
 
-- Permit normal submit only while idle.
-- While streaming, require explicit steer or follow-up commands.
-- Validate non-empty text when no image is supplied.
-- Forward Pi queue updates.
-- Make abort idempotent where practical and preserve final `agent_end` reconciliation.
-- Return an immediate acceptance acknowledgement; stream subsequent completion/failure events separately.
+Update `src/web/src/api/state.ts` with:
 
-### T5.4 Implement snapshots and reconnect support
+- `workspaces: WorkspaceSummary[]`;
+- `selectedWorkspaceId: string | null`;
+- selected-workspace history plus its authoritative `historyWorkspaceId`;
+- `workspaceId` on stored conversation projections through `ConversationState`; and
+- workspace-specific pending/error state where needed.
 
-**Status:** Complete — lifecycle commands return authoritative full state, reconnects can reload history/state without socket-owned runtime teardown, and disconnect-during-run recovery is integration-tested.
+Reducer rules:
 
-- Return a complete state on create, open, explicit state request, and later fork.
-- Include the current revision and enough queue/status data to rebuild the selected UI.
-- On socket reconnection, let the client reload history and request state for its selected conversation.
-- Test disconnecting a client during a run: the server runtime must continue, and a new client must recover from a snapshot.
+- A workspace list never triggers history loading by itself.
+- Selecting a workspace clears the selected conversation and current history projection, then the client requests that workspace's history.
+- Apply a history message only when its `workspaceId` equals the current selection.
+- Replacing workspace A's history must not discard live snapshots belonging to workspace B.
+- If the selected workspace is removed, clear workspace/conversation selection and history.
+- Continue applying revisioned background events using their workspace and conversation IDs.
 
-**Exit criteria:** A protocol-level client can create/open sessions, submit/abort text prompts, receive incremental normalized events, and recover after disconnecting.
+### T7.2 Change connection and reconnect behavior
 
-## Milestone 6 — Core React interface
+Update `src/web/src/api/client.ts`:
 
-### T6.1 Build the socket client and reducer
+- On initial connection, send only `workspace.list`; do not send `history.list`.
+- Add `selectWorkspace(workspaceId | null)` that changes local state and requests scoped history only for a non-null selection.
+- During WebSocket reconnect in the same browser instance, re-list workspaces, then re-list only the previously selected workspace if it still exists.
+- Reopen/request state only for the previously selected conversation if it belongs to that workspace.
+- Keep full page reload behavior unselected; do not add localStorage/sessionStorage persistence.
+- Ignore stale history responses from a workspace that was deselected while the request was in flight.
 
-**Status:** Complete — the typed browser client, correlated command lifecycle, capped reconnect recovery, revision-aware reducer/resync, local selection, and per-conversation drafts are implemented in [`src/web/src/api/`](src/web/src/api/).
+Update expected-response matching and command helpers for workspace commands.
 
-In `src/web/api/`:
+### T7.3 Preserve drafts and background projections
 
-- Implement connection state, command request IDs, pending request correlation, and timeout/error handling.
-- Reconnect with bounded exponential backoff.
-- Reload history and selected conversation state after reconnect.
-- Maintain browser-local selection.
-- Apply deltas only when revisions are contiguous; ignore duplicates and request a full state on gaps.
-- Keep draft composer text browser-local and conversation-specific.
+- Keep drafts keyed by conversation ID.
+- Do not delete a draft merely because its workspace is temporarily unselected.
+- Clear a draft when its conversation is explicitly deleted.
+- Keep background live conversation snapshots so events remain contiguous across workspace switches.
+- Request a fresh state if an event revision gap is detected, independent of selected workspace.
 
-### T6.2 Build the application layout
+**Phase 7 exit criteria:** Connecting loads only workspace rows, workspace selection causes the first scoped Pi history request, and rapid switching/reconnects cannot display history from the wrong workspace.
 
-**Status:** Complete — the workspace-grouped/filterable sidebar, validated conversation creation flow, lazy session opening, conversation header, and responsive navigation are implemented in [`src/web/src/components/`](src/web/src/components/).
+## Phase 8 — Workspace-first UI
 
-Implement:
+### T8.1 Replace the CWD-grouped conversation sidebar
 
-- `ConversationSidebar` grouped/filterable by CWD with closed/idle/streaming/error states;
-- new-conversation flow with editable CWD and validation feedback;
-- lazy opening when a closed history item is selected;
-- `ConversationHeader` with title, full CWD, model, and status; and
-- responsive sidebar collapse for laptop-sized and narrower screens.
+Refactor `ConversationSidebar` into workspace-first components, following the proposed source layout:
 
-### T6.3 Build text chat interactions
+- `WorkspaceSidebar` for workspace selection and management;
+- `WorkspaceForm` for create/update name and path fields; and
+- `ConversationList` for the selected workspace's sessions.
 
-**Status:** Complete — incremental text messages, per-conversation multiline drafts, explicit streaming delivery/abort controls, and guarded close/delete actions are implemented in [`src/web/src/components/`](src/web/src/components/).
+Remove:
 
-- Render user and assistant text incrementally.
-- Add a multiline composer with keyboard-accessible submit behavior.
-- Show submit while idle and explicit steer/follow-up/abort controls while streaming.
-- Keep background conversation status updating while another conversation is selected.
-- Support close and delete with appropriate disabled states and confirmation for deletion.
+- the working-directory grouping/filter;
+- editable CWD from the new-conversation flow; and
+- all use of browser `defaultCwd`.
 
-### T6.4 Add the dark-only design system
+When no workspace is selected:
 
-**Status:** Complete — the single dark token palette, contrast-checked controls and rich-text colors, keyboard focus treatment, bounded code regions, and reduced-motion behavior are implemented in [`src/web/src/app.css`](src/web/src/app.css).
+- show workspace onboarding/selection;
+- do not show conversation history; and
+- disable new-conversation actions.
 
-In `src/web/styles/app.css`:
+### T8.2 Implement workspace management UX
 
-- Define a single dark palette with CSS custom properties.
-- Add WCAG AA text/control contrast, visible focus states, readable code/diff colors, and bounded scroll regions.
-- Honor reduced-motion preferences without implementing theme selection.
-- Do not inspect `prefers-color-scheme`.
+- Add create, rename/edit, and remove controls with accessible labels and keyboard focus handling.
+- Display both workspace name and full path.
+- Mark unavailable workspaces clearly and disable history/new-conversation actions for them.
+- Confirm removal with copy that explicitly says the directory and Pi sessions will not be deleted.
+- Surface duplicate, invalid, unavailable, busy, and database errors with stable messages.
+- After creation, refresh the authoritative workspace list; automatic selection is optional and must use a server-returned workspace ID rather than the raw path.
+- Prevent overlapping workspace mutations and conversation lifecycle actions.
 
-**Exit criteria:** A user can create, open, switch, close, and delete conversations and run text chats, including while another conversation continues in the background.
+### T8.3 Make conversation actions workspace-aware
 
-## Milestone 7 — Rich message rendering
+Update `src/web/src/App.tsx` and components:
 
-### T7.1 Render safe Markdown
+- Create conversations using the selected `workspaceId`.
+- Open/delete using both selected workspace ID and conversation ID.
+- Show workspace name/path in the conversation header.
+- Clear conversation selection when switching workspaces.
+- Keep close, prompt, abort, and fork flows operating on live conversation IDs.
+- Handle a workspace becoming unavailable or being removed by another tab.
+- Update empty/welcome states to guide users to add or select a workspace first.
 
-**Status:** Complete — assistant text uses explicit HTML-skipping React Markdown with GFM support, safe URL handling, streamed-partial coverage, and bounded rich-content styling in [`src/web/src/components/MarkdownContent.tsx`](src/web/src/components/MarkdownContent.tsx).
+### T8.4 Preserve responsive and accessibility behavior
 
-- Use `react-markdown` and `remark-gfm`.
-- Do not enable raw HTML rendering.
-- Style code blocks, tables, blockquotes, links, and long unbroken content.
-- Ensure streamed partial Markdown degrades safely.
+- Retain the current dark-only styling, reduced-motion behavior, and mobile sidebar backdrop.
+- Ensure workspace menus/forms are keyboard accessible and have visible focus states.
+- Keep long paths bounded/wrapping without breaking the layout.
+- Update ARIA labels from “conversations” to “workspaces and conversations” where appropriate.
 
-### T7.2 Render thinking and tools
+**Phase 8 exit criteria:** A user can manage workspaces and perform all existing conversation operations inside the selected workspace without entering a CWD for each conversation.
 
-**Status:** Complete — collapsed reasoning, linked live tool cards, incremental reducer updates, explicit outcomes, and bounded/truncation-labelled output are implemented in [`src/web/src/components/`](src/web/src/components/).
+## Phase 9 — Test-suite conversion
 
-- Add collapsed-by-default `ThinkingBlock` components.
-- Add `ToolCallCard` components linked to matching results.
-- Update active tools incrementally and distinguish success, failure, and running states.
-- Bound and scroll long tool output and clearly label browser-side truncation.
+### T9.1 Unit tests
 
-### T7.3 Render run metadata and notices
+Update/add tests for:
 
-**Status:** Complete — final stop/error/usage metadata and a dedicated bounded activity feed for retry, compaction, runtime, and queued-prompt notices are rendered separately from assistant prose.
+- configuration and SQLite lifecycle;
+- workspace repository and error mapping;
+- workspace protocol schemas and command-response typing;
+- scoped session-history authorization and deletion;
+- registry workspace ownership and busy checks;
+- per-socket workspace subscriptions and scoped broadcasts;
+- client state selection, stale-history rejection, and background projections;
+- reconnect behavior with and without a selected workspace; and
+- workspace forms/sidebar/list rendering and accessibility.
 
-- Display stop reason and message errors where relevant.
-- Render retry, compaction, queue, and runtime notices without mixing them into assistant prose.
-- Add usage metadata only where the SDK provides reliable values.
+Likely affected existing files include:
 
-**Exit criteria:** Text, thinking, tool calls, tool results, notices, and failures are understandable during and after a streamed run.
+```text
+tests/unit/config.test.ts
+tests/unit/errors.test.ts
+tests/unit/protocol.test.ts
+tests/unit/server-protocol.test.ts
+tests/unit/session-history.test.ts
+tests/unit/conversation-registry.test.ts
+tests/unit/normalize-events.test.ts
+tests/unit/outbound-flow.test.ts
+tests/unit/web-client.test.ts
+tests/unit/web-state.test.ts
+tests/unit/web-conversation-list.test.ts
+tests/unit/web-chat-interactions.test.ts
+```
 
-## Milestone 8 — Image prompts
+### T9.2 Integration tests
 
-### T8.1 Build browser image ingestion
+Update temporary server/Pi fixtures so every conversation belongs to an explicitly created workspace. Cover:
 
-**Status:** Complete — paste/drop/file ingestion, orientation-aware 2048 px resizing, configured preliminary limits, accessible ordered previews, resource cleanup, and browser protocol submission are implemented in [`src/web/src/components/`](src/web/src/components/).
+- server startup and socket connection with a list boundary that fails if called;
+- workspace persistence across server restart;
+- selecting one workspace without listing another;
+- workspace create/update/delete and multi-client broadcasts;
+- path disappearance/restoration;
+- path-update/delete rejection while live;
+- create/open/fork inheritance within a workspace;
+- cross-workspace open/delete rejection;
+- simultaneous runs in different workspaces;
+- scoped history updates after prompt, close, fork, and delete;
+- reconnect recovery for only the selected workspace; and
+- SQLite close during graceful shutdown.
 
-In the composer:
+Likely affected files include all server protocol, lifecycle, fork, smoke, and shutdown integration suites.
 
-- Support paste, drag/drop, and file selection for PNG, JPEG, and WebP.
-- Correct orientation and resize to a maximum 2048-pixel edge using browser image APIs.
-- Produce previews with remove/reorder controls and accessible labels.
-- Enforce image count and preliminary size/type limits before submission.
-- Release object URLs/canvas resources after removal or submission.
+### T9.3 Browser fixture and Playwright tests
 
-### T8.2 Validate images on the server
+Update `tests/browser/fixture-server.ts` to model:
 
-**Status:** Complete — strict encoded prechecks, MIME signature validation, configured decoded-byte/count limits, Pi conversion, capability rejection, and focused server coverage are implemented in [`src/server/images.ts`](src/server/images.ts).
+- workspace CRUD and availability;
+- workspace-scoped histories;
+- workspace IDs on states/events; and
+- selected-workspace history responses.
 
-In `src/server/images.ts`:
+Update browser specs to cover:
 
-- Validate the data URL/base64 shape and declared MIME type.
-- Check encoded payload bounds before allocating decoded buffers.
-- Verify decoded MIME signatures rather than trusting browser metadata.
-- Enforce per-image, aggregate decoded-byte, and image-count limits.
-- Convert accepted payloads to Pi `ImageContent` without adding a second upload store.
-- Reject image prompts when the selected model lacks image capability.
+- no history request before workspace selection;
+- create/select/edit/remove workspace;
+- unavailable workspace UI;
+- conversations isolated by workspace;
+- rapid workspace switching with out-of-order history responses;
+- background streaming while viewing another workspace;
+- reconnect restoring only in-memory selection;
+- confirmation that workspace removal retains sessions in the fixture; and
+- existing image, fork, rich rendering, accessibility, and responsive behavior after the sidebar redesign.
 
-### T8.3 Test image behavior
+### T9.4 Required regression assertion
 
-**Status:** Complete — server boundary and browser ingestion coverage exercise valid/spoofed/malformed payloads, configured limits, capability rejection, paste/drop/select/remove/resize, and successful isolated submission.
+Add a repository test or static assertion that production server source does not call `SessionManager.listAll()`. Runtime tests remain the primary guarantee; the static check prevents an accidental direct reintroduction.
 
-- Unit-test valid formats, spoofed MIME values, malformed base64, count limits, individual/aggregate size limits, and text-only model rejection.
-- Browser-test paste, drop, selection, preview removal, resizing, and successful submission.
+**Phase 9 exit criteria:** Unit, integration, and browser suites cover workspace behavior and retain all existing chat, image, fork, streaming, reconnect, and shutdown guarantees.
 
-**Exit criteria:** Supported image prompts persist in Pi history and reopen correctly; invalid or unsupported images fail with stable, clear errors.
+## Phase 10 — Documentation and final cleanup
 
-## Milestone 9 — Forking
+### T10.1 Update user documentation
 
-### T9.1 Validate fork targets
+Update `README.md` to describe:
 
-**Status:** Complete — snapshots/events expose server-derived user-message eligibility, the registry verifies idle active-branch Pi user entries, and protected capacity reservations precede T9.2 fork construction.
+- creating a workspace before creating/opening conversations;
+- `./data/chatwca.sqlite` and the `/data/` gitignore rule;
+- `CHATWCA_DATA_DIR` and removal of `CHATWCA_DEFAULT_CWD`;
+- startup loading workspace definitions but not Pi history;
+- workspace-scoped history behavior;
+- workspace removal retaining directories and sessions;
+- unavailable workspace recovery; and
+- SQLite backup considerations, including WAL-aware shutdown before copying.
 
-- Expose Fork only on user messages with valid Pi entry IDs.
-- On the server, require the source conversation to be idle.
-- Verify the target entry is a user message on the source's current active branch.
-- Reserve runtime capacity before creating the fork.
+Keep `docs/pi-sdk-notes.md` accurate: `listAll()` may remain documented as an SDK capability, but state that ChatWCA normal operation uses `SessionManager.list(cwd)`.
 
-### T9.2 Implement source-preserving fork creation
+### T10.2 Remove obsolete global-history code and copy
 
-**Status:** Complete — forks are built in reserved, unregistered source runtimes, promoted atomically after replacement, rolled back on failure, and returned as correlated full-state responses with editor text.
+- Remove dead default-CWD UI/config paths.
+- Remove global history caches, broadcasts, and `listAll()` adapters.
+- Rename CWD-grouped sidebar helpers/tests where appropriate.
+- Ensure public errors and UI text consistently use “workspace” for the registered entity and “working directory” only for the underlying path.
+- Confirm no generated database or WAL file is tracked by Git.
 
-- Open the source session in an unregistered temporary runtime rather than calling `fork()` on the source record.
-- Invoke `runtime.fork(entryId)` on the temporary runtime.
-- Handle the resulting session replacement using the same replacement helper as other runtime operations.
-- Register the resulting fork only after creation succeeds.
-- Inherit the source CWD and current model where the SDK supports it.
-- Dispose all temporary resources on failure and leave the source record/session untouched.
-- Return the new full conversation state and the SDK-provided `editorText`.
+### T10.3 Run final gates
 
-### T9.3 Build the fork UI
+Run:
 
-**Status:** Complete — eligible user-message actions invoke the source-preserving fork command, atomically select/prefill the returned conversation without submission, and expose accessible pending/error feedback with focused UI/client coverage.
+```sh
+npm run typecheck
+npm run build
+npm run test:unit
+npm run test:integration
+npm run test:browser
+npm run test:sdk-smoke
+```
 
-- Add Fork actions to eligible user messages.
-- Select the new conversation after successful fork.
-- Prefill its composer with `editorText` without automatically submitting it.
-- Allow the user to edit or clear the copied prompt.
-- Keep the source available and unchanged in history.
+Also verify manually:
 
-### T9.4 Add fork integration tests
+1. Start with no `data` directory and confirm it is created.
+2. Connect a browser and confirm no Pi history scan occurs.
+3. Add two workspaces with existing Pi sessions.
+4. Select each workspace and confirm only its sessions appear.
+5. Start a run in workspace A, switch to B, and confirm A continues.
+6. Restart the server and confirm workspace rows persist while browser selection resets after a full reload.
+7. Remove a workspace and confirm its directory and Pi session files remain.
+8. Shut down and confirm SQLite, WebSockets, HTTP, and Pi runtimes close cleanly.
 
-**Status:** Complete — isolated deterministic Pi/provider and full WebSocket client integration coverage verifies source preservation, target/run guards, failure cleanup, fork identity/history, and editable editor prefill.
+**Phase 10 exit criteria:** Documentation matches behavior, obsolete global-history paths are gone, all automated checks pass, and manual workspace isolation/persistence checks succeed.
 
-Verify:
+## Implementation order and commit boundaries
 
-- source history/file/runtime do not change;
-- target entry validation rejects off-branch and non-user entries;
-- streaming sources cannot be forked;
-- failed forks leak no runtime/listener;
-- forked state has a new session identity and expected history; and
-- editor text is returned and editable.
+Use small commits in this order so the repository remains reviewable:
 
-**Exit criteria:** A user can fork from an earlier active-branch user message into a separate persisted conversation without mutating the source.
+1. SQLite dependency, config, `.gitignore`, database lifecycle, and repository tests.
+2. Workspace domain schemas, errors, and repository CRUD.
+3. Workspace protocol commands and server dispatch.
+4. Workspace-scoped `SessionHistory` with no-global-scan tests.
+5. Registry/runtime workspace ownership and scoped history broadcasts.
+6. Startup/shutdown database wiring.
+7. Browser client state and reconnect behavior.
+8. Workspace-first UI and styles.
+9. Integration/browser fixture conversion and regression coverage.
+10. README/docs cleanup and final gates.
 
-## Milestone 10 — Resilience, shutdown, and release hardening
+Temporary compilation breaks should be confined to a commit while shared protocol changes are propagated across server, client, and fixtures. Prefer landing protocol schema changes together with all required compile-time call-site updates.
 
-### T10.1 Add outbound flow control
+## Completion checklist
 
-**Status:** Complete — per-client buffered-byte accounting, priority-aware bounded queues, safe cumulative tool-update coalescing, slow-client resynchronization/disconnect behavior, transport-level inbound bounds, and combined tool-output bounds are implemented in [`src/server/outbound-flow.ts`](src/server/outbound-flow.ts) and [`src/server/protocol.ts`](src/server/protocol.ts).
-
-- Track WebSocket buffered bytes.
-- Preserve high-priority text/status events.
-- Coalesce safe high-frequency tool updates where possible.
-- Close or resynchronize persistently slow clients without interrupting server-side runs.
-- Bound serialized tool output and all inbound command payloads.
-
-### T10.2 Implement graceful shutdown
-
-**Status:** Complete — signal-driven admission control, client notification/closure, active-run abort, capped configurable grace, and idempotent forced transport/runtime cleanup are implemented in [`src/server/shutdown.ts`](src/server/shutdown.ts).
-
-- On `SIGINT`/`SIGTERM`, reject new prompt/create/open/fork commands.
-- Stop accepting HTTP/WebSocket connections and notify/close clients.
-- Ask active sessions to abort.
-- Wait for a configurable bounded grace period.
-- Unsubscribe and dispose every runtime, then close the HTTP server.
-- Make shutdown idempotent and ensure it cannot hang indefinitely.
-
-### T10.3 Complete integration coverage
-
-**Status:** Complete — isolated real-Pi lifecycle integration coverage now exercises persistence/reopen, concurrency/background work, queues, abort/failure, reconnect snapshots, replacement subscriptions, capacity/LRU, guarded deletion, and missing storage without touching operator sessions.
-
-Using temporary Pi session roots and a deterministic fake model/provider, cover:
-
-- create → prompt → persist → dispose → reopen;
-- concurrent independent conversations;
-- background streaming while switching;
-- steer and follow-up queue behavior;
-- abort and model failure behavior;
-- reconnect and full-state reconciliation;
-- runtime replacement subscription correctness;
-- idle LRU eviction and capacity failure;
-- guarded deletion; and
-- missing workspace/session files.
-
-### T10.4 Complete browser coverage
-
-**Status:** Complete — deterministic, isolated Playwright coverage exercises the full browser lifecycle, background streaming and rich blocks, all image ingestion paths, fork editing, transport recovery, keyboard/responsive dark UI behavior, and same-authority access over a non-loopback host with the fixture bound to `0.0.0.0`.
-
-Use Playwright to verify:
-
-- create, switch, close, reopen, and delete;
-- streaming text and background status;
-- thinking/tool collapse behavior;
-- image paste/drop/select;
-- fork/prefill/edit flow;
-- reconnect after socket interruption;
-- keyboard focus and primary controls;
-- responsive dark-only layout; and
-- access through a non-loopback/LAN-style host while the test server binds to `0.0.0.0`.
-
-### T10.5 Operational documentation
-
-**Status:** Complete — [`README.md`](README.md) documents verified setup and lifecycle commands, Node/Pi requirements, configuration and fixed payload/flow defaults, the no-auth trusted-LAN boundary, Pi-native persistence compatibility, bounded shutdown, and operational troubleshooting.
-
-Update `README.md` with:
-
-- install, development, build, and start commands;
-- Node and Pi prerequisites;
-- all supported environment variables and payload defaults;
-- trusted-LAN/no-auth security warning;
-- session compatibility and storage behavior;
-- graceful shutdown expectations; and
-- troubleshooting for no model, missing CWD, origin mismatch, and session/runtime errors.
-
-**Exit criteria:** All automated suites pass, shutdown is bounded, slow/disconnected clients do not stop runs, and setup/security behavior is documented.
-
-## Cross-cutting test gates
-
-Run these at the end of every milestone:
-
-1. TypeScript strict typecheck.
-2. Production server and web build.
-3. Unit tests.
-4. Relevant integration tests.
-5. Relevant Playwright tests once the UI exists.
-6. A check that no test has written sessions into the operator's real Pi session directory.
-
-## Release acceptance checklist
-
-- [x] Server defaults to `0.0.0.0:8787` and works from another LAN machine.
-- [x] There is no authentication/authorization flow and same-authority WebSocket origin checks work.
-- [x] Any valid accessible local directory can be used for a conversation.
-- [x] Pi-native history survives browser/server restarts and remains Pi CLI-compatible.
-- [x] Multiple live conversations run independently and switching does not interrupt background work.
-- [x] Text, thinking, tool calls, tool results, queue changes, and errors stream incrementally.
-- [x] Reconnects and revision gaps recover through authoritative snapshots.
-- [x] PNG, JPEG, and WebP prompts work within configured limits on vision-capable models.
-- [x] Forking creates a new persisted session, prefills the editor, and leaves the source unchanged.
-- [x] Idle LRU eviction, close, deletion guardrails, abort, and graceful shutdown behave as designed.
-- [x] The dark-only UI is keyboard accessible, responsive at common laptop sizes, and does not render raw model HTML.
-- [x] Unit, integration, and browser test suites pass with isolated temporary Pi state.
-
-## Explicitly deferred
-
-Do not include these in the v1 implementation unless the design is revised: authentication, internet-facing hardening, multi-user isolation, a light theme, terminal/file/SCM panels, Pi configuration screens, arbitrary file attachments, a vision bridge, horizontal scaling, in-place branch-tree navigation, or “clone through here” fork positioning.
+- [ ] `/data/` is gitignored.
+- [ ] `better-sqlite3` is installed and locked.
+- [ ] `CHATWCA_DATA_DIR` defaults to `./data`; `CHATWCA_DEFAULT_CWD` is removed.
+- [ ] SQLite initializes `data/chatwca.sqlite` and persists workspace rows.
+- [ ] Workspace CRUD validates names and canonical directory paths.
+- [ ] Workspace removal never deletes directories or Pi sessions.
+- [ ] Startup and browser connection do not list Pi sessions.
+- [ ] Selecting a workspace uses `SessionManager.list(workspace.path)`.
+- [ ] Production server code does not call `SessionManager.listAll()`.
+- [ ] History responses and broadcasts are workspace-scoped.
+- [ ] Fresh scoped listings authorize conversation open and delete.
+- [ ] Conversation records, states, summaries, and events carry workspace ownership.
+- [ ] Forks inherit source workspace ownership.
+- [ ] Live-runtime LRU remains process-wide and background runs survive workspace switches.
+- [ ] Path update/removal is rejected while the workspace owns a live runtime.
+- [ ] Initial connection lists workspaces only; reconnect lists only the selected workspace's history.
+- [ ] The UI supports workspace create/select/edit/remove and no longer requests a CWD per conversation.
+- [ ] Unit, integration, browser, build, typecheck, and SDK smoke checks pass.
+- [ ] README and operational documentation match the workspace behavior.

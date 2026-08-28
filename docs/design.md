@@ -12,11 +12,14 @@ ChatWCA is a single-user, dark-only web interface for the Pi coding agent. A Nod
 
 The server intentionally binds to `0.0.0.0` and has no authentication or authorization. It is intended to run inside a trusted, segmented LAN. Network access control is an infrastructure concern and is outside the application.
 
+A workspace is a user-named, canonical path to a directory. ChatWCA stores workspace definitions in its own SQLite database. The server does not scan Pi's global session history during startup or browser connection; it lists Pi sessions only for a workspace selected by the browser.
+
 Each conversation:
 
+- belongs to one registered workspace;
 - is persisted using Pi's native JSONL session format;
 - owns an independent `AgentSessionRuntime` while open;
-- has its own working directory;
+- uses its workspace directory as its working directory;
 - can continue running while the user views another conversation;
 - can be forked from an earlier user message into a new conversation; and
 - supports text and image prompts.
@@ -25,9 +28,11 @@ Each conversation:
 
 - Provide a responsive browser-based Pi chat interface.
 - Preserve compatibility with sessions created by the Pi CLI.
-- List, open, switch, create, and delete persisted conversations.
+- Create, rename, update, list, and remove named workspaces.
+- List, open, switch, create, and delete persisted conversations within a selected workspace.
+- Avoid scanning sessions belonging to unselected workspaces.
 - Keep multiple conversations alive concurrently.
-- Associate every conversation with an explicit working directory.
+- Associate every conversation with a registered workspace and explicit working directory.
 - Stream assistant text, thinking, tool calls, and tool results.
 - Support pasted, dropped, and selected images.
 - Fork a conversation from an earlier user message without changing the source.
@@ -49,6 +54,8 @@ The first version will not include:
 - A secondary-model "vision bridge" for text-only models
 - Horizontal scaling or multiple server processes sharing active runtimes
 - In-place visualization of every branch in Pi's session tree
+- Automatic discovery or import of workspaces by scanning all Pi sessions
+- Migration from the pre-workspace, global-history design
 
 Pi resources already configured on the host—models, credentials, context files, skills, and extensions—remain available through the SDK.
 
@@ -59,6 +66,7 @@ Pi resources already configured on the host—models, credentials, context files
 - Browsers may run on another machine in the same segmented LAN.
 - The LAN controls which devices can reach the configured port.
 - The Node.js process has the same filesystem permissions as the operator.
+- The process can create and write the local `./data` directory containing ChatWCA's SQLite database.
 - There is one ChatWCA server process. A restart interrupts active model requests, but completed session history remains persisted by Pi.
 - The application is not a sandbox. Pi tools can read, write, edit, and execute commands in the selected workspace with the server process's permissions.
 
@@ -79,11 +87,15 @@ http://192.168.20.10:8787
 ```mermaid
 flowchart LR
     B[React browser client] <-->|WebSocket commands and events| W[Node.js web server]
+    W --> WR[Workspace repository]
+    WR --> DB[(SQLite workspace database)]
+    W --> H[Workspace-scoped session history]
+    H --> P[Pi SDK]
     W --> R[Conversation registry]
     R --> A[Runtime A / workspace A]
     R --> C[Runtime B / workspace B]
     R --> D[Runtime C / workspace C]
-    A --> P[Pi SDK]
+    A --> P
     C --> P
     D --> P
     P --> S[Pi JSONL session store]
@@ -104,6 +116,7 @@ flowchart LR
 | Streaming transport | `ws` WebSocket server attached to the HTTP server |
 | Frontend | React and Vite |
 | Runtime validation | TypeBox schemas shared by client and server |
+| Workspace metadata | SQLite through `better-sqlite3` |
 | Markdown | `react-markdown` and `remark-gfm` |
 | State management | React reducer/context initially |
 | Unit tests | Vitest |
@@ -114,11 +127,11 @@ The Pi SDK runs in the web server process. RPC mode and child Pi processes are u
 
 ## 6. Server ownership model
 
-The server is the source of truth for conversation state. Browser state is a projection and can always be rebuilt from an authoritative server snapshot.
+The server is the source of truth for workspace definitions and conversation state. Workspace definitions are persisted in SQLite; browser state is a projection and can always be rebuilt from authoritative server snapshots.
 
-The server owns one global `ConversationRegistry`. It is not created per browser connection. Multiple browser tabs therefore observe the same running conversations rather than accidentally creating duplicate Pi runtimes.
+The server owns one global `WorkspaceRepository` and one global `ConversationRegistry`. They are not created per browser connection. Multiple browser tabs therefore observe the same workspaces and running conversations rather than accidentally creating duplicate Pi runtimes.
 
-"Selected conversation" is browser-local. Every command includes a `conversationId`; changing the selection in one tab does not change another tab's selection.
+"Selected workspace" and "selected conversation" are browser-local. Workspace-scoped commands include a `workspaceId`, and conversation commands include a `conversationId`. Changing either selection in one tab does not change another tab's selection. The selected workspace is not stored in SQLite.
 
 ### 6.1 Shared services
 
@@ -131,11 +144,50 @@ The server creates one `ModelRuntime` and reuses it across all conversations. Th
 
 CWD-bound Pi services and resources are created separately for each runtime.
 
-### 6.2 Conversation registry
+### 6.2 Workspace repository and database
+
+```ts
+interface Workspace {
+  id: string;                    // ChatWCA UUID
+  name: string;
+  path: string;                  // Canonical absolute directory path
+  createdAt: number;
+  updatedAt: number;
+}
+
+interface WorkspaceSummary extends Workspace {
+  available: boolean;            // Current path exists and is a directory
+}
+```
+
+The workspace repository stores metadata in `./data/chatwca.sqlite`, resolved relative to the server process's current working directory. The entire `/data/` directory is gitignored, including SQLite journal, WAL, and shared-memory files. `CHATWCA_DATA_DIR` may override the directory for deployments and tests.
+
+The server creates the data directory and initializes the database during startup. `better-sqlite3` is used because workspace operations are small and serialized, and it avoids relying on Node's experimental `node:sqlite` API. The connection enables foreign keys, a bounded busy timeout, and WAL mode, and is closed during graceful shutdown.
+
+Initial schema:
+
+```sql
+CREATE TABLE IF NOT EXISTS workspaces (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  path       TEXT NOT NULL UNIQUE,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+PRAGMA user_version = 1;
+```
+
+Workspace names must be non-empty. A path is resolved, verified as a directory, and canonicalized before insertion or update; canonical paths are unique. A registered workspace remains visible if its directory later disappears, but it is marked unavailable and cannot list, create, or open conversations until the path is restored.
+
+Removing a workspace deletes only its database row. It never deletes the directory or any Pi session. Removal and path changes are rejected while that workspace owns a live runtime; renaming remains allowed. Because ChatWCA has not been released, the initial workspace design does not import or migrate state from the earlier global-history design. Future schema evolution can use `PRAGMA user_version`.
+
+### 6.3 Conversation registry
 
 ```ts
 interface ConversationRecord {
   id: string;                    // Pi session UUID
+  workspaceId: string;           // ChatWCA workspace UUID
   sessionFile: string;
   cwd: string;
   title: string;
@@ -151,7 +203,7 @@ interface ConversationRecord {
 
 The registry maintains indexes by session ID and canonical session-file path. Opening a session that is already live returns the existing record instead of opening a second writer for the same JSONL file.
 
-### 6.3 Live-runtime limit
+### 6.4 Live-runtime limit
 
 A runtime retains model state, resources, event subscriptions, and possibly child tool processes. The server therefore defaults to eight live conversations.
 
@@ -168,7 +220,7 @@ Every live conversation is created through `createAgentSessionRuntime()`. The ru
 Conceptually:
 
 ```text
-createConversation(cwd, sessionManager)
+createConversation(workspaceId, workspacePath, sessionManager)
   create AgentSessionRuntime
     create cwd-bound Pi services
     create AgentSession from services
@@ -188,7 +240,7 @@ Existing conversations use:
 SessionManager.open(sessionFile)
 ```
 
-History is discovered with `SessionManager.list()` and `SessionManager.listAll()`. The application does not parse or rewrite Pi JSONL directly.
+History for a selected workspace is discovered with `SessionManager.list(workspace.path)`. Normal startup, browser connection, workspace listing, and history refresh paths must never call `SessionManager.listAll()`. The application does not parse or rewrite Pi JSONL directly.
 
 ### 7.2 Runtime replacement
 
@@ -200,30 +252,33 @@ Pi runtime operations such as `switchSession()` and `fork()` replace `runtime.se
 4. refresh the record's session ID, file, CWD, and title; and
 5. emit a new authoritative state snapshot.
 
-### 7.3 Working directories
+### 7.3 Workspaces and working directories
 
-A new conversation request contains a working directory. The server:
+A new conversation request contains a `workspaceId`, not an arbitrary working-directory path. The server:
 
-1. resolves it to an absolute path;
-2. canonicalizes it with `realpath` where possible;
-3. verifies that it exists and is a directory; and
-4. passes it explicitly to the runtime and `SessionManager`.
+1. resolves the workspace through SQLite;
+2. verifies that its stored canonical path still exists and is a directory;
+3. uses that path with `SessionManager.create()`; and
+4. records the workspace ID on the live conversation record.
 
-There is intentionally no workspace allowlist. The selected directory is shown prominently in the header and conversation list.
+The workspace registry is the working-directory allowlist for browser commands. The selected workspace name and path are shown prominently in the UI.
 
-A reopened session uses the CWD stored in its Pi session header. If that directory no longer exists, the history remains visible but the conversation cannot run until the directory is restored.
+A reopened session is resolved from a fresh `SessionManager.list(workspace.path)` result before its file is opened. Its Pi session header must identify the same canonical CWD as the workspace. A session ID or path discovered in one workspace cannot be used to open or delete a session through another workspace. If the workspace directory no longer exists, the workspace remains visible but its conversations cannot be listed or run until the same path is restored.
 
 ## 8. Session persistence and history
 
-Pi's session store is canonical. It already contains messages, images, tool calls, usage, compactions, tree relationships, model changes, the session name, and the working directory.
+Pi's session store is canonical for conversations. It already contains messages, images, tool calls, usage, compactions, tree relationships, model changes, the session name, and the working directory.
 
-ChatWCA will not maintain a second message database. This avoids synchronization bugs and keeps sessions interoperable with the Pi CLI.
+ChatWCA's SQLite database is canonical only for workspace definitions. It does not contain messages, conversation summaries, session-file copies, or the browser's selected workspace. This separation avoids synchronization bugs and keeps sessions interoperable with the Pi CLI.
+
+The server does not list Pi sessions at process startup or merely because a browser connects. After a browser selects a workspace, it requests that workspace's history, and the server calls `SessionManager.list(workspace.path)`. Selecting another workspace replaces the browser's history projection with a separately scoped result. No automatic global discovery or migration scan is performed.
 
 History summaries contain:
 
 ```ts
 interface ConversationSummary {
   id: string;
+  workspaceId: string;
   sessionFile: string;
   title: string;
   cwd: string;
@@ -235,7 +290,7 @@ interface ConversationSummary {
 
 The first non-empty user prompt becomes the default title. A later naming feature can persist an explicit name through Pi's session metadata.
 
-Deleting history is allowed only for files returned by Pi's session-listing APIs. A live session cannot be deleted until its runtime has been disposed.
+Deleting history is allowed only for files returned by a fresh Pi listing for the specified workspace. A live session cannot be deleted until its runtime has been disposed.
 
 ## 9. Conversation lifecycle
 
@@ -255,20 +310,21 @@ stateDiagram-v2
 
 ### 9.1 Creating
 
-- Validate and canonicalize the CWD.
-- Create a persistent `SessionManager`.
-- Create and register a runtime.
+- Resolve and validate the selected workspace from SQLite.
+- Create a persistent `SessionManager` using the workspace's canonical path.
+- Create and register a runtime with the workspace ID.
 - Return a full empty conversation state.
 
 ### 9.2 Opening
 
-- Resolve the requested item from the server-generated history list.
+- Resolve the requested item from a fresh Pi history listing scoped to the specified workspace.
+- Verify that the listed session CWD matches the workspace path.
 - Return an existing live runtime if present.
-- Otherwise open it with `SessionManager.open()` and register it.
+- Otherwise open it with `SessionManager.open()` and register it with the workspace ID.
 
 ### 9.3 Switching
 
-Switching is a frontend selection change, not a runtime replacement. The browser requests a full state for the selected conversation. Other conversations continue running.
+Switching workspaces or conversations is a frontend selection change, not a runtime replacement. Selecting a workspace requests only that workspace's history. Selecting a conversation requests its full state. Other conversations continue running.
 
 ### 9.4 Closing and eviction
 
@@ -282,8 +338,9 @@ On `SIGINT` or `SIGTERM`, the server:
 2. closes WebSocket connections;
 3. asks active sessions to abort;
 4. waits for a bounded grace period;
-5. disposes all runtimes and listeners; and
-6. closes the HTTP server.
+5. disposes all runtimes and listeners;
+6. closes the SQLite connection; and
+7. closes the HTTP server.
 
 The total graceful phase is bounded by `CHATWCA_SHUTDOWN_GRACE_MS` (10 seconds by default, capped at 5 minutes). At the deadline, remaining WebSockets and HTTP connections are forcibly closed and runtime disposal is invoked without waiting on a stalled SDK promise. Repeated signals share the same shutdown operation. Completed messages already written by Pi remain durable. In-progress responses may be persisted as aborted depending on how far the SDK run progressed.
 
@@ -314,7 +371,7 @@ Fork rules:
 
 - The selected entry must be a user message on the source's current branch.
 - The source must be idle.
-- The fork inherits the source CWD and current model where available.
+- The fork inherits the source workspace, CWD, and current model where available.
 - `runtime.fork(entryId)` creates/replaces the temporary runtime's active session; it does not replace the source registry record.
 - The SDK's returned `editorText` pre-fills the composer, matching Pi's `/fork` behavior.
 - The user may edit and submit that prompt in the new conversation.
@@ -386,6 +443,7 @@ Every event includes:
 ```ts
 interface EventEnvelope<T> {
   type: string;
+  workspaceId: string;
   conversationId: string;
   revision: number;
   payload: T;
@@ -394,7 +452,7 @@ interface EventEnvelope<T> {
 
 Revisions are monotonic per conversation. If the browser detects a gap, reconnects, or switches conversations, it requests `conversation.state` and replaces its local projection.
 
-Streaming text deltas are high-priority messages. Full history is sent only on open, switch, reconnect, fork, or explicit resynchronization. The server does not serialize the complete conversation on every token.
+Streaming text deltas are high-priority messages. Workspace-scoped history is sent only on workspace selection, reconnect, fork, or explicit resynchronization. A `history.list` command establishes that socket's current workspace-history subscription; subsequent history updates are sent only for that workspace and include its `workspaceId`. The server does not serialize the complete conversation on every token and never performs a global history scan to produce an update.
 
 Tool output sent to the browser is bounded and may be visually truncated. Pi remains responsible for the canonical persisted result and model context.
 
@@ -412,12 +470,16 @@ Representative client commands:
 
 ```ts
 type ClientCommand =
-  | { type: "history.list" }
-  | { type: "conversation.create"; cwd: string }
-  | { type: "conversation.open"; conversationId: string }
+  | { type: "workspace.list" }
+  | { type: "workspace.create"; name: string; path: string }
+  | { type: "workspace.update"; workspaceId: string; name?: string; path?: string }
+  | { type: "workspace.delete"; workspaceId: string }
+  | { type: "history.list"; workspaceId: string }
+  | { type: "conversation.create"; workspaceId: string }
+  | { type: "conversation.open"; workspaceId: string; conversationId: string }
   | { type: "conversation.state"; conversationId: string }
   | { type: "conversation.close"; conversationId: string }
-  | { type: "conversation.delete"; conversationId: string }
+  | { type: "conversation.delete"; workspaceId: string; conversationId: string }
   | { type: "conversation.fork"; conversationId: string; entryId: string }
   | { type: "prompt.submit"; conversationId: string; text: string; images: UiImage[] }
   | { type: "prompt.steer"; conversationId: string; text: string; images: UiImage[] }
@@ -430,7 +492,8 @@ Representative server messages:
 ```ts
 type ServerMessage =
   | { type: "ready"; serverVersion: string }
-  | { type: "history"; conversations: ConversationSummary[] }
+  | { type: "workspaces"; workspaces: WorkspaceSummary[] }
+  | { type: "history"; workspaceId: string; conversations: ConversationSummary[] }
   | { type: "state"; conversation: ConversationState }
   | EventEnvelope<MessageDelta>
   | EventEnvelope<ToolUpdate>
@@ -438,7 +501,7 @@ type ServerMessage =
   | { type: "error"; requestId?: string; code: string; message: string };
 ```
 
-Commands include a client-generated `requestId` in the concrete schema so responses and errors can be correlated. TypeBox validates every incoming message before dispatch.
+Commands include a client-generated `requestId` in the concrete schema so responses and errors can be correlated. TypeBox validates every incoming message before dispatch. Workspace CRUD broadcasts a fresh authoritative workspace list. History responses and notifications always include `workspaceId`; the browser discards a response that no longer matches its selected workspace.
 
 ## 14. Network behavior
 
@@ -460,12 +523,14 @@ Reverse proxies are optional. HTTP is sufficient for the intended segmented LAN 
 
 ```text
 <App>
-├── <ConversationSidebar>
-│   ├── New conversation
-│   ├── Working-directory filter
-│   └── Conversation rows with status
+├── <WorkspaceSidebar>
+│   ├── Workspace selector
+│   ├── Add / rename / edit / remove workspace
+│   └── <ConversationList>
+│       ├── New conversation
+│       └── Selected-workspace conversation rows with status
 └── <ConversationPage>
-    ├── <ConversationHeader> title, cwd, model, status
+    ├── <ConversationHeader> workspace, title, cwd, model, status
     ├── <MessageTimeline>
     │   ├── User messages and images
     │   ├── Assistant markdown
@@ -477,7 +542,9 @@ Reverse proxies are optional. HTTP is sufficient for the intended segmented LAN 
         └── Submit / steer / follow-up / abort
 ```
 
-The sidebar groups conversations by working directory and distinguishes persisted closed sessions from live idle or streaming sessions. Switching to a closed session lazily opens its runtime.
+The sidebar initially renders workspace definitions without requesting Pi history. Selecting a workspace requests only that workspace's conversations and establishes the socket's workspace-history subscription. The conversation list distinguishes persisted closed sessions from live idle or streaming sessions, and switching to a closed session lazily opens its runtime. If no workspace is selected, no history request is made and conversation creation is disabled.
+
+Workspace management uses explicit forms for name and path. Removing a workspace requires confirmation and clearly states that files and Pi sessions are retained. The browser keeps workspace and conversation selection in memory; reconnecting re-lists workspaces and then re-requests history only for the workspace already selected in that browser instance.
 
 ### 15.2 Dark-only styling
 
@@ -513,7 +580,11 @@ Only user messages with valid Pi entry IDs show the Fork action.
 
 Errors use stable codes and human-readable messages. Important cases include:
 
-- invalid or missing working directory;
+- invalid, duplicate, missing, or unavailable workspace;
+- invalid workspace name or directory path;
+- workspace update or removal while it owns a live runtime;
+- SQLite open, initialization, or write failure;
+- a session requested through the wrong workspace;
 - no configured/available model;
 - image sent to a text-only model;
 - malformed or oversized image payload;
@@ -533,7 +604,7 @@ An accepted prompt's later model failure is represented in the message/event str
 |---|---|---|
 | `CHATWCA_HOST` | `0.0.0.0` | HTTP/WebSocket bind address |
 | `CHATWCA_PORT` | `8787` | Listener port |
-| `CHATWCA_DEFAULT_CWD` | server process CWD | Initial new-conversation directory |
+| `CHATWCA_DATA_DIR` | `./data` | Directory containing `chatwca.sqlite`; relative values resolve from the server process CWD |
 | `CHATWCA_MAX_LIVE_CONVERSATIONS` | `8` | Maximum retained runtimes |
 | `CHATWCA_MAX_IMAGES` | `8` | Images allowed per prompt |
 | `CHATWCA_MAX_IMAGE_BYTES` | `8388608` | Decoded bytes per image |
@@ -551,10 +622,12 @@ src/
 ├── server/
 │   ├── index.ts                 # HTTP/WS startup and shutdown
 │   ├── config.ts                # environment parsing
+│   ├── database.ts              # SQLite open/schema/close lifecycle
+│   ├── workspace-repository.ts  # persistent workspace CRUD
 │   ├── protocol.ts              # command dispatch
 │   ├── conversation-registry.ts # live runtime ownership and eviction
 │   ├── pi-runtime.ts            # SDK runtime factory
-│   ├── session-history.ts       # Pi session listing/deletion
+│   ├── session-history.ts       # workspace-scoped Pi listing/deletion
 │   ├── serialize.ts             # SDK messages to UI messages
 │   └── images.ts                # image validation/conversion
 ├── shared/
@@ -566,7 +639,9 @@ src/
     │   ├── socket.ts
     │   └── reducer.ts
     ├── components/
-    │   ├── ConversationSidebar.tsx
+    │   ├── WorkspaceSidebar.tsx
+    │   ├── WorkspaceForm.tsx
+    │   ├── ConversationList.tsx
     │   ├── ConversationHeader.tsx
     │   ├── MessageTimeline.tsx
     │   ├── Message.tsx
@@ -582,20 +657,25 @@ src/
 ### Unit tests
 
 - protocol validation and unknown-message rejection;
+- SQLite schema initialization and workspace CRUD;
+- workspace name validation, path canonicalization, uniqueness, and availability;
 - message serialization for text, thinking, images, and tools;
-- conversation registry indexing and idle eviction;
-- CWD canonicalization;
+- conversation registry workspace ownership, indexing, and idle eviction;
 - image MIME and size limits;
-- revision sequencing; and
-- history deletion guardrails.
+- revision sequencing;
+- workspace-scoped history and deletion guardrails; and
+- startup, browser connection, and workspace listing never invoking `SessionManager.listAll()`.
 
 ### Integration tests
 
-Use in-memory or temporary Pi sessions and a fake model/provider to verify:
+Use temporary SQLite databases, temporary Pi sessions, and a fake model/provider to verify:
 
-- create, prompt, persist, dispose, and reopen;
-- simultaneous independent conversations;
-- switching while a background conversation streams;
+- startup loads workspace rows without scanning Pi sessions;
+- selecting one workspace lists only that workspace's sessions;
+- cross-workspace open and delete requests are rejected;
+- create, prompt, persist, dispose, and reopen within a workspace;
+- simultaneous independent conversations across workspaces;
+- switching workspaces while a background conversation streams;
 - fork creation without source mutation;
 - event re-subscription after runtime replacement;
 - abort behavior; and
@@ -603,7 +683,9 @@ Use in-memory or temporary Pi sessions and a fake model/provider to verify:
 
 ### Browser tests
 
-- create and switch conversations;
+- create, rename, update, select, and remove workspaces;
+- verify that no conversation history is requested before workspace selection;
+- create and switch conversations within selected workspaces;
 - LAN-style host access against a server bound to `0.0.0.0`;
 - streaming text rendering;
 - pasted and dropped images;
@@ -614,14 +696,16 @@ Use in-memory or temporary Pi sessions and a fake model/provider to verify:
 
 ## 20. Implementation sequence
 
-1. **Foundation** — workspace, TypeScript, Vite, Express, WebSocket, shared protocol, health endpoint.
-2. **Pi runtime** — shared `ModelRuntime`, runtime factory, persistent create/open/list, diagnostics.
-3. **Core chat** — prompt, abort, event normalization, state snapshots, text streaming.
-4. **Conversation registry** — multiple live runtimes, switching, background status, LRU disposal.
-5. **Rich rendering** — markdown, thinking, tools, errors, usage metadata.
-6. **Images** — paste/drop/select, resizing, validation, Pi image prompts.
-7. **Forking** — entry IDs, temporary fork runtime, prefilled editor, source-preservation tests.
-8. **Hardening** — reconnect revisions, backpressure, shutdown, payload bounds, browser tests.
+1. **Foundation** — TypeScript, Vite, Express, WebSocket, shared protocol, health endpoint.
+2. **Workspace storage** — gitignored data directory, SQLite lifecycle, workspace repository, CRUD protocol and UI.
+3. **Scoped Pi history** — selected-workspace listing with `SessionManager.list()`, scoped authorization, and no `listAll()` startup path.
+4. **Pi runtime** — shared `ModelRuntime`, workspace-bound runtime factory, persistent create/open, diagnostics.
+5. **Core chat** — prompt, abort, event normalization, state snapshots, text streaming.
+6. **Conversation registry** — workspace ownership, multiple live runtimes, switching, background status, LRU disposal.
+7. **Rich rendering** — markdown, thinking, tools, errors, usage metadata.
+8. **Images** — paste/drop/select, resizing, validation, Pi image prompts.
+9. **Forking** — entry IDs, temporary fork runtime, prefilled editor, source-preservation tests.
+10. **Hardening** — reconnect revisions, scoped history broadcasts, backpressure, shutdown, payload bounds, browser tests.
 
 ## 21. Acceptance criteria
 
@@ -629,9 +713,14 @@ The initial release is complete when:
 
 - the server listens on `0.0.0.0` by default and is usable from another LAN machine;
 - no authentication or authorization flow exists;
-- a user can create a persistent conversation for any valid local directory;
-- history survives browser and server restarts;
-- a user can switch conversations while another continues streaming;
+- workspace definitions persist in `./data/chatwca.sqlite` and the data directory is gitignored;
+- a user can create, edit, select, and remove a named workspace for any valid local directory;
+- the server does not call `SessionManager.listAll()` during startup, browser connection, or normal history refresh;
+- no Pi conversations are listed until the browser selects a workspace;
+- selecting a workspace lists only sessions associated with that workspace path;
+- a user can create a persistent conversation in the selected workspace;
+- workspace definitions and Pi history survive browser and server restarts;
+- a user can switch workspaces or conversations while another conversation continues streaming;
 - text, thinking, tool calls, and tool results render incrementally;
 - PNG, JPEG, and WebP prompts work with vision-capable models;
 - a user can fork from an earlier user message and edit the copied prompt;

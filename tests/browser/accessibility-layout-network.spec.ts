@@ -88,6 +88,42 @@ test("responsive layout stays dark-only and exposes mobile navigation", async ({
   await expect(page.locator(".conversation-sidebar")).not.toBeInViewport();
 });
 
+test("long conversation history scrolls without pushing the sidebar footer below the viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await waitForConnected(page);
+  await expect(page.locator(".conversation-row").first()).toBeVisible();
+
+  const layout = await page.evaluate(() => {
+    const list = document.querySelector<HTMLElement>(".conversation-list");
+    const sidebar = document.querySelector<HTMLElement>(".conversation-sidebar");
+    const footer = document.querySelector<HTMLElement>(".connection-summary");
+    if (list === null || sidebar === null || footer === null) {
+      throw new Error("Expected the populated conversation sidebar");
+    }
+    const listItems = list.querySelector("ul");
+    const firstRow = listItems?.querySelector("li");
+    if (listItems === null || firstRow === null || firstRow === undefined) {
+      throw new Error("Expected conversation history rows");
+    }
+
+    for (let index = 0; index < 60; index += 1) {
+      listItems.append(firstRow.cloneNode(true));
+    }
+
+    return {
+      viewportHeight: window.innerHeight,
+      sidebarBottom: sidebar.getBoundingClientRect().bottom,
+      footerBottom: footer.getBoundingClientRect().bottom,
+      listClientHeight: list.clientHeight,
+      listScrollHeight: list.scrollHeight,
+    };
+  });
+
+  expect(layout.listScrollHeight).toBeGreaterThan(layout.listClientHeight);
+  expect(layout.sidebarBottom).toBeLessThanOrEqual(layout.viewportHeight);
+  expect(layout.footerBottom).toBeLessThanOrEqual(layout.viewportHeight);
+});
+
 test("serves HTTP and same-authority WebSockets through a non-loopback host", async ({ page }) => {
   const host = lanAddress();
   expect(host).not.toMatch(/^127\./);

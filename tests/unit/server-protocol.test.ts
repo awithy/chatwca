@@ -149,16 +149,35 @@ describe("server WebSocket protocol", () => {
     });
     expect(calls.create).toHaveBeenCalledWith("/workspace");
 
-    await dispatchClientCommand(
-      command({
-        type: "conversation.open",
-        requestId: "open",
-        conversationId: state.id,
-      }),
-      registry,
-      history,
-    );
+    await expect(
+      dispatchClientCommand(
+        command({
+          type: "conversation.open",
+          requestId: "open",
+          conversationId: state.id,
+        }),
+        registry,
+        history,
+      ),
+    ).resolves.toMatchObject({
+      response: { type: "state", requestId: "open", conversation: state },
+      historyChanged: true,
+    });
     expect(calls.open).toHaveBeenCalledWith(state.sessionFile);
+
+    await expect(
+      dispatchClientCommand(
+        command({
+          type: "conversation.state",
+          requestId: "state",
+          conversationId: state.id,
+        }),
+        registry,
+        history,
+      ),
+    ).resolves.toEqual({
+      response: { type: "state", requestId: "state", conversation: state },
+    });
 
     await expect(
       dispatchClientCommand(

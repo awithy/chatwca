@@ -294,6 +294,8 @@ In `src/server/protocol.ts`:
 
 ### T5.4 Implement snapshots and reconnect support
 
+**Status:** Complete — lifecycle commands return authoritative full state, reconnects can reload history/state without socket-owned runtime teardown, and disconnect-during-run recovery is integration-tested.
+
 - Return a complete state on create, open, explicit state request, and later fork.
 - Include the current revision and enough queue/status data to rebuild the selected UI.
 - On socket reconnection, let the client reload history and request state for its selected conversation.

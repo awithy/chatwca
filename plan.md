@@ -283,6 +283,8 @@ In `src/server/protocol.ts`:
 
 ### T5.3 Implement text prompt and abort flows
 
+**Status:** Complete — Pi preflight drives immediate prompt acknowledgement, delivery modes are state-guarded, queue events remain authoritative, and concurrent abort requests are coalesced with final idle reconciliation.
+
 - Permit normal submit only while idle.
 - While streaming, require explicit steer or follow-up commands.
 - Validate non-empty text when no image is supplied.

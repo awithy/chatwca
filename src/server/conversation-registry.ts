@@ -1,7 +1,10 @@
 import { access, realpath } from "node:fs/promises";
 import path from "node:path";
 
-import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type {
+  AgentSession,
+  PromptOptions,
+} from "@earendil-works/pi-coding-agent";
 
 import { AppError, ERROR_CODES, toAppError } from "../shared/errors.js";
 import { nextRevision } from "../shared/revisions.js";
@@ -210,6 +213,7 @@ export class ConversationRegistry {
   readonly #bySessionFile = new Map<string, ConversationRecord>();
   readonly #pendingOpens = new Map<string, Promise<ConversationRecord>>();
   readonly #pendingCloses = new WeakMap<ConversationRecord, Promise<void>>();
+  readonly #pendingAborts = new WeakMap<ConversationRecord, Promise<void>>();
   readonly #listeners = new Set<ConversationRegistryListener>();
   readonly #replacementUnsubscribes = new WeakMap<
     ConversationRecord,
@@ -363,11 +367,13 @@ export class ConversationRegistry {
     streamingBehavior?: "steer" | "followUp",
   ): Promise<void> {
     const record = this.#required(conversationId);
-    const busy = isBusy(record);
-    if (record.status === "aborting") {
-      throw new AppError(ERROR_CODES.CONVERSATION_BUSY);
-    }
-    if (streamingBehavior === undefined ? busy : !busy) {
+    const streaming =
+      record.status === "streaming" || record.session.isStreaming;
+    if (
+      record.status === "aborting" ||
+      record.status === "error" ||
+      (streamingBehavior === undefined ? record.status !== "idle" || streaming : !streaming)
+    ) {
       throw new AppError(ERROR_CODES.CONVERSATION_BUSY);
     }
     if (!text.trim() && images.length === 0) {
@@ -382,36 +388,85 @@ export class ConversationRegistry {
     }
 
     this.#touch(record);
-    await record.runtime.prompt(
-      text,
-      streamingBehavior === undefined ? undefined : { streamingBehavior },
-    );
+
+    // Pi's prompt promise covers the entire run. Resolve this command at the
+    // preflight acceptance boundary instead, so the socket can acknowledge it
+    // immediately while completion and model failures continue through events.
+    await new Promise<void>((resolve, reject) => {
+      let accepted = false;
+      let settled = false;
+      const options: PromptOptions = {
+        ...(streamingBehavior === undefined ? {} : { streamingBehavior }),
+        preflightResult: (success) => {
+          if (!success || settled) return;
+          accepted = true;
+          settled = true;
+          resolve();
+        },
+      };
+
+      const completion = record.runtime.prompt(text, options);
+      void completion.then(
+        () => {
+          // The pinned SDK invokes preflightResult exactly once. Fail closed if
+          // a custom adapter violates that contract instead of hanging forever.
+          if (!settled) {
+            settled = true;
+            reject(new AppError(ERROR_CODES.MODEL_UNAVAILABLE));
+          }
+        },
+        (error: unknown) => {
+          if (!settled) {
+            settled = true;
+            reject(toAppError(error, { source: "pi", operation: "model" }));
+          } else if (accepted) {
+            // This is defensive: Pi reports post-acceptance model failures in
+            // message/events and normally resolves the prompt promise.
+            this.#handleRuntimeFailure(record, error);
+          }
+        },
+      );
+    });
   }
 
-  /** Request cancellation of an active run. Repeated idle aborts are no-ops. */
+  /** Request cancellation of an active run. Concurrent repeats share one abort. */
   async abort(conversationId: string): Promise<void> {
     const record = this.#required(conversationId);
+    const pending = this.#pendingAborts.get(record);
+    if (pending !== undefined) return pending;
     if (!isBusy(record)) return;
-    if (record.status !== "aborting") {
-      this.#emitConversationEvent(record, {
-        type: "conversation.status",
-        payload: { status: "aborting" },
-      });
-    }
 
-    try {
-      await record.runtime.abort();
-      // Pi normally emits agent_end before abort() resolves. Keep the registry
-      // deterministic if an injected/custom runtime does not emit lifecycle.
-      if (record.status === "aborting") {
+    const aborting = (async () => {
+      if (record.status !== "aborting") {
         this.#emitConversationEvent(record, {
           type: "conversation.status",
-          payload: { status: "idle" },
+          payload: { status: "aborting" },
         });
       }
-    } catch (error) {
-      this.#handleRuntimeFailure(record, error);
-      throw toAppError(error, { source: "internal" });
+
+      try {
+        await record.runtime.abort();
+        // Pi normally emits agent_end before abort() resolves. Keep the registry
+        // deterministic if an injected/custom runtime does not emit lifecycle.
+        if (record.status === "aborting") {
+          this.#emitConversationEvent(record, {
+            type: "conversation.status",
+            payload: { status: "idle" },
+          });
+        }
+      } catch (error) {
+        this.#handleRuntimeFailure(record, error);
+        throw toAppError(error, { source: "internal" });
+      }
+    })();
+    this.#pendingAborts.set(record, aborting);
+
+    try {
+      await aborting;
+    } finally {
+      if (this.#pendingAborts.get(record) === aborting) {
+        this.#pendingAborts.delete(record);
+      }
     }
   }
 

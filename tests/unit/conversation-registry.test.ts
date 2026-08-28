@@ -7,9 +7,11 @@ import type {
   AgentSessionEvent,
   AgentSessionEventListener,
   ModelRuntime,
+  PromptOptions,
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { AppError, ERROR_CODES } from "../../src/shared/errors.js";
 import {
   ConversationRegistry,
   type ConversationRegistryEvent,
@@ -79,6 +81,11 @@ class FakeRuntime implements PiConversationRuntimePort {
   disposed = false;
   readonly events = new Set<AgentSessionEventListener>();
   readonly replacements = new Set<PiRuntimeReplacementListener>();
+  readonly promptSpy = vi.fn(
+    async (_text: string, options?: PromptOptions) => {
+      options?.preflightResult?.(true);
+    },
+  );
   readonly abortSpy = vi.fn(async () => undefined);
   readonly disposeSpy = vi.fn(async () => {
     this.disposed = true;
@@ -104,8 +111,8 @@ class FakeRuntime implements PiConversationRuntimePort {
     return () => this.replacements.delete(listener);
   }
 
-  prompt(): Promise<void> {
-    return Promise.resolve();
+  prompt(text: string, options?: PromptOptions): Promise<void> {
+    return this.promptSpy(text, options);
   }
 
   abort(): Promise<void> {
@@ -242,6 +249,99 @@ describe("ConversationRegistry", () => {
     ]);
   });
 
+  it("acknowledges prompt preflight without waiting for completion and enforces delivery modes", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessionFile = path.join(root, "sessions", "prompt.jsonl");
+    await Promise.all([mkdir(cwd), mkdir(path.dirname(sessionFile))]);
+
+    const runtime = new FakeRuntime(identity("prompt", sessionFile, cwd));
+    let finishRun: (() => void) | undefined;
+    runtime.promptSpy.mockImplementation((_text, options) => {
+      options?.preflightResult?.(true);
+      return new Promise<void>((resolve) => {
+        finishRun = resolve;
+      });
+    });
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(runtime);
+    const registry = new ConversationRegistry({ runtimeFactory: factory });
+    const record = await registry.create(cwd);
+
+    await expect(registry.prompt(record.id, "hello", [])).resolves.toBeUndefined();
+    expect(finishRun).toBeTypeOf("function");
+    expect(runtime.promptSpy).toHaveBeenCalledWith(
+      "hello",
+      expect.objectContaining({ preflightResult: expect.any(Function) }),
+    );
+
+    record.status = "streaming";
+    await expect(registry.prompt(record.id, "normal", [])).rejects.toMatchObject({
+      code: ERROR_CODES.CONVERSATION_BUSY,
+    });
+    await expect(
+      registry.prompt(record.id, "steer", [], "steer"),
+    ).resolves.toBeUndefined();
+    expect(runtime.promptSpy).toHaveBeenLastCalledWith(
+      "steer",
+      expect.objectContaining({ streamingBehavior: "steer" }),
+    );
+
+    record.status = "idle";
+    await expect(
+      registry.prompt(record.id, "later", [], "followUp"),
+    ).rejects.toMatchObject({ code: ERROR_CODES.CONVERSATION_BUSY });
+    await expect(registry.prompt(record.id, "  ", [])).rejects.toMatchObject({
+      code: ERROR_CODES.INVALID_PROMPT,
+    });
+    finishRun?.();
+  });
+
+  it("fails rejected prompt preflight but reports post-acceptance runtime failure as an event", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessionFile = path.join(root, "sessions", "preflight.jsonl");
+    await Promise.all([mkdir(cwd), mkdir(path.dirname(sessionFile))]);
+
+    const runtime = new FakeRuntime(identity("preflight", sessionFile, cwd));
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(runtime);
+    const onListenerError = vi.fn();
+    const registry = new ConversationRegistry({
+      runtimeFactory: factory,
+      onListenerError,
+    });
+    const statuses: string[] = [];
+    registry.subscribe((item) => {
+      if (item.type === "conversation.event" && item.event.type === "conversation.status") {
+        statuses.push(item.event.payload.status);
+      }
+    });
+    const record = await registry.create(cwd);
+
+    runtime.promptSpy.mockImplementationOnce(async (_text, options) => {
+      options?.preflightResult?.(false);
+      throw new AppError(ERROR_CODES.MODEL_UNAVAILABLE);
+    });
+    await expect(registry.prompt(record.id, "rejected", [])).rejects.toMatchObject({
+      code: ERROR_CODES.MODEL_UNAVAILABLE,
+    });
+    expect(statuses).toEqual([]);
+
+    let failRun: ((error: Error) => void) | undefined;
+    runtime.promptSpy.mockImplementationOnce((_text, options) => {
+      options?.preflightResult?.(true);
+      return new Promise<void>((_resolve, reject) => {
+        failRun = reject;
+      });
+    });
+    await expect(registry.prompt(record.id, "accepted", [])).resolves.toBeUndefined();
+    const failure = new Error("post-acceptance failure");
+    failRun?.(failure);
+    await vi.waitFor(() => expect(statuses).toEqual(["error"]));
+    expect(onListenerError).toHaveBeenCalledWith(failure);
+  });
+
   it("marks active runs aborting and returns to idle when abort settles", async () => {
     const root = await temporaryRoot();
     const cwd = path.join(root, "workspace");
@@ -261,7 +361,19 @@ describe("ConversationRegistry", () => {
     const record = await registry.create(cwd);
     record.status = "streaming";
 
-    await registry.abort(record.id);
+    let finishAbort: (() => void) | undefined;
+    runtime.abortSpy.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finishAbort = resolve;
+        }),
+    );
+    const firstAbort = registry.abort(record.id);
+    const repeatedAbort = registry.abort(record.id);
+    expect(runtime.abortSpy).toHaveBeenCalledOnce();
+    expect(statuses).toEqual(["aborting"]);
+    finishAbort?.();
+    await Promise.all([firstAbort, repeatedAbort]);
     await registry.abort(record.id);
 
     expect(runtime.abortSpy).toHaveBeenCalledOnce();

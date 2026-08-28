@@ -72,9 +72,10 @@ export function App() {
   const selectedSummary = chat.history.find(
     (conversation) => conversation.id === chat.selectedConversationId,
   );
-  const selectedConversation = chat.selectedConversationId === null
+  const selectedProjection = chat.selectedConversationId === null
     ? undefined
-    : chat.conversations[chat.selectedConversationId]?.conversation;
+    : chat.conversations[chat.selectedConversationId];
+  const selectedConversation = selectedProjection?.conversation;
 
   async function createConversation(cwd: string): Promise<void> {
     setConversationError(null);
@@ -289,6 +290,8 @@ export function App() {
                 <div className="conversation-workspace">
                   <MessageTimeline
                     messages={selectedConversation.messages}
+                    notices={selectedProjection?.notices ?? []}
+                    queue={selectedConversation.queue}
                     streaming={selectedConversation.status === "streaming"}
                     cwd={selectedConversation.cwd}
                   />

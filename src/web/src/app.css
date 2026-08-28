@@ -696,6 +696,11 @@ pre {
   padding: 2rem clamp(1rem, 4vw, 3rem) 3rem;
 }
 
+.message-list.has-no-messages {
+  min-height: 100%;
+  grid-template-rows: minmax(12rem, 1fr) auto;
+}
+
 .chat-message {
   min-width: 0;
   max-width: 90%;
@@ -1030,12 +1035,135 @@ pre {
 }
 
 .message-error {
+  display: grid;
+  gap: 0.18rem;
   margin: 0.7rem 0 0;
   padding: 0.55rem 0.7rem;
   border-left: 3px solid var(--danger);
   color: var(--danger-text);
   font-size: 0.8rem;
   background: var(--danger-bg);
+}
+
+.message-error strong {
+  font-size: 0.68rem;
+  letter-spacing: 0.045em;
+  text-transform: uppercase;
+}
+
+.message-run-metadata {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.8rem;
+  margin-top: 0.7rem;
+  color: var(--subtle);
+  font-size: 0.66rem;
+}
+
+.message-run-metadata span {
+  white-space: nowrap;
+}
+
+.message-run-metadata .stop-reason {
+  padding: 0.12rem 0.38rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-weight: 700;
+  background: var(--panel);
+}
+
+.message-run-metadata .stop-length,
+.message-run-metadata .stop-aborted,
+.message-run-metadata .stop-unknown {
+  color: var(--warning-text);
+  border-color: var(--border-control);
+}
+
+.message-run-metadata .stop-error {
+  color: var(--danger-text);
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+}
+
+.run-activity {
+  width: min(44rem, 100%);
+  max-height: min(16rem, 35vh);
+  margin-top: 0.25rem;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: var(--panel);
+  scrollbar-color: var(--border-control) transparent;
+}
+
+.run-activity ul {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.run-notice {
+  display: grid;
+  grid-template-columns: 1.25rem minmax(0, 1fr);
+  gap: 0.55rem;
+  padding: 0.62rem 0.72rem;
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+.run-notice + .run-notice {
+  border-top: 1px solid var(--border);
+}
+
+.run-notice-mark {
+  color: var(--accent);
+  font-weight: 800;
+  text-align: center;
+}
+
+.run-notice > div {
+  min-width: 0;
+}
+
+.run-notice strong {
+  display: block;
+  color: var(--text);
+  font-size: 0.69rem;
+  letter-spacing: 0.025em;
+  text-transform: uppercase;
+}
+
+.run-notice p {
+  margin: 0.16rem 0 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.run-notice small {
+  display: block;
+  margin-top: 0.2rem;
+  color: var(--subtle);
+}
+
+.run-notice.notice-scheduled .run-notice-mark,
+.run-notice.notice-started .run-notice-mark,
+.run-notice.notice-warning .run-notice-mark,
+.run-notice.notice-aborted .run-notice-mark,
+.run-notice.notice-failed .run-notice-mark {
+  color: var(--warning);
+}
+
+.run-notice.notice-error .run-notice-mark,
+.run-notice.notice-failed strong {
+  color: var(--danger);
+}
+
+.run-notice.notice-completed .run-notice-mark {
+  color: var(--success);
 }
 
 .timeline-empty {

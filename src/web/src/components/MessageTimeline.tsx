@@ -6,13 +6,19 @@ import type {
   UserContentBlock,
   AssistantContentBlock,
   ToolResultBlock,
+  QueueState,
+  StatusNotice,
+  Usage,
 } from "../../../shared/protocol.js";
 import { MarkdownContent } from "./MarkdownContent.js";
+import { RunActivity } from "./RunActivity.js";
 import { ThinkingBlock } from "./ThinkingBlock.js";
 import { ToolCallCard } from "./ToolCallCard.js";
 
 export interface MessageTimelineProps {
   readonly messages: readonly NormalizedMessage[];
+  readonly notices: readonly StatusNotice[];
+  readonly queue: QueueState;
   readonly streaming: boolean;
   readonly cwd: string;
 }
@@ -25,6 +31,74 @@ function formatTime(timestamp: number | undefined): string | null {
     hour: "numeric",
     minute: "2-digit",
   }).format(date);
+}
+
+function stopReasonLabel(
+  reason: Extract<NormalizedMessage, { role: "assistant" }>["stopReason"],
+): string | null {
+  switch (reason) {
+    case "stop":
+      return "Completed";
+    case "length":
+      return "Token limit reached";
+    case "tool-use":
+      return "Tool use";
+    case "aborted":
+      return "Aborted";
+    case "error":
+      return "Error";
+    case "unknown":
+      return "Unknown";
+    case undefined:
+      return null;
+  }
+}
+
+function formatCost(cost: number): string {
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 6,
+  }).format(cost);
+}
+
+function UsageMetadata({ usage }: { readonly usage: Usage }) {
+  return (
+    <>
+      <span>{usage.inputTokens.toLocaleString()} input tokens</span>
+      <span>{usage.outputTokens.toLocaleString()} output tokens</span>
+      {usage.cacheReadTokens !== undefined && (
+        <span>{usage.cacheReadTokens.toLocaleString()} cache-read tokens</span>
+      )}
+      {usage.cacheWriteTokens !== undefined && (
+        <span>{usage.cacheWriteTokens.toLocaleString()} cache-write tokens</span>
+      )}
+      {usage.totalCost !== undefined && (
+        <span>{formatCost(usage.totalCost)} cost</span>
+      )}
+    </>
+  );
+}
+
+function RunMetadata({
+  message,
+}: {
+  readonly message: Extract<NormalizedMessage, { role: "assistant" }>;
+}) {
+  const reason = stopReasonLabel(message.stopReason);
+  if (reason === null && message.usage === undefined) return null;
+
+  return (
+    <footer className="message-run-metadata" aria-label="Run metadata">
+      {reason !== null && (
+        <span className={`stop-reason stop-${message.stopReason ?? "unknown"}`}>
+          Stop: {reason}
+        </span>
+      )}
+      {message.usage !== undefined && <UsageMetadata usage={message.usage} />}
+    </footer>
+  );
 }
 
 function ImageAttachment({
@@ -94,13 +168,24 @@ function hasVisibleContent(
   message: NormalizedMessage,
   toolCallIds: ReadonlySet<string>,
 ): boolean {
-  if (message.role === "user" || message.error !== undefined) return true;
+  if (
+    message.role === "user" ||
+    message.error !== undefined ||
+    message.stopReason !== undefined ||
+    message.usage !== undefined
+  ) return true;
   return message.blocks.some(
     (block) => block.type !== "tool-result" || !toolCallIds.has(block.toolCallId),
   );
 }
 
-export function MessageTimeline({ messages, streaming, cwd }: MessageTimelineProps) {
+export function MessageTimeline({
+  messages,
+  notices,
+  queue,
+  streaming,
+  cwd,
+}: MessageTimelineProps) {
   const timelineRef = useRef<HTMLDivElement>(null);
   const followOutputRef = useRef(true);
   const toolCallIds = new Set<string>();
@@ -123,22 +208,12 @@ export function MessageTimeline({ messages, streaming, cwd }: MessageTimelinePro
     if (timeline !== null && followOutputRef.current) {
       timeline.scrollTop = timeline.scrollHeight;
     }
-  }, [messages]);
+  }, [messages, notices, queue]);
 
   function trackScroll(event: UIEvent<HTMLDivElement>): void {
     const timeline = event.currentTarget;
     const distanceFromBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight;
     followOutputRef.current = distanceFromBottom < 96;
-  }
-
-  if (messages.length === 0) {
-    return (
-      <div className="timeline-empty">
-        <div className="timeline-empty-mark" aria-hidden="true">›_</div>
-        <h2>Ready for a new prompt</h2>
-        <p>This session is open in <span>{cwd}</span>.</p>
-      </div>
-    );
   }
 
   return (
@@ -150,7 +225,14 @@ export function MessageTimeline({ messages, streaming, cwd }: MessageTimelinePro
       aria-live="polite"
       onScroll={trackScroll}
     >
-      <div className="message-list">
+      <div className={`message-list${messages.length === 0 ? " has-no-messages" : ""}`}>
+        {messages.length === 0 && (
+          <div className="timeline-empty">
+            <div className="timeline-empty-mark" aria-hidden="true">›_</div>
+            <h2>Ready for a new prompt</h2>
+            <p>This session is open in <span>{cwd}</span>.</p>
+          </div>
+        )}
         {visibleMessages.map((message) => {
           const activeAssistant = streaming && message === lastMessage && message.role === "assistant";
           const timestamp = message.timestamp;
@@ -174,11 +256,18 @@ export function MessageTimeline({ messages, streaming, cwd }: MessageTimelinePro
                 toolResults={toolResults}
               />
               {message.role === "assistant" && message.error !== undefined && (
-                <p className="message-error" role="alert">{message.error.message}</p>
+                <div className="message-error" role="alert">
+                  <strong>Run failed</strong>
+                  <span>{message.error.message}</span>
+                </div>
+              )}
+              {message.role === "assistant" && !activeAssistant && (
+                <RunMetadata message={message} />
               )}
             </article>
           );
         })}
+        <RunActivity notices={notices} queue={queue} />
       </div>
     </div>
   );

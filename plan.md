@@ -375,6 +375,8 @@ In `src/web/styles/app.css`:
 
 ### T7.3 Render run metadata and notices
 
+**Status:** Complete — final stop/error/usage metadata and a dedicated bounded activity feed for retry, compaction, runtime, and queued-prompt notices are rendered separately from assistant prose.
+
 - Display stop reason and message errors where relevant.
 - Render retry, compaction, queue, and runtime notices without mixing them into assistant prose.
 - Add usage metadata only where the SDK provides reliable values.

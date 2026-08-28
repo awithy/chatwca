@@ -168,6 +168,27 @@ describe("session serialization", () => {
     });
   });
 
+  it("omits usage when the SDK does not provide reliable integer token counts", () => {
+    const messages = serializeSessionEntries([{
+      type: "message",
+      id: "assistant-fractional-usage",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "done" }],
+        stopReason: "stop",
+        usage: {
+          input: 1.5,
+          output: 2,
+          cacheRead: 1,
+          cacheWrite: 0,
+          cost: { total: 0.001 },
+        },
+      },
+    }]);
+
+    expect(messages[0]).not.toHaveProperty("usage");
+  });
+
   it("rejects invalid serializer bounds", () => {
     expect(() =>
       serializeSessionEntries(fixture.activeBranch, { maxToolOutputBytes: 0 }),

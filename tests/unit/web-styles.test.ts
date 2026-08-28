@@ -65,6 +65,9 @@ describe("dark-only web design system", () => {
     expect(css).toMatch(
       /\.tool-output\s*\{[^}]*max-height:[^;}]+;[^}]*overflow: auto;/s,
     );
+    expect(css).toMatch(
+      /\.run-activity\s*\{[^}]*max-height:[^;}]+;[^}]*overflow-y: auto;/s,
+    );
   });
 
   it("uses one palette, visible focus, and reduced motion without theme detection", () => {

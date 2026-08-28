@@ -45,6 +45,12 @@ function nonNegativeNumber(value: unknown): number | undefined {
     : undefined;
 }
 
+function nonNegativeInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : undefined;
+}
+
 function timestampOf(message: UnknownRecord, entry: UnknownRecord): number | undefined {
   const messageTimestamp = nonNegativeNumber(message.timestamp);
   if (messageTimestamp !== undefined) return messageTimestamp;
@@ -100,12 +106,12 @@ function serializeUserBlocks(content: unknown): UserContentBlock[] {
 function serializeUsage(value: unknown): Usage | undefined {
   const source = record(value);
   if (source === undefined) return undefined;
-  const inputTokens = nonNegativeNumber(source.input);
-  const outputTokens = nonNegativeNumber(source.output);
+  const inputTokens = nonNegativeInteger(source.input);
+  const outputTokens = nonNegativeInteger(source.output);
   if (inputTokens === undefined || outputTokens === undefined) return undefined;
 
-  const cacheReadTokens = nonNegativeNumber(source.cacheRead);
-  const cacheWriteTokens = nonNegativeNumber(source.cacheWrite);
+  const cacheReadTokens = nonNegativeInteger(source.cacheRead);
+  const cacheWriteTokens = nonNegativeInteger(source.cacheWrite);
   const totalCost = nonNegativeNumber(record(source.cost)?.total);
   return {
     inputTokens,

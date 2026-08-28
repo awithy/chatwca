@@ -103,6 +103,8 @@ describe("rich message rendering", () => {
     ];
     const html = render(createElement(MessageTimeline, {
       messages,
+      notices: [],
+      queue: { steering: [], followUp: [] },
       streaming: false,
       cwd: "/workspace",
     }));
@@ -111,5 +113,119 @@ describe("rich message rendering", () => {
     expect(html).toContain("/workspace");
     expect(html).not.toContain('data-entry-id="result-1"');
     expect(html).toContain('class="thinking-block"');
+  });
+
+  it("renders final stop, reliable usage, and message failures as run metadata", () => {
+    const messages: NormalizedMessage[] = [
+      {
+        entryId: "assistant-usage",
+        role: "assistant",
+        blocks: [],
+        stopReason: "length",
+        usage: {
+          inputTokens: 1_234,
+          outputTokens: 56,
+          cacheReadTokens: 700,
+          cacheWriteTokens: 12,
+          totalCost: 0.012345,
+        },
+      },
+      {
+        entryId: "assistant-error",
+        role: "assistant",
+        blocks: [],
+        stopReason: "error",
+        error: {
+          code: "model_failed",
+          message: "Provider <failed>",
+        },
+      },
+    ];
+    const html = render(createElement(MessageTimeline, {
+      messages,
+      notices: [],
+      queue: { steering: [], followUp: [] },
+      streaming: false,
+      cwd: "/workspace",
+    }));
+
+    expect(html).toContain('aria-label="Run metadata"');
+    expect(html).toContain("Token limit reached");
+    expect(html).toContain("1,234 input tokens");
+    expect(html).toContain("56 output tokens");
+    expect(html).toContain("700 cache-read tokens");
+    expect(html).toContain("12 cache-write tokens");
+    expect(html).toContain("$0.012345");
+    expect(html).toContain("Run failed");
+    expect(html).toContain("Provider &lt;failed&gt;");
+    expect(html).not.toContain("Provider <failed>");
+    expect(html).toContain('data-entry-id="assistant-usage"');
+  });
+
+  it("keeps retry, compaction, runtime, and queued-prompt notices outside assistant prose", () => {
+    const html = render(createElement(MessageTimeline, {
+      messages: [{
+        entryId: "assistant-1",
+        role: "assistant",
+        blocks: [{ type: "text", text: "Model prose" }],
+        stopReason: "stop",
+      }],
+      notices: [
+        {
+          kind: "retry",
+          phase: "scheduled",
+          message: "A model retry has been scheduled.",
+          attempt: 2,
+          maxAttempts: 3,
+          delayMs: 1_500,
+        },
+        {
+          kind: "compaction",
+          phase: "completed",
+          message: "Conversation compaction completed.",
+        },
+        {
+          kind: "runtime",
+          level: "warning",
+          message: "Runtime needs attention.",
+        },
+      ],
+      queue: {
+        steering: [{ text: "Use the focused test", imageCount: 0 }],
+        followUp: [{ text: "", imageCount: 2 }],
+      },
+      streaming: false,
+      cwd: "/workspace",
+    }));
+
+    expect(html).toContain('<section class="run-activity" aria-label="Run notices"');
+    expect(html).toContain("Retry scheduled");
+    expect(html).toContain("Attempt 2 of 3 · retry delay 1.5 s");
+    expect(html).toContain("Compaction completed");
+    expect(html).toContain("Runtime warning");
+    expect(html).toContain("Steering prompt queued");
+    expect(html).toContain("Use the focused test");
+    expect(html).toContain("Follow-up prompt queued");
+    expect(html).toContain("2 images");
+    expect(html.indexOf("run-activity")).toBeGreaterThan(html.indexOf("message-assistant"));
+  });
+
+  it("does not expose provisional run metadata while the last assistant is streaming", () => {
+    const html = render(createElement(MessageTimeline, {
+      messages: [{
+        entryId: "stream:one:1",
+        role: "assistant",
+        blocks: [{ type: "text", text: "Working" }],
+        stopReason: "unknown",
+        usage: { inputTokens: 0, outputTokens: 0 },
+      }],
+      notices: [],
+      queue: { steering: [], followUp: [] },
+      streaming: true,
+      cwd: "/workspace",
+    }));
+
+    expect(html).not.toContain('aria-label="Run metadata"');
+    expect(html).not.toContain("0 input tokens");
   });
 });

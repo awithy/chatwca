@@ -83,6 +83,7 @@ export function App() {
     (conversation) => conversation.id === chat.selectedConversationId,
   ) ?? (selectedConversation === undefined ? undefined : {
     id: selectedConversation.id,
+    workspaceId: selectedConversation.workspaceId,
     sessionFile: selectedConversation.sessionFile,
     title: selectedConversation.title,
     cwd: selectedConversation.cwd,
@@ -95,11 +96,11 @@ export function App() {
     runnable: true,
   });
 
-  async function createConversation(cwd: string): Promise<void> {
+  async function createConversation(workspaceId: string): Promise<void> {
     setConversationError(null);
     const result = await client.send<"conversation.create">({
       type: "conversation.create",
-      cwd,
+      workspaceId,
     });
     client.selectConversation(result.conversation.id);
     setSidebarOpen(false);
@@ -124,7 +125,11 @@ export function App() {
 
     setLoadingConversationId(summary.id);
     const command = summary.status === "closed"
-      ? client.send({ type: "conversation.open", conversationId: summary.id })
+      ? client.send({
+          type: "conversation.open",
+          workspaceId: summary.workspaceId,
+          conversationId: summary.id,
+        })
       : client.send({ type: "conversation.state", conversationId: summary.id });
     void command
       .catch((error: unknown) => {
@@ -223,6 +228,7 @@ export function App() {
       }
       await client.send({
         type: "conversation.delete",
+        workspaceId: selectedSummary.workspaceId,
         conversationId: selectedSummary.id,
       });
       client.setDraft(selectedSummary.id, "");

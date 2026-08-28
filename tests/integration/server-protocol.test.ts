@@ -17,11 +17,14 @@ import type {
   ConversationState,
   ConversationSummary,
   ServerMessage,
+  WorkspaceSummary,
 } from "../../src/shared/protocol.js";
 
 const servers: ChatWcaServer[] = [];
+const WORKSPACE_ID = "workspace-1";
 const state: ConversationState = {
   id: "conversation-1",
+  workspaceId: WORKSPACE_ID,
   sessionFile: "/sessions/conversation-1.jsonl",
   title: "Protocol test",
   cwd: "/workspace",
@@ -36,6 +39,7 @@ const state: ConversationState = {
 };
 const summary: ConversationSummary = {
   id: state.id,
+  workspaceId: WORKSPACE_ID,
   sessionFile: state.sessionFile,
   title: state.title,
   cwd: state.cwd,
@@ -121,6 +125,7 @@ describe("WebSocket command server", () => {
         });
       }),
       abort,
+      hasLiveWorkspace: () => false,
       subscribe: () => () => undefined,
     };
     const history: ProtocolHistory = {
@@ -189,11 +194,16 @@ describe("WebSocket command server", () => {
 
     const recoveredHistory = nextMessage(second);
     second.send(
-      JSON.stringify({ type: "history.list", requestId: "reconnect-history" }),
+      JSON.stringify({
+        type: "history.list",
+        requestId: "reconnect-history",
+        workspaceId: WORKSPACE_ID,
+      }),
     );
     await expect(recoveredHistory).resolves.toMatchObject({
       type: "history",
       requestId: "reconnect-history",
+      workspaceId: WORKSPACE_ID,
       conversations: [
         { id: reconnectState.id, status: "idle", messageCount: 2 },
       ],
@@ -225,6 +235,7 @@ describe("WebSocket command server", () => {
       fork: vi.fn(async () => ({ conversation: state, editorText: "" })),
       prompt: vi.fn(async () => undefined),
       abort: vi.fn(async () => undefined),
+      hasLiveWorkspace: () => false,
       subscribe: (listener) => {
         registryListener = listener;
         return () => {
@@ -238,10 +249,10 @@ describe("WebSocket command server", () => {
       releaseBroadcastHistory = resolve;
     });
     const history: ProtocolHistory = {
-      list: vi.fn(async () => {
+      list: vi.fn(async (workspaceId) => {
         listCount += 1;
-        if (listCount > 1) await broadcastHistoryGate;
-        return [summary];
+        if (listCount > 2) await broadcastHistoryGate;
+        return workspaceId === WORKSPACE_ID ? [summary] : [];
       }),
       resolve: vi.fn(async () => ({ summary })),
       delete: vi.fn(async () => [summary]),
@@ -260,6 +271,13 @@ describe("WebSocket command server", () => {
     const second = new WebSocket(`ws://127.0.0.1:${String(port)}/ws`);
     await Promise.all([nextMessage(first), nextMessage(second)]);
 
+    registryListener?.({
+      type: "conversation.state-changed",
+      record: { id: state.id, workspaceId: WORKSPACE_ID } as never,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(history.list).not.toHaveBeenCalled();
+
     const invalidResponse = nextMessage(first);
     first.send(
       JSON.stringify({ type: "history.list", requestId: "bad", extra: true }),
@@ -272,20 +290,39 @@ describe("WebSocket command server", () => {
     });
 
     const historyResponse = nextMessage(first);
-    first.send(JSON.stringify({ type: "history.list", requestId: "history" }));
+    first.send(JSON.stringify({
+      type: "history.list",
+      requestId: "history",
+      workspaceId: WORKSPACE_ID,
+    }));
     await expect(historyResponse).resolves.toEqual({
       type: "history",
       requestId: "history",
+      workspaceId: WORKSPACE_ID,
       conversations: [summary],
+    });
+
+    const secondSubscription = nextMessage(second);
+    second.send(JSON.stringify({
+      type: "history.list",
+      requestId: "history-other",
+      workspaceId: "workspace-2",
+    }));
+    await expect(secondSubscription).resolves.toEqual({
+      type: "history",
+      requestId: "history-other",
+      workspaceId: "workspace-2",
+      conversations: [],
     });
 
     const firstEvent = nextMessage(first);
     const secondEvent = nextMessage(second);
     registryListener?.({
       type: "conversation.event",
-      record: { id: state.id } as never,
+      record: { id: state.id, workspaceId: WORKSPACE_ID } as never,
       event: {
         type: "conversation.status",
+        workspaceId: WORKSPACE_ID,
         conversationId: state.id,
         revision: 1,
         payload: { status: "streaming" },
@@ -294,12 +331,14 @@ describe("WebSocket command server", () => {
     await expect(Promise.all([firstEvent, secondEvent])).resolves.toEqual([
       {
         type: "conversation.status",
+        workspaceId: WORKSPACE_ID,
         conversationId: state.id,
         revision: 1,
         payload: { status: "streaming" },
       },
       {
         type: "conversation.status",
+        workspaceId: WORKSPACE_ID,
         conversationId: state.id,
         revision: 1,
         payload: { status: "streaming" },
@@ -308,11 +347,115 @@ describe("WebSocket command server", () => {
 
     const firstHistory = nextMessage(first);
     const secondHistory = nextMessage(second);
+    registryListener?.({
+      type: "conversation.state-changed",
+      record: { id: "other", workspaceId: "workspace-2" } as never,
+    });
+    await vi.waitFor(() => {
+      expect(history.list).toHaveBeenCalledWith(WORKSPACE_ID);
+      expect(history.list).toHaveBeenCalledWith("workspace-2");
+    });
     releaseBroadcastHistory?.();
     await expect(Promise.all([firstHistory, secondHistory])).resolves.toEqual([
-      { type: "history", conversations: [summary] },
-      { type: "history", conversations: [summary] },
+      {
+        type: "history",
+        workspaceId: WORKSPACE_ID,
+        conversations: [summary],
+      },
+      {
+        type: "history",
+        workspaceId: "workspace-2",
+        conversations: [],
+      },
     ]);
+
+    first.close();
+    second.close();
+  });
+
+  it("correlates workspace mutations and sends exact authoritative broadcasts", async () => {
+    const registry: ProtocolRegistry = {
+      create: vi.fn(async () => ({ id: state.id })),
+      open: vi.fn(async () => ({ id: state.id })),
+      getState: vi.fn(async () => state),
+      close: vi.fn(async () => undefined),
+      fork: vi.fn(async () => ({ conversation: state, editorText: "" })),
+      prompt: vi.fn(async () => undefined),
+      abort: vi.fn(async () => undefined),
+      hasLiveWorkspace: () => false,
+      subscribe: () => () => undefined,
+    };
+    const history: ProtocolHistory = {
+      list: vi.fn(async () => []),
+      resolve: vi.fn(async () => ({ summary })),
+      delete: vi.fn(async () => []),
+    };
+    let rows: WorkspaceSummary[] = [];
+    const created: WorkspaceSummary = {
+      id: WORKSPACE_ID,
+      name: "Workspace",
+      path: "/workspace",
+      createdAt: 1,
+      updatedAt: 1,
+      available: true,
+    };
+    const workspaces = {
+      list: () => [...rows],
+      requireAvailable: () => created,
+      create: () => {
+        rows = [created];
+        return created;
+      },
+      update: () => created,
+      delete: () => { rows = []; },
+    };
+    const config = loadConfig({ CHATWCA_DATA_DIR: "/tmp" }, "/tmp");
+    const server = createChatWcaServer(config, "workspace-protocol-test", {
+      registry,
+      history,
+      workspaces,
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) =>
+      server.httpServer.listen(0, "127.0.0.1", resolve),
+    );
+    const { port } = server.httpServer.address() as AddressInfo;
+    const first = new WebSocket(`ws://127.0.0.1:${String(port)}/ws`);
+    const second = new WebSocket(`ws://127.0.0.1:${String(port)}/ws`);
+    await Promise.all([nextMessage(first), nextMessage(second)]);
+
+    const correlatedCreate = nextMessage(first);
+    const createBroadcast = nextMessage(second);
+    first.send(JSON.stringify({
+      type: "workspace.create",
+      requestId: "create-workspace",
+      name: "Workspace",
+      path: "/workspace",
+    }));
+    await expect(Promise.all([correlatedCreate, createBroadcast])).resolves.toEqual([
+      { type: "workspaces", requestId: "create-workspace", workspaces: [created] },
+      { type: "workspaces", workspaces: [created] },
+    ]);
+
+    const deleteMessages: ServerMessage[] = [];
+    const deleteComplete = new Promise<void>((resolve) => {
+      first.on("message", (data) => {
+        deleteMessages.push(JSON.parse(data.toString()) as ServerMessage);
+        if (deleteMessages.length === 2) resolve();
+      });
+    });
+    const deleteBroadcast = nextMessage(second);
+    first.send(JSON.stringify({
+      type: "workspace.delete",
+      requestId: "delete-workspace",
+      workspaceId: WORKSPACE_ID,
+    }));
+    await Promise.all([deleteComplete, deleteBroadcast]);
+    expect(deleteMessages).toEqual([
+      { type: "ack", requestId: "delete-workspace", command: "workspace.delete" },
+      { type: "workspaces", workspaces: [] },
+    ]);
+    await expect(deleteBroadcast).resolves.toEqual({ type: "workspaces", workspaces: [] });
 
     first.close();
     second.close();
@@ -328,6 +471,7 @@ describe("WebSocket command server", () => {
       fork: vi.fn(async () => ({ conversation: state, editorText: "" })),
       prompt,
       abort: vi.fn(async () => undefined),
+      hasLiveWorkspace: () => false,
       subscribe: () => () => undefined,
     };
     const history: ProtocolHistory = {

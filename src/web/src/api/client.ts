@@ -368,17 +368,26 @@ export class ChatSocketClient {
   async #recover(generation: number): Promise<void> {
     if (generation !== this.#generation || this.#state.connection !== "connected") return;
     try {
-      await this.send({ type: "history.list" });
+      // Workspace selection/reconnect recovery is introduced in Phase 7. A
+      // connection now lists only SQLite workspace rows and never scans Pi history.
+      await this.send({ type: "workspace.list" });
       const selected = this.#state.selectedConversationId;
+      const summary = selected === null
+        ? undefined
+        : this.#state.history.find((item) => item.id === selected);
       if (
         selected !== null &&
+        summary !== undefined &&
         generation === this.#generation &&
         this.#state.connection === "connected"
       ) {
-        const summary = this.#state.history.find((item) => item.id === selected);
-        if (summary?.status === "closed") {
-          await this.send({ type: "conversation.open", conversationId: selected });
-        } else if (summary !== undefined) {
+        if (summary.status === "closed") {
+          await this.send({
+            type: "conversation.open",
+            workspaceId: summary.workspaceId,
+            conversationId: selected,
+          });
+        } else {
           await this.send({ type: "conversation.state", conversationId: selected });
         }
       }

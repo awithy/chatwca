@@ -66,6 +66,7 @@ export interface ForkConversationResult {
 /** Mutable server-owned state for one live Pi runtime. */
 export interface ConversationRecord {
   id: string;
+  readonly workspaceId: string;
   sessionFile: string;
   cwd: string;
   title: string;
@@ -122,7 +123,7 @@ export interface ConversationRegistryOptions {
   /** Registry observers are isolated from Pi callbacks; failures are reported here. */
   readonly onListenerError?: (error: unknown) => void;
   /** Refreshes the Pi-native history projection after lifecycle changes. */
-  readonly refreshHistory?: () => void | Promise<void>;
+  readonly refreshHistory?: (workspaceId: string) => void | Promise<void>;
 }
 
 function firstUserText(session: AgentSession): string | undefined {
@@ -241,7 +242,7 @@ export class ConversationRegistry {
   readonly #maxLiveConversations: number;
   readonly #imageLimits: Readonly<ImageValidationLimits>;
   readonly #onListenerError: (error: unknown) => void;
-  readonly #refreshHistoryCallback: () => void | Promise<void>;
+  readonly #refreshHistoryCallback: (workspaceId: string) => void | Promise<void>;
   readonly #byId = new Map<string, ConversationRecord>();
   readonly #bySessionFile = new Map<string, ConversationRecord>();
   readonly #pendingOpens = new Map<string, Promise<ConversationRecord>>();
@@ -299,6 +300,13 @@ export class ConversationRegistry {
     return this.#bySessionFile.get(path.resolve(sessionFile));
   }
 
+  hasLiveWorkspace(workspaceId: string): boolean {
+    for (const record of this.#byId.values()) {
+      if (record.workspaceId === workspaceId) return true;
+    }
+    return false;
+  }
+
   subscribe(listener: ConversationRegistryListener): () => void {
     this.#listeners.add(listener);
     return () => {
@@ -324,15 +332,16 @@ export class ConversationRegistry {
     return this.#abortActivePromise;
   }
 
-  async create(cwd: string): Promise<ConversationRecord> {
+  async create(workspaceId: string, cwd?: string): Promise<ConversationRecord> {
     this.#assertAcceptingWork();
+    const workspaceCwd = cwd ?? workspaceId;
     const releaseCapacity = await this.#reserveCapacity();
     let runtime: PiConversationRuntimePort | undefined;
     try {
-      runtime = await this.#runtimeFactory.createPersistent(cwd);
+      runtime = await this.#runtimeFactory.createPersistent(workspaceCwd);
       this.#assertAcceptingWork();
-      const record = await this.#register(runtime, "create");
-      await this.#refreshHistory();
+      const record = await this.#register(runtime, "create", undefined, workspaceId);
+      await this.#refreshHistory(record.workspaceId);
       return record;
     } catch (error) {
       await runtime?.dispose().catch(() => undefined);
@@ -342,17 +351,18 @@ export class ConversationRegistry {
     }
   }
 
-  async open(sessionFile: string): Promise<ConversationRecord> {
+  async open(workspaceId: string, sessionFile?: string): Promise<ConversationRecord> {
     this.#assertAcceptingWork();
+    const requestedFile = sessionFile ?? workspaceId;
     let canonical: string;
     try {
-      canonical = await canonicalFile(sessionFile);
+      canonical = await canonicalFile(requestedFile);
     } catch (error) {
       if (
         error instanceof AppError &&
         error.code === ERROR_CODES.SESSION_FILE_MISSING
       ) {
-        await this.#refreshHistory();
+        await this.#refreshHistory(workspaceId);
       }
       throw error;
     }
@@ -363,27 +373,39 @@ export class ConversationRegistry {
       const closing = this.#pendingCloses.get(existing);
       if (closing !== undefined) {
         await closing;
-        return this.open(canonical);
+        return this.open(workspaceId, canonical);
+      }
+      if (sessionFile !== undefined && existing.workspaceId !== workspaceId) {
+        throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
       }
       this.#touch(existing);
       return existing;
     }
 
     const pending = this.#pendingOpens.get(canonical);
-    if (pending !== undefined) return pending;
+    if (pending !== undefined) {
+      const record = await pending;
+      if (sessionFile !== undefined && record.workspaceId !== workspaceId) {
+        throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
+      }
+      return record;
+    }
 
-    const opening = this.#openAndRegister(canonical);
+    const opening = this.#openAndRegister(
+      sessionFile === undefined ? undefined : workspaceId,
+      canonical,
+    );
     this.#pendingOpens.set(canonical, opening);
     try {
       const record = await opening;
-      await this.#refreshHistory();
+      await this.#refreshHistory(record.workspaceId);
       return record;
     } catch (error) {
       if (
         error instanceof AppError &&
         error.code === ERROR_CODES.SESSION_FILE_MISSING
       ) {
-        await this.#refreshHistory();
+        await this.#refreshHistory(workspaceId);
       }
       throw error;
     } finally {
@@ -404,6 +426,7 @@ export class ConversationRegistry {
     this.#touch(record);
     return {
       id: record.id,
+      workspaceId: record.workspaceId,
       sessionFile: record.sessionFile,
       title: record.title,
       cwd: record.cwd,
@@ -590,6 +613,7 @@ export class ConversationRegistry {
         temporary,
         "fork",
         reservation.promote,
+        source.workspaceId,
       );
       if (registered.runtime !== temporary) {
         throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
@@ -599,7 +623,7 @@ export class ConversationRegistry {
       temporary = undefined; // Registry ownership starts only here.
 
       const conversation = await this.getState(registered.id);
-      await this.#refreshHistory();
+      await this.#refreshHistory(registered.workspaceId);
       return { conversation, editorText: result.editorText ?? "" };
     } catch (error) {
       const failedForkFile =
@@ -679,7 +703,9 @@ export class ConversationRegistry {
   dispose(): Promise<void> {
     this.beginShutdown();
     this.#disposePromise ??= (async () => {
-      const disposals = this.records.map((record) =>
+      const records = this.records;
+      const workspaceIds = new Set(records.map((record) => record.workspaceId));
+      const disposals = records.map((record) =>
         this.#disposeRecord(record, "dispose")
       );
       for (const runtime of this.#temporaryRuntimes) {
@@ -692,18 +718,23 @@ export class ConversationRegistry {
       // promise stalls.
       this.#listeners.clear();
       await Promise.allSettled(disposals);
-      await this.#refreshHistory();
+      for (const workspaceId of workspaceIds) {
+        await this.#refreshHistory(workspaceId);
+      }
     })();
     return this.#disposePromise;
   }
 
-  async #openAndRegister(canonical: string): Promise<ConversationRecord> {
+  async #openAndRegister(
+    workspaceId: string | undefined,
+    canonical: string,
+  ): Promise<ConversationRecord> {
     const releaseCapacity = await this.#reserveCapacity();
     let runtime: PiConversationRuntimePort | undefined;
     try {
       runtime = await this.#runtimeFactory.openPersistent(canonical);
       this.#assertAcceptingWork();
-      return await this.#register(runtime, "open");
+      return await this.#register(runtime, "open", undefined, workspaceId);
     } catch (error) {
       await runtime?.dispose().catch(() => undefined);
       throw error;
@@ -786,6 +817,7 @@ export class ConversationRegistry {
     runtime: PiConversationRuntimePort,
     source: ConversationRegistrationSource,
     onRegistered?: () => void,
+    workspaceId?: string,
   ): Promise<ConversationRecord> {
     this.#assertAcceptingWork();
     const identity = runtime.identity;
@@ -795,6 +827,9 @@ export class ConversationRegistry {
       this.#byId.get(identity.sessionId) ?? this.#bySessionFile.get(sessionFile);
     if (duplicate !== undefined) {
       await runtime.dispose();
+      if (workspaceId !== undefined && duplicate.workspaceId !== workspaceId) {
+        throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
+      }
       this.#touch(duplicate);
       return duplicate;
     }
@@ -802,6 +837,7 @@ export class ConversationRegistry {
     const now = safeNow(this.#now);
     const record: ConversationRecord = {
       id: identity.sessionId,
+      workspaceId: workspaceId ?? path.resolve(identity.cwd),
       sessionFile,
       cwd: path.resolve(identity.cwd),
       title: titleOf(runtime.session),
@@ -822,6 +858,9 @@ export class ConversationRegistry {
       this.#byId.get(record.id) ?? this.#bySessionFile.get(record.sessionFile);
     if (raced !== undefined) {
       await runtime.dispose();
+      if (workspaceId !== undefined && raced.workspaceId !== workspaceId) {
+        throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
+      }
       this.#touch(raced);
       return raced;
     }
@@ -973,7 +1012,7 @@ export class ConversationRegistry {
         record.revision = nextRevision(record.revision);
         this.#emit({ type: "conversation.state-changed", record });
       }
-      await this.#refreshHistory();
+      await this.#refreshHistory(record.workspaceId);
       throw new AppError(ERROR_CODES.SESSION_FILE_MISSING);
     }
 
@@ -986,7 +1025,7 @@ export class ConversationRegistry {
     if (exists) record.durable = true;
     record.revision = nextRevision(record.revision);
     this.#emit({ type: "conversation.state-changed", record });
-    await this.#refreshHistory();
+    await this.#refreshHistory(record.workspaceId);
   }
 
   #disposeRecord(
@@ -1015,7 +1054,7 @@ export class ConversationRegistry {
           this.#bySessionFile.delete(record.sessionFile);
         }
         this.#emit({ type: "conversation.closed", record, reason });
-        if (reason !== "dispose") await this.#refreshHistory();
+        if (reason !== "dispose") await this.#refreshHistory(record.workspaceId);
       }
 
       if (disposalError !== undefined) {
@@ -1026,9 +1065,9 @@ export class ConversationRegistry {
     return closing;
   }
 
-  async #refreshHistory(): Promise<void> {
+  async #refreshHistory(workspaceId: string): Promise<void> {
     try {
-      await this.#refreshHistoryCallback();
+      await this.#refreshHistoryCallback(workspaceId);
     } catch (error) {
       this.#onListenerError(error);
     }
@@ -1099,6 +1138,7 @@ export class ConversationRegistry {
       record,
       event: {
         ...event,
+        workspaceId: record.workspaceId,
         conversationId: record.id,
         revision: record.revision,
       } as ConversationEvent,
@@ -1121,7 +1161,7 @@ export class ConversationRegistry {
     if (becameDurable) record.durable = true;
     record.revision = nextRevision(record.revision);
     this.#emit({ type: "conversation.state-changed", record });
-    void this.#refreshHistory();
+    void this.#refreshHistory(record.workspaceId);
   }
 
   #metadataChanged(record: ConversationRecord): void {
@@ -1133,7 +1173,7 @@ export class ConversationRegistry {
     record.title = title;
     record.revision = nextRevision(record.revision);
     this.#emit({ type: "conversation.state-changed", record });
-    void this.#refreshHistory();
+    void this.#refreshHistory(record.workspaceId);
   }
 
   #handleRuntimeFailure(record: ConversationRecord, error: unknown): void {

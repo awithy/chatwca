@@ -1,15 +1,8 @@
 import { Value } from "@sinclair/typebox/value";
 import { TextDecoder } from "node:util";
-import WebSocket, {
-  type RawData,
-  type WebSocketServer,
-} from "ws";
+import WebSocket, { type RawData, type WebSocketServer } from "ws";
 
-import {
-  AppError,
-  ERROR_CODES,
-  toErrorResponse,
-} from "../shared/errors.js";
+import { AppError, ERROR_CODES, toErrorResponse } from "../shared/errors.js";
 import {
   ClientCommandSchema,
   type ClientCommand,
@@ -17,35 +10,27 @@ import {
   type ConversationSummary,
   type ServerMessage,
   type UiImage,
+  type WorkspaceSummary,
 } from "../shared/protocol.js";
 import type {
   ConversationRegistryEvent,
   ConversationRegistryListener,
 } from "./conversation-registry.js";
-import {
-  OutboundFlowController,
-  type OutboundFlowOptions,
-} from "./outbound-flow.js";
+import { OutboundFlowController, type OutboundFlowOptions } from "./outbound-flow.js";
 import {
   WEBSOCKET_RESTART_CLOSE_CODE,
   WEBSOCKET_RESTART_CLOSE_REASON,
 } from "./shutdown.js";
+import type { UpdateWorkspaceInput } from "./workspace-repository.js";
 
-/**
- * Covers the default 24 MiB decoded-image aggregate after base64 expansion,
- * plus JSON metadata. Per-image decoded limits are enforced separately.
- */
 export const DEFAULT_MAX_INBOUND_MESSAGE_BYTES = 40 * 1024 * 1024;
 
 export interface ProtocolRegistry {
-  create(cwd: string): Promise<{ readonly id: string }>;
-  open(sessionFile: string): Promise<{ readonly id: string }>;
+  create(workspaceId: string, cwd: string): Promise<{ readonly id: string }>;
+  open(workspaceId: string, sessionFile: string): Promise<{ readonly id: string }>;
   getState(conversationId: string): Promise<ConversationState>;
   close(conversationId: string): Promise<void>;
-  fork(
-    conversationId: string,
-    entryId: string,
-  ): Promise<{
+  fork(conversationId: string, entryId: string): Promise<{
     readonly conversation: ConversationState;
     readonly editorText: string;
   }>;
@@ -56,15 +41,28 @@ export interface ProtocolRegistry {
     streamingBehavior?: "steer" | "followUp",
   ): Promise<void>;
   abort(conversationId: string): Promise<void>;
+  hasLiveWorkspace(workspaceId: string): boolean;
   subscribe(listener: ConversationRegistryListener): () => void;
 }
 
+/** Phase 3's scoped interface; SessionHistory's full authorization refactor lands in Phase 4. */
 export interface ProtocolHistory {
-  list(): Promise<readonly ConversationSummary[]>;
-  resolve(conversationId: string): Promise<{
+  list(workspaceId: string): Promise<readonly ConversationSummary[]>;
+  resolve(workspaceId: string, conversationId: string): Promise<{
     readonly summary: { readonly sessionFile: string };
   }>;
-  delete(conversationId: string): Promise<readonly ConversationSummary[]>;
+  delete(
+    workspaceId: string,
+    conversationId: string,
+  ): Promise<readonly ConversationSummary[]>;
+}
+
+export interface ProtocolWorkspaceRepository {
+  list(): WorkspaceSummary[];
+  requireAvailable(workspaceId: string): { readonly id: string; readonly path: string };
+  create(input: { readonly name: string; readonly path: string }): WorkspaceSummary;
+  update(workspaceId: string, changes: UpdateWorkspaceInput): WorkspaceSummary;
+  delete(workspaceId: string): void;
 }
 
 export interface WebSocketProtocolOptions {
@@ -72,6 +70,7 @@ export interface WebSocketProtocolOptions {
   readonly serverVersion: string;
   readonly registry: ProtocolRegistry;
   readonly history: ProtocolHistory;
+  readonly workspaces: ProtocolWorkspaceRepository;
   readonly maxInboundMessageBytes?: number;
   readonly outboundFlow?: OutboundFlowOptions;
   readonly onInternalError?: (error: unknown) => void;
@@ -79,8 +78,10 @@ export interface WebSocketProtocolOptions {
 
 export interface DispatchResult {
   readonly response: ServerMessage;
-  readonly historyChanged?: boolean;
+  readonly affectedWorkspaceId?: string;
   readonly history?: readonly ConversationSummary[];
+  readonly workspaces?: readonly WorkspaceSummary[];
+  readonly workspaceBroadcastIncludesSender?: boolean;
 }
 
 const SHUTDOWN_REJECTED_COMMANDS: ReadonlySet<ClientCommand["type"]> = new Set([
@@ -94,11 +95,8 @@ const SHUTDOWN_REJECTED_COMMANDS: ReadonlySet<ClientCommand["type"]> = new Set([
 
 class CommandDecodeError extends AppError {
   readonly requestId: string | undefined;
-
   constructor(
-    code:
-      | typeof ERROR_CODES.INVALID_COMMAND
-      | typeof ERROR_CODES.MESSAGE_TOO_LARGE,
+    code: typeof ERROR_CODES.INVALID_COMMAND | typeof ERROR_CODES.MESSAGE_TOO_LARGE,
     requestId?: string,
   ) {
     super(code);
@@ -107,9 +105,7 @@ class CommandDecodeError extends AppError {
 }
 
 function byteLength(data: RawData): number {
-  if (Array.isArray(data)) {
-    return data.reduce((total, part) => total + part.byteLength, 0);
-  }
+  if (Array.isArray(data)) return data.reduce((total, part) => total + part.byteLength, 0);
   return data.byteLength;
 }
 
@@ -120,47 +116,38 @@ function rawBytes(data: RawData): Uint8Array {
 }
 
 function requestIdOf(value: unknown): string | undefined {
-  if (typeof value !== "object" || value === null || !("requestId" in value)) {
-    return undefined;
-  }
+  if (typeof value !== "object" || value === null || !("requestId" in value)) return undefined;
   const requestId = (value as { readonly requestId?: unknown }).requestId;
-  return typeof requestId === "string" &&
-    requestId.length >= 1 &&
-    requestId.length <= 128
+  return typeof requestId === "string" && requestId.length >= 1 && requestId.length <= 128
     ? requestId
     : undefined;
 }
 
-/** Decode one text frame and apply the shared closed-object TypeBox contract. */
 export function decodeClientCommand(
   data: RawData,
   isBinary: boolean,
   maxBytes = DEFAULT_MAX_INBOUND_MESSAGE_BYTES,
 ): ClientCommand {
-  if (byteLength(data) > maxBytes) {
-    throw new CommandDecodeError(ERROR_CODES.MESSAGE_TOO_LARGE);
-  }
+  if (byteLength(data) > maxBytes) throw new CommandDecodeError(ERROR_CODES.MESSAGE_TOO_LARGE);
   if (isBinary) throw new CommandDecodeError(ERROR_CODES.INVALID_COMMAND);
 
   let value: unknown;
   try {
-    const json = new TextDecoder("utf-8", { fatal: true }).decode(rawBytes(data));
-    value = JSON.parse(json) as unknown;
+    value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(rawBytes(data))) as unknown;
   } catch {
     throw new CommandDecodeError(ERROR_CODES.INVALID_COMMAND);
   }
-
   if (!Value.Check(ClientCommandSchema, value)) {
     throw new CommandDecodeError(ERROR_CODES.INVALID_COMMAND, requestIdOf(value));
   }
   return value;
 }
 
-/** Execute a validated command against the authoritative registry/history services. */
 export async function dispatchClientCommand(
   command: ClientCommand,
   registry: ProtocolRegistry,
   history: ProtocolHistory,
+  workspaces: ProtocolWorkspaceRepository,
   shuttingDown = false,
 ): Promise<DispatchResult> {
   if (shuttingDown && SHUTDOWN_REJECTED_COMMANDS.has(command.type)) {
@@ -168,49 +155,81 @@ export async function dispatchClientCommand(
   }
 
   switch (command.type) {
-    // Workspace dispatch is wired in Phase 3. Keeping the newly validated
-    // commands behind a safe error preserves exhaustive compilation without
-    // exposing an unimplemented persistence path through this legacy handler.
-    case "workspace.list":
-    case "workspace.create":
-    case "workspace.update":
-    case "workspace.delete":
-      throw new AppError(ERROR_CODES.INTERNAL_ERROR);
-
-    case "history.list":
+    case "workspace.list": {
+      const authoritative = workspaces.list();
+      return {
+        response: { type: "workspaces", requestId: command.requestId, workspaces: authoritative },
+      };
+    }
+    case "workspace.create": {
+      workspaces.create({ name: command.name, path: command.path });
+      const authoritative = workspaces.list();
+      return {
+        response: { type: "workspaces", requestId: command.requestId, workspaces: authoritative },
+        workspaces: authoritative,
+      };
+    }
+    case "workspace.update": {
+      if (command.path !== undefined && registry.hasLiveWorkspace(command.workspaceId)) {
+        throw new AppError(ERROR_CODES.WORKSPACE_BUSY);
+      }
+      workspaces.update(command.workspaceId, {
+        ...(command.name === undefined ? {} : { name: command.name }),
+        ...(command.path === undefined ? {} : { path: command.path }),
+      });
+      const authoritative = workspaces.list();
+      return {
+        response: { type: "workspaces", requestId: command.requestId, workspaces: authoritative },
+        workspaces: authoritative,
+      };
+    }
+    case "workspace.delete": {
+      if (registry.hasLiveWorkspace(command.workspaceId)) {
+        throw new AppError(ERROR_CODES.WORKSPACE_BUSY);
+      }
+      workspaces.delete(command.workspaceId);
+      return {
+        response: { type: "ack", requestId: command.requestId, command: command.type },
+        workspaces: workspaces.list(),
+        workspaceBroadcastIncludesSender: true,
+      };
+    }
+    case "history.list": {
+      workspaces.requireAvailable(command.workspaceId);
       return {
         response: {
           type: "history",
           requestId: command.requestId,
-          conversations: [...(await history.list())],
+          workspaceId: command.workspaceId,
+          conversations: [...(await history.list(command.workspaceId))],
         },
       };
-
+    }
     case "conversation.create": {
-      const record = await registry.create(command.cwd);
+      const workspace = workspaces.requireAvailable(command.workspaceId);
+      const record = await registry.create(workspace.id, workspace.path);
       return {
         response: {
           type: "state",
           requestId: command.requestId,
           conversation: await registry.getState(record.id),
         },
-        historyChanged: true,
+        affectedWorkspaceId: command.workspaceId,
       };
     }
-
     case "conversation.open": {
-      const listed = await history.resolve(command.conversationId);
-      const record = await registry.open(listed.summary.sessionFile);
+      workspaces.requireAvailable(command.workspaceId);
+      const listed = await history.resolve(command.workspaceId, command.conversationId);
+      const record = await registry.open(command.workspaceId, listed.summary.sessionFile);
       return {
         response: {
           type: "state",
           requestId: command.requestId,
           conversation: await registry.getState(record.id),
         },
-        historyChanged: true,
+        affectedWorkspaceId: command.workspaceId,
       };
     }
-
     case "conversation.state":
       return {
         response: {
@@ -219,44 +238,26 @@ export async function dispatchClientCommand(
           conversation: await registry.getState(command.conversationId),
         },
       };
-
-    case "conversation.close":
+    case "conversation.close": {
+      const workspaceId = (await registry.getState(command.conversationId)).workspaceId;
       await registry.close(command.conversationId);
       return {
-        response: {
-          type: "ack",
-          requestId: command.requestId,
-          command: command.type,
-        },
-        historyChanged: true,
+        response: { type: "ack", requestId: command.requestId, command: command.type },
+        affectedWorkspaceId: workspaceId,
       };
-
+    }
     case "conversation.delete": {
-      const conversations = await history.delete(command.conversationId);
+      workspaces.requireAvailable(command.workspaceId);
+      const conversations = await history.delete(command.workspaceId, command.conversationId);
       return {
-        response: {
-          type: "ack",
-          requestId: command.requestId,
-          command: command.type,
-        },
+        response: { type: "ack", requestId: command.requestId, command: command.type },
+        affectedWorkspaceId: command.workspaceId,
         history: conversations,
       };
     }
-
     case "prompt.submit":
-      await registry.prompt(
-        command.conversationId,
-        command.text,
-        command.images,
-      );
-      return {
-        response: {
-          type: "ack",
-          requestId: command.requestId,
-          command: command.type,
-        },
-      };
-
+      await registry.prompt(command.conversationId, command.text, command.images);
+      return { response: { type: "ack", requestId: command.requestId, command: command.type } };
     case "prompt.steer":
     case "prompt.followUp":
       await registry.prompt(
@@ -265,29 +266,12 @@ export async function dispatchClientCommand(
         command.images,
         command.type === "prompt.steer" ? "steer" : "followUp",
       );
-      return {
-        response: {
-          type: "ack",
-          requestId: command.requestId,
-          command: command.type,
-        },
-      };
-
+      return { response: { type: "ack", requestId: command.requestId, command: command.type } };
     case "conversation.abort":
       await registry.abort(command.conversationId);
-      return {
-        response: {
-          type: "ack",
-          requestId: command.requestId,
-          command: command.type,
-        },
-      };
-
+      return { response: { type: "ack", requestId: command.requestId, command: command.type } };
     case "conversation.fork": {
-      const fork = await registry.fork(
-        command.conversationId,
-        command.entryId,
-      );
+      const fork = await registry.fork(command.conversationId, command.entryId);
       return {
         response: {
           type: "state",
@@ -295,30 +279,31 @@ export async function dispatchClientCommand(
           conversation: fork.conversation,
           editorText: fork.editorText,
         },
-        historyChanged: true,
+        affectedWorkspaceId: fork.conversation.workspaceId,
       };
     }
   }
 }
 
-/**
- * Owns WebSocket command parsing, response correlation, and registry broadcasts.
- * Socket failures are intentionally swallowed: browser transport must never
- * influence a Pi run or another connected browser.
- */
+interface WorkspaceRefreshState {
+  running: boolean;
+  requested: boolean;
+}
+
 export class WebSocketProtocol {
   readonly #webSocketServer: WebSocketServer;
   readonly #serverVersion: string;
   readonly #registry: ProtocolRegistry;
   readonly #history: ProtocolHistory;
+  readonly #workspaces: ProtocolWorkspaceRepository;
   readonly #maxInboundMessageBytes: number;
   readonly #outboundFlowOptions: OutboundFlowOptions;
   readonly #onInternalError: (error: unknown) => void;
   readonly #flows = new Map<WebSocket, OutboundFlowController>();
+  readonly #historySubscriptions = new Map<WebSocket, string>();
+  readonly #historyRefreshes = new Map<string, WorkspaceRefreshState>();
   readonly #unsubscribeRegistry: () => void;
   readonly #onConnection: (socket: WebSocket) => void;
-  #historyBroadcastRunning = false;
-  #historyBroadcastRequested = false;
   #shuttingDown = false;
   #shutdownGraceMs = 1;
   #disposed = false;
@@ -328,41 +313,28 @@ export class WebSocketProtocol {
     this.#serverVersion = options.serverVersion;
     this.#registry = options.registry;
     this.#history = options.history;
-    this.#maxInboundMessageBytes =
-      options.maxInboundMessageBytes ?? DEFAULT_MAX_INBOUND_MESSAGE_BYTES;
-    if (
-      !Number.isSafeInteger(this.#maxInboundMessageBytes) ||
-      this.#maxInboundMessageBytes <= 0
-    ) {
+    this.#workspaces = options.workspaces;
+    this.#maxInboundMessageBytes = options.maxInboundMessageBytes ?? DEFAULT_MAX_INBOUND_MESSAGE_BYTES;
+    if (!Number.isSafeInteger(this.#maxInboundMessageBytes) || this.#maxInboundMessageBytes <= 0) {
       throw new RangeError("maxInboundMessageBytes must be a positive integer");
     }
     this.#outboundFlowOptions = options.outboundFlow ?? {};
     this.#onInternalError = options.onInternalError ?? (() => undefined);
-
     this.#onConnection = (socket) => this.#handleConnection(socket);
     this.#webSocketServer.on("connection", this.#onConnection);
-    this.#unsubscribeRegistry = this.#registry.subscribe((event) => {
-      this.#handleRegistryEvent(event);
-    });
+    this.#unsubscribeRegistry = this.#registry.subscribe((event) => this.#handleRegistryEvent(event));
   }
 
-  /** Reject new work, notify clients, and start a restart-style close handshake. */
   beginShutdown(gracePeriodMs: number): void {
     if (this.#shuttingDown) return;
     this.#shuttingDown = true;
     this.#shutdownGraceMs = gracePeriodMs;
-    for (const socket of this.#webSocketServer.clients) {
-      this.#closeForShutdown(socket, gracePeriodMs);
-    }
+    for (const socket of this.#webSocketServer.clients) this.#closeForShutdown(socket, gracePeriodMs);
   }
 
   terminateClients(): void {
     for (const socket of this.#webSocketServer.clients) {
-      try {
-        socket.terminate();
-      } catch (error) {
-        this.#onInternalError(error);
-      }
+      try { socket.terminate(); } catch (error) { this.#onInternalError(error); }
     }
   }
 
@@ -373,6 +345,8 @@ export class WebSocketProtocol {
     this.#unsubscribeRegistry();
     for (const flow of this.#flows.values()) flow.dispose();
     this.#flows.clear();
+    this.#historySubscriptions.clear();
+    this.#historyRefreshes.clear();
   }
 
   #handleConnection(socket: WebSocket): void {
@@ -384,21 +358,15 @@ export class WebSocketProtocol {
     socket.once("close", () => {
       flow.dispose();
       this.#flows.delete(socket);
+      this.#historySubscriptions.delete(socket);
     });
     socket.on("error", this.#onInternalError);
-
     if (this.#shuttingDown) {
       this.#closeForShutdown(socket, this.#shutdownGraceMs);
       return;
     }
+    this.#send(socket, { type: "ready", serverVersion: this.#serverVersion });
 
-    this.#send(socket, {
-      type: "ready",
-      serverVersion: this.#serverVersion,
-    });
-
-    // Preserve command ordering per socket even though separate clients remain
-    // independent and can issue commands concurrently.
     let tail = Promise.resolve();
     socket.on("message", (data, isBinary) => {
       tail = tail
@@ -407,21 +375,12 @@ export class WebSocketProtocol {
     });
   }
 
-  async #handleMessage(
-    socket: WebSocket,
-    data: RawData,
-    isBinary: boolean,
-  ): Promise<void> {
+  async #handleMessage(socket: WebSocket, data: RawData, isBinary: boolean): Promise<void> {
     let command: ClientCommand;
     try {
-      command = decodeClientCommand(
-        data,
-        isBinary,
-        this.#maxInboundMessageBytes,
-      );
+      command = decodeClientCommand(data, isBinary, this.#maxInboundMessageBytes);
     } catch (error) {
-      const requestId =
-        error instanceof CommandDecodeError ? error.requestId : undefined;
+      const requestId = error instanceof CommandDecodeError ? error.requestId : undefined;
       this.#send(socket, toErrorResponse(error, undefined, requestId));
       return;
     }
@@ -431,16 +390,26 @@ export class WebSocketProtocol {
         command,
         this.#registry,
         this.#history,
+        this.#workspaces,
         this.#shuttingDown,
       );
       this.#send(socket, result.response);
-      if (result.history !== undefined) {
-        this.#broadcast({
-          type: "history",
-          conversations: [...result.history],
-        });
-      } else if (result.historyChanged) {
-        this.#scheduleHistoryBroadcast();
+      if (command.type === "history.list") {
+        // Only a successful correlated listing changes this socket's subscription.
+        this.#historySubscriptions.set(socket, command.workspaceId);
+      }
+      if (result.workspaces !== undefined) {
+        this.#broadcast(
+          { type: "workspaces", workspaces: [...result.workspaces] },
+          result.workspaceBroadcastIncludesSender === true ? undefined : socket,
+        );
+      }
+      if (result.affectedWorkspaceId !== undefined) {
+        if (result.history !== undefined) {
+          this.#broadcastHistory(result.affectedWorkspaceId, result.history);
+        } else {
+          this.#scheduleHistoryBroadcast(result.affectedWorkspaceId);
+        }
       }
     } catch (error) {
       this.#send(socket, toErrorResponse(error, undefined, command.requestId));
@@ -451,44 +420,62 @@ export class WebSocketProtocol {
     if (event.type === "conversation.event") {
       this.#broadcast(event.event);
       if (event.event.type === "conversation.status") {
-        this.#scheduleHistoryBroadcast();
+        this.#scheduleHistoryBroadcast(event.record.workspaceId);
       }
       return;
     }
-
-    // Registry lifecycle/metadata changes alter sidebar summaries. The
-    // coalescing refresh avoids listing Pi history once per simultaneous event.
-    this.#scheduleHistoryBroadcast();
+    this.#scheduleHistoryBroadcast(event.record.workspaceId);
   }
 
-  #scheduleHistoryBroadcast(): void {
-    if (this.#disposed) return;
-    this.#historyBroadcastRequested = true;
-    if (this.#historyBroadcastRunning) return;
-    this.#historyBroadcastRunning = true;
+  #hasHistorySubscriber(workspaceId: string): boolean {
+    for (const subscribed of this.#historySubscriptions.values()) {
+      if (subscribed === workspaceId) return true;
+    }
+    return false;
+  }
+
+  #scheduleHistoryBroadcast(workspaceId: string): void {
+    if (this.#disposed || !this.#hasHistorySubscriber(workspaceId)) return;
+    const current = this.#historyRefreshes.get(workspaceId) ?? { running: false, requested: false };
+    current.requested = true;
+    this.#historyRefreshes.set(workspaceId, current);
+    if (current.running) return;
+    current.running = true;
 
     void (async () => {
       try {
-        while (this.#historyBroadcastRequested && !this.#disposed) {
-          this.#historyBroadcastRequested = false;
-          const conversations = await this.#history.list();
-          this.#broadcast({
-            type: "history",
-            conversations: [...conversations],
-          });
+        while (current.requested && !this.#disposed) {
+          current.requested = false;
+          const conversations = await this.#history.list(workspaceId);
+          this.#broadcastHistory(workspaceId, conversations);
         }
       } catch (error) {
         this.#onInternalError(error);
       } finally {
-        this.#historyBroadcastRunning = false;
-        if (this.#historyBroadcastRequested) this.#scheduleHistoryBroadcast();
+        current.running = false;
+        if (!current.requested || !this.#hasHistorySubscriber(workspaceId)) {
+          this.#historyRefreshes.delete(workspaceId);
+        } else {
+          this.#scheduleHistoryBroadcast(workspaceId);
+        }
       }
     })();
   }
 
-  #broadcast(message: ServerMessage): void {
+  #broadcastHistory(workspaceId: string, conversations: readonly ConversationSummary[]): void {
+    const message: ServerMessage = {
+      type: "history",
+      workspaceId,
+      conversations: [...conversations],
+    };
+    for (const [socket, subscribed] of this.#historySubscriptions) {
+      if (subscribed === workspaceId) this.#send(socket, message);
+    }
+  }
+
+  #broadcast(message: ServerMessage, except?: WebSocket): void {
     for (const socket of this.#webSocketServer.clients) {
-      this.#send(socket, message);
+      if (socket !== except) this.#send(socket, message);
     }
   }
 
@@ -496,21 +483,10 @@ export class WebSocketProtocol {
     this.#flows.get(socket)?.dispose();
     if (socket.readyState !== WebSocket.OPEN) return;
     try {
-      // Bypass application queues so even a pressured client receives the
-      // process-level notice before the close frame queued immediately after.
-      socket.send(
-        JSON.stringify({
-          type: "server.shutdown",
-          gracePeriodMs,
-        } satisfies ServerMessage),
-        (error) => {
-          if (error !== undefined) this.#onInternalError(error);
-        },
-      );
-      socket.close(
-        WEBSOCKET_RESTART_CLOSE_CODE,
-        WEBSOCKET_RESTART_CLOSE_REASON,
-      );
+      socket.send(JSON.stringify({ type: "server.shutdown", gracePeriodMs } satisfies ServerMessage), (error) => {
+        if (error !== undefined) this.#onInternalError(error);
+      });
+      socket.close(WEBSOCKET_RESTART_CLOSE_CODE, WEBSOCKET_RESTART_CLOSE_REASON);
     } catch (error) {
       this.#onInternalError(error);
     }

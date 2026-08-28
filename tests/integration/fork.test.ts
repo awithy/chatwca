@@ -297,8 +297,9 @@ describe("conversation fork integration", () => {
     client.connect();
     await vi.waitFor(() => {
       expect(client.getState().connection).toBe("connected");
-      expect(client.getState().history.some(({ id }) => id === source.id)).toBe(true);
     });
+    await client.send({ type: "history.list", workspaceId: source.workspaceId });
+    expect(client.getState().history.some(({ id }) => id === source.id)).toBe(true);
     client.selectConversation(source.id);
     client.setDraft(source.id, "source-local-draft");
 

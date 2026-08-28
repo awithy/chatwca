@@ -45,10 +45,10 @@ function positiveInteger(value: number, name: string): number {
 
 function coalesceKey(message: ServerMessage): string | undefined {
   if (message.type === "tool.updated") {
-    return `tool:${message.conversationId}:${message.payload.toolCallId}`;
+    return `tool:${message.workspaceId}:${message.conversationId}:${message.payload.toolCallId}`;
   }
   if (message.type === "history" && message.requestId === undefined) {
-    return "history";
+    return `history:${message.workspaceId}`;
   }
   return undefined;
 }

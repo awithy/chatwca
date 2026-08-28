@@ -39,6 +39,7 @@ class FakeSocket implements OutboundSocket {
 function toolUpdate(revision: number, content: string): ServerMessage {
   return {
     type: "tool.updated",
+    workspaceId: "workspace-1",
     conversationId: "conversation-1",
     revision,
     payload: {
@@ -52,6 +53,7 @@ function toolUpdate(revision: number, content: string): ServerMessage {
 function textDelta(revision: number): ServerMessage {
   return {
     type: "message.delta",
+    workspaceId: "workspace-1",
     conversationId: "conversation-1",
     revision,
     payload: {
@@ -66,6 +68,7 @@ function textDelta(revision: number): ServerMessage {
 function status(revision: number): ServerMessage {
   return {
     type: "conversation.status",
+    workspaceId: "workspace-1",
     conversationId: "conversation-1",
     revision,
     payload: { status: "idle" },
@@ -138,6 +141,37 @@ describe("outbound WebSocket flow control", () => {
       4,
     ]);
     expect(socket.closes).toEqual([]);
+    flow.dispose();
+  });
+
+  it("keeps queued history coalescing isolated by workspace", () => {
+    vi.useFakeTimers();
+    const socket = new FakeSocket();
+    socket.bufferedAmount = 100;
+    const flow = new OutboundFlowController(socket, {
+      highWaterBytes: 100,
+      maxQueueBytes: 4_096,
+      slowClientTimeoutMs: 1_000,
+      pollIntervalMs: 10,
+    });
+    const first: ServerMessage = {
+      type: "history",
+      workspaceId: "workspace-1",
+      conversations: [],
+    };
+    const second: ServerMessage = {
+      type: "history",
+      workspaceId: "workspace-2",
+      conversations: [],
+    };
+
+    flow.send(first);
+    flow.send(second);
+    socket.bufferedAmount = 0;
+    vi.advanceTimersByTime(10);
+    socket.flush();
+
+    expect(socket.sent).toEqual([first, second]);
     flow.dispose();
   });
 

@@ -22,6 +22,7 @@ const UNKNOWN_CWD = "(unknown working directory)";
 
 export interface SessionHistoryIdentity {
   readonly id: string;
+  readonly workspaceId: string;
   readonly sessionFile: string;
 }
 
@@ -35,7 +36,7 @@ export interface SessionHistoryOptions {
   /** Omit to scan Pi's normal per-workspace session root. */
   readonly sessionDir?: string;
   /** Injectable listing boundary for focused tests. */
-  readonly listSessions?: () => Promise<readonly SessionInfo[]>;
+  readonly listSessions?: (workspaceId: string) => Promise<readonly SessionInfo[]>;
   /** A defined result means that the session currently owns a live runtime. */
   readonly getLiveStatus?: SessionHistoryLiveStatusLookup;
 }
@@ -91,7 +92,7 @@ function summaryStatus(
  * browser-provided path can never expand the allow-set.
  */
 export class SessionHistory {
-  readonly #listSessions: () => Promise<readonly SessionInfo[]>;
+  readonly #listSessions: (workspaceId: string) => Promise<readonly SessionInfo[]>;
   readonly #getLiveStatus: SessionHistoryLiveStatusLookup;
   #latest: HistoryIndex = {
     snapshot: { conversations: [], allowedSessionFiles: new Set() },
@@ -108,21 +109,21 @@ export class SessionHistory {
   }
 
   /** Return summaries from a fresh Pi listing, newest first. */
-  async list(): Promise<readonly ConversationSummary[]> {
-    return (await this.refresh()).conversations;
+  async list(workspaceId = "legacy-workspace"): Promise<readonly ConversationSummary[]> {
+    return (await this.refresh(workspaceId)).conversations;
   }
 
   /** Refresh summaries and the canonical file allow-set as one snapshot. */
-  async refresh(): Promise<SessionHistorySnapshot> {
+  async refresh(workspaceId = "legacy-workspace"): Promise<SessionHistorySnapshot> {
     let sessions: readonly SessionInfo[];
     try {
-      sessions = await this.#listSessions();
+      sessions = await this.#listSessions(workspaceId);
     } catch (error) {
       throw toAppError(error, { source: "filesystem", target: "session" });
     }
 
     const listed = await Promise.all(
-      sessions.map((info) => this.#normalizeListedSession(info)),
+      sessions.map((info) => this.#normalizeListedSession(workspaceId, info)),
     );
     const available = listed.filter(
       (item): item is ListedConversation => item !== undefined,
@@ -154,8 +155,12 @@ export class SessionHistory {
   }
 
   /** Resolve a conversation through a fresh canonical Pi-listing allow-set. */
-  async resolve(conversationId: string): Promise<ListedConversation> {
-    await this.refresh();
+  async resolve(conversationId: string): Promise<ListedConversation>;
+  async resolve(workspaceId: string, conversationId: string): Promise<ListedConversation>;
+  async resolve(first: string, second?: string): Promise<ListedConversation> {
+    const workspaceId = second === undefined ? "legacy-workspace" : first;
+    const conversationId = second ?? first;
+    await this.refresh(workspaceId);
     const listed = this.#latest.byId.get(conversationId);
     if (listed === undefined) {
       throw new AppError(ERROR_CODES.SESSION_NOT_LISTED);
@@ -167,12 +172,15 @@ export class SessionHistory {
    * Delete a currently listed, non-live Pi session and return refreshed history.
    * The path passed to unlink is the canonical path admitted by the fresh list.
    */
-  async delete(
-    conversationId: string,
-  ): Promise<readonly ConversationSummary[]> {
-    const listed = await this.resolve(conversationId);
+  async delete(conversationId: string): Promise<readonly ConversationSummary[]>;
+  async delete(workspaceId: string, conversationId: string): Promise<readonly ConversationSummary[]>;
+  async delete(first: string, second?: string): Promise<readonly ConversationSummary[]> {
+    const workspaceId = second === undefined ? "legacy-workspace" : first;
+    const conversationId = second ?? first;
+    const listed = await this.resolve(workspaceId, conversationId);
     const identity = {
       id: listed.summary.id,
+      workspaceId: listed.summary.workspaceId,
       sessionFile: listed.summary.sessionFile,
     };
     if (this.#getLiveStatus(identity) !== undefined) {
@@ -185,10 +193,11 @@ export class SessionHistory {
       throw toAppError(error, { source: "filesystem", target: "session" });
     }
 
-    return this.list();
+    return this.list(workspaceId);
   }
 
   async #normalizeListedSession(
+    workspaceId: string,
     info: SessionInfo,
   ): Promise<ListedConversation | undefined> {
     let canonicalFile: string;
@@ -203,12 +212,14 @@ export class SessionHistory {
     const cwdInspection = await inspectStoredCwd(info.cwd);
     const liveStatus = this.#getLiveStatus({
       id: info.id,
+      workspaceId,
       sessionFile: canonicalFile,
     });
     const createdAt = timestamp(info.created);
     const modifiedAt = timestamp(info.modified) ?? createdAt ?? 0;
     const summary: ConversationSummary = {
       id: info.id,
+      workspaceId,
       sessionFile: canonicalFile,
       title: titleOf(info),
       cwd: info.cwd.trim() ? info.cwd : UNKNOWN_CWD,

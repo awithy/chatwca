@@ -31,6 +31,7 @@ import type {
 const HOST = "0.0.0.0";
 const PORT = 8787;
 const CWD = "/tmp/chatwca-browser-workspace";
+const WORKSPACE_ID = "browser-workspace";
 const SESSION_ROOT = "/tmp/chatwca-browser-sessions";
 const IMAGE_LIMITS = {
   maxImages: 4,
@@ -70,6 +71,7 @@ function emptyState(id: string, title: string, cwd = CWD): ConversationState {
   const now = nextTime();
   return {
     id,
+    workspaceId: WORKSPACE_ID,
     sessionFile: `${SESSION_ROOT}/${id}.jsonl`,
     title,
     cwd,
@@ -145,6 +147,7 @@ function summary(fixture: FixtureConversation): ConversationSummary {
   const { state } = fixture;
   return {
     id: state.id,
+    workspaceId: state.workspaceId,
     sessionFile: state.sessionFile,
     title: state.title,
     cwd: state.cwd,
@@ -176,7 +179,7 @@ function emit(fixture: FixtureConversation, event: ConversationEvent): void {
   }
 }
 
-function emitEvent<T extends Omit<ConversationEvent, "conversationId" | "revision">>(
+function emitEvent<T extends Omit<ConversationEvent, "workspaceId" | "conversationId" | "revision">>(
   fixture: FixtureConversation,
   event: T,
 ): ConversationEvent {
@@ -188,6 +191,7 @@ function emitEvent<T extends Omit<ConversationEvent, "conversationId" | "revisio
   };
   const envelope = {
     ...event,
+    workspaceId: fixture.state.workspaceId,
     conversationId: fixture.state.id,
     revision,
   } as ConversationEvent;
@@ -339,13 +343,13 @@ function beginRun(fixture: FixtureConversation, promptText: string): void {
 }
 
 const registry: ProtocolRegistry = {
-  async create(cwd) {
+  async create(workspaceId, cwd) {
     conversationSequence += 1;
     const id = `browser-created-${String(conversationSequence)}`;
     addFixture(emptyState(id, "Untitled conversation", cwd));
     return { id };
   },
-  async open(sessionFile) {
+  async open(_workspaceId, sessionFile) {
     const fixture = [...conversations.values()].find(
       (candidate) => candidate.state.sessionFile === sessionFile,
     );
@@ -429,6 +433,11 @@ const registry: ProtocolRegistry = {
     fixture.state = { ...fixture.state, status: "idle", queue: { steering: [], followUp: [] } };
     emitEvent(fixture, { type: "conversation.status", payload: { status: "idle" } });
   },
+  hasLiveWorkspace(workspaceId) {
+    return [...conversations.values()].some(
+      (fixture) => !fixture.closed && fixture.state.workspaceId === workspaceId,
+    );
+  },
   subscribe(listener) {
     listeners.add(listener);
     return () => listeners.delete(listener);
@@ -436,14 +445,14 @@ const registry: ProtocolRegistry = {
 };
 
 const history: ProtocolHistory = {
-  async list() {
+  async list(_workspaceId) {
     return listedHistory();
   },
-  async resolve(conversationId) {
+  async resolve(_workspaceId, conversationId) {
     const fixture = fixtureById(conversationId);
     return { summary: { sessionFile: fixture.state.sessionFile } };
   },
-  async delete(conversationId) {
+  async delete(_workspaceId, conversationId) {
     const fixture = fixtureById(conversationId);
     if (!fixture.closed) throw new Error("Close the fixture conversation before deleting it");
     for (const timer of fixture.timers) clearTimeout(timer);

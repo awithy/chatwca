@@ -83,7 +83,7 @@ describe("SessionHistory", () => {
         id === "newer" ? "aborting" : id === "older" ? "idle" : undefined,
     });
 
-    const snapshot = await history.refresh();
+    const snapshot = await history.refresh("workspace-1");
 
     expect(snapshot.conversations.map(({ id }) => id)).toEqual([
       "newer",
@@ -91,6 +91,7 @@ describe("SessionHistory", () => {
       "missing-cwd",
     ]);
     expect(snapshot.conversations[0]).toMatchObject({
+      workspaceId: "workspace-1",
       sessionFile: newerFile,
       title: "Explicit Pi name",
       status: "streaming",

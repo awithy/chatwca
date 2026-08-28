@@ -185,6 +185,7 @@ export type WorkspaceSummary = Static<typeof WorkspaceSummarySchema>;
 
 export const ConversationSummarySchema = strictObject({
   id: IdentifierSchema,
+  workspaceId: IdentifierSchema,
   sessionFile: NonEmptyStringSchema,
   title: Type.String(),
   cwd: NonEmptyStringSchema,
@@ -223,6 +224,7 @@ export type QueueState = Static<typeof QueueStateSchema>;
 
 export const ConversationStateSchema = strictObject({
   id: IdentifierSchema,
+  workspaceId: IdentifierSchema,
   sessionFile: NonEmptyStringSchema,
   title: Type.String(),
   cwd: NonEmptyStringSchema,
@@ -274,15 +276,17 @@ export const WorkspaceDeleteCommandSchema = strictObject({
 export const HistoryListCommandSchema = strictObject({
   type: Type.Literal("history.list"),
   requestId: RequestIdSchema,
+  workspaceId: IdentifierSchema,
 });
 export const ConversationCreateCommandSchema = strictObject({
   type: Type.Literal("conversation.create"),
   requestId: RequestIdSchema,
-  cwd: NonEmptyStringSchema,
+  workspaceId: IdentifierSchema,
 });
 export const ConversationOpenCommandSchema = strictObject({
   type: Type.Literal("conversation.open"),
   requestId: RequestIdSchema,
+  workspaceId: IdentifierSchema,
   conversationId: IdentifierSchema,
 });
 export const ConversationStateCommandSchema = strictObject({
@@ -298,6 +302,7 @@ export const ConversationCloseCommandSchema = strictObject({
 export const ConversationDeleteCommandSchema = strictObject({
   type: Type.Literal("conversation.delete"),
   requestId: RequestIdSchema,
+  workspaceId: IdentifierSchema,
   conversationId: IdentifierSchema,
 });
 export const ConversationForkCommandSchema = strictObject({
@@ -437,6 +442,7 @@ export type WorkspacesMessage = Static<typeof WorkspacesMessageSchema>;
 export const HistoryMessageSchema = strictObject({
   type: Type.Literal("history"),
   requestId: Type.Optional(RequestIdSchema),
+  workspaceId: IdentifierSchema,
   conversations: Type.Array(ConversationSummarySchema),
 });
 export type HistoryMessage = Static<typeof HistoryMessageSchema>;
@@ -572,6 +578,7 @@ export type NoticePayload = Static<typeof NoticePayloadSchema>;
 
 export type EventEnvelope<TType extends string, TPayload> = {
   type: TType;
+  workspaceId: string;
   conversationId: string;
   revision: number;
   payload: TPayload;
@@ -583,6 +590,7 @@ const eventEnvelope = <TType extends string, TPayload extends TSchema>(
 ) =>
   strictObject({
     type: Type.Literal(type),
+    workspaceId: IdentifierSchema,
     conversationId: IdentifierSchema,
     revision: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
     payload,

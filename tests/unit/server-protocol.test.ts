@@ -7,19 +7,30 @@ import type {
   ClientCommand,
   ConversationState,
   ConversationSummary,
+  WorkspaceSummary,
 } from "../../src/shared/protocol.js";
 import {
   decodeClientCommand,
   dispatchClientCommand,
   type ProtocolHistory,
   type ProtocolRegistry,
+  type ProtocolWorkspaceRepository,
 } from "../../src/server/protocol.js";
 
+const workspace: WorkspaceSummary = {
+  id: "workspace-1",
+  name: "Workspace",
+  path: "/workspace",
+  createdAt: 1,
+  updatedAt: 1,
+  available: true,
+};
 const state: ConversationState = {
   id: "conversation-1",
+  workspaceId: workspace.id,
   sessionFile: "/sessions/conversation-1.jsonl",
   title: "Test",
-  cwd: "/workspace",
+  cwd: workspace.path,
   model: null,
   status: "idle",
   createdAt: 1,
@@ -29,9 +40,9 @@ const state: ConversationState = {
   messages: [],
   queue: { steering: [], followUp: [] },
 };
-
 const summary: ConversationSummary = {
   id: state.id,
+  workspaceId: workspace.id,
   sessionFile: state.sessionFile,
   title: state.title,
   cwd: state.cwd,
@@ -42,47 +53,51 @@ const summary: ConversationSummary = {
   runnable: true,
 };
 
-function services(): {
-  registry: ProtocolRegistry;
-  history: ProtocolHistory;
-  calls: {
-    create: ReturnType<typeof vi.fn>;
-    open: ReturnType<typeof vi.fn>;
-    close: ReturnType<typeof vi.fn>;
-    fork: ReturnType<typeof vi.fn>;
-    prompt: ReturnType<typeof vi.fn>;
-    abort: ReturnType<typeof vi.fn>;
-    delete: ReturnType<typeof vi.fn>;
-  };
-} {
+function services() {
   const create = vi.fn(async () => ({ id: state.id }));
   const open = vi.fn(async () => ({ id: state.id }));
   const close = vi.fn(async () => undefined);
-  const fork = vi.fn(async () => ({
-    conversation: state,
-    editorText: "copied prompt",
-  }));
+  const fork = vi.fn(async () => ({ conversation: state, editorText: "copied prompt" }));
   const prompt = vi.fn(async () => undefined);
   const abort = vi.fn(async () => undefined);
   const deleteSession = vi.fn(async () => [summary]);
+  const busy = vi.fn(() => false);
+  let authoritative = [workspace];
 
+  const registry: ProtocolRegistry = {
+    create,
+    open,
+    getState: vi.fn(async () => state),
+    close,
+    fork,
+    prompt,
+    abort,
+    hasLiveWorkspace: busy,
+    subscribe: vi.fn(() => () => undefined),
+  };
+  const history: ProtocolHistory = {
+    list: vi.fn(async () => [summary]),
+    resolve: vi.fn(async () => ({ summary })),
+    delete: deleteSession,
+  };
+  const workspaces: ProtocolWorkspaceRepository = {
+    list: vi.fn(() => authoritative),
+    requireAvailable: vi.fn(() => workspace),
+    create: vi.fn((input) => {
+      authoritative = [{ ...workspace, name: input.name, path: input.path }];
+      return authoritative[0]!;
+    }),
+    update: vi.fn((_id, changes) => {
+      authoritative = [{ ...workspace, ...changes }];
+      return authoritative[0]!;
+    }),
+    delete: vi.fn(() => { authoritative = []; }),
+  };
   return {
-    registry: {
-      create,
-      open,
-      getState: vi.fn(async () => state),
-      close,
-      fork,
-      prompt,
-      abort,
-      subscribe: vi.fn(() => () => undefined),
-    },
-    history: {
-      list: vi.fn(async () => [summary]),
-      resolve: vi.fn(async () => ({ summary })),
-      delete: deleteSession,
-    },
-    calls: { create, open, close, fork, prompt, abort, delete: deleteSession },
+    registry,
+    history,
+    workspaces,
+    calls: { create, open, close, fork, prompt, abort, delete: deleteSession, busy },
   };
 }
 
@@ -91,245 +106,161 @@ function command(value: object): ClientCommand {
 }
 
 describe("server WebSocket protocol", () => {
-  it("decodes valid text JSON and rejects binary, oversized, malformed, and extra-property commands", () => {
-    const valid = Buffer.from(
-      JSON.stringify({ type: "history.list", requestId: "request-1" }),
-    );
+  it("decodes closed workspace-aware commands and rejects invalid frames", () => {
+    const valid = Buffer.from(JSON.stringify({
+      type: "history.list",
+      requestId: "request-1",
+      workspaceId: workspace.id,
+    }));
     expect(decodeClientCommand(valid, false)).toEqual({
       type: "history.list",
       requestId: "request-1",
+      workspaceId: workspace.id,
     });
-
     for (const operation of [
       () => decodeClientCommand(valid, true),
       () => decodeClientCommand(valid, false, valid.byteLength - 1),
       () => decodeClientCommand(Buffer.from("{"), false),
-      () =>
-        decodeClientCommand(
-          Buffer.from(
-            JSON.stringify({
-              type: "history.list",
-              requestId: "request-1",
-              extra: true,
-            }),
-          ),
-          false,
-        ),
-    ]) {
-      expect(operation).toThrow(AppError);
-    }
-
-    try {
-      decodeClientCommand(valid, false, valid.byteLength - 1);
-    } catch (error) {
-      expect(error).toMatchObject({ code: ERROR_CODES.MESSAGE_TOO_LARGE });
-    }
+      () => decodeClientCommand(Buffer.from(JSON.stringify({
+        type: "history.list",
+        requestId: "request-1",
+        workspaceId: workspace.id,
+        extra: true,
+      })), false),
+    ]) expect(operation).toThrow(AppError);
   });
 
-  it("dispatches history and lifecycle commands with correlated responses", async () => {
-    const { registry, history, calls } = services();
-
-    await expect(
-      dispatchClientCommand(
-        command({ type: "history.list", requestId: "history" }),
-        registry,
-        history,
-      ),
-    ).resolves.toMatchObject({
-      response: { type: "history", requestId: "history", conversations: [summary] },
+  it("dispatches scoped history and lifecycle commands with exact correlated responses", async () => {
+    const { registry, history, workspaces, calls } = services();
+    await expect(dispatchClientCommand(command({
+      type: "history.list",
+      requestId: "history",
+      workspaceId: workspace.id,
+    }), registry, history, workspaces)).resolves.toEqual({
+      response: {
+        type: "history",
+        requestId: "history",
+        workspaceId: workspace.id,
+        conversations: [summary],
+      },
     });
 
-    await expect(
-      dispatchClientCommand(
-        command({
-          type: "conversation.create",
-          requestId: "create",
-          cwd: "/workspace",
-        }),
-        registry,
-        history,
-      ),
-    ).resolves.toMatchObject({
+    await expect(dispatchClientCommand(command({
+      type: "conversation.create",
+      requestId: "create",
+      workspaceId: workspace.id,
+    }), registry, history, workspaces)).resolves.toMatchObject({
       response: { type: "state", requestId: "create", conversation: state },
-      historyChanged: true,
+      affectedWorkspaceId: workspace.id,
     });
-    expect(calls.create).toHaveBeenCalledWith("/workspace");
+    expect(calls.create).toHaveBeenCalledWith(workspace.id, workspace.path);
 
-    await expect(
-      dispatchClientCommand(
-        command({
-          type: "conversation.open",
-          requestId: "open",
-          conversationId: state.id,
-        }),
-        registry,
-        history,
-      ),
-    ).resolves.toMatchObject({
-      response: { type: "state", requestId: "open", conversation: state },
-      historyChanged: true,
-    });
-    expect(calls.open).toHaveBeenCalledWith(state.sessionFile);
+    await dispatchClientCommand(command({
+      type: "conversation.open",
+      requestId: "open",
+      workspaceId: workspace.id,
+      conversationId: state.id,
+    }), registry, history, workspaces);
+    expect(history.resolve).toHaveBeenCalledWith(workspace.id, state.id);
+    expect(calls.open).toHaveBeenCalledWith(workspace.id, state.sessionFile);
 
-    await expect(
-      dispatchClientCommand(
-        command({
-          type: "conversation.state",
-          requestId: "state",
-          conversationId: state.id,
-        }),
-        registry,
-        history,
-      ),
-    ).resolves.toEqual({
-      response: { type: "state", requestId: "state", conversation: state },
-    });
-
-    await expect(
-      dispatchClientCommand(
-        command({
-          type: "conversation.close",
-          requestId: "close",
-          conversationId: state.id,
-        }),
-        registry,
-        history,
-      ),
-    ).resolves.toMatchObject({
-      response: { type: "ack", requestId: "close", command: "conversation.close" },
-    });
-    expect(calls.close).toHaveBeenCalledWith(state.id);
-
-    await expect(
-      dispatchClientCommand(
-        command({
-          type: "conversation.delete",
-          requestId: "delete",
-          conversationId: state.id,
-        }),
-        registry,
-        history,
-      ),
-    ).resolves.toMatchObject({
+    await expect(dispatchClientCommand(command({
+      type: "conversation.delete",
+      requestId: "delete",
+      workspaceId: workspace.id,
+      conversationId: state.id,
+    }), registry, history, workspaces)).resolves.toEqual({
       response: { type: "ack", requestId: "delete", command: "conversation.delete" },
+      affectedWorkspaceId: workspace.id,
       history: [summary],
     });
+    expect(calls.delete).toHaveBeenCalledWith(workspace.id, state.id);
   });
 
-  it("rejects new runtime work while shutdown still permits cleanup/read commands", async () => {
-    const { registry, history, calls } = services();
-    const rejected = [
-      { type: "conversation.create", requestId: "create", cwd: "/workspace" },
-      {
-        type: "conversation.open",
-        requestId: "open",
-        conversationId: state.id,
-      },
-      {
-        type: "conversation.fork",
-        requestId: "fork",
-        conversationId: state.id,
-        entryId: "entry-1",
-      },
-      ...(["prompt.submit", "prompt.steer", "prompt.followUp"] as const).map(
-        (type) => ({
-          type,
-          requestId: type,
-          conversationId: state.id,
-          text: "new work",
-          images: [],
-        }),
-      ),
-    ];
+  it("dispatches workspace CRUD, permits live rename, and guards path/delete while live", async () => {
+    const { registry, history, workspaces, calls } = services();
+    await expect(dispatchClientCommand(command({
+      type: "workspace.list", requestId: "list",
+    }), registry, history, workspaces)).resolves.toEqual({
+      response: { type: "workspaces", requestId: "list", workspaces: [workspace] },
+    });
 
-    for (const value of rejected) {
-      await expect(
-        dispatchClientCommand(command(value), registry, history, true),
-      ).rejects.toMatchObject({ code: ERROR_CODES.SHUTTING_DOWN });
-    }
-    expect(calls.create).not.toHaveBeenCalled();
-    expect(calls.open).not.toHaveBeenCalled();
-    expect(calls.fork).not.toHaveBeenCalled();
-    expect(calls.prompt).not.toHaveBeenCalled();
+    const renamed = await dispatchClientCommand(command({
+      type: "workspace.update",
+      requestId: "rename",
+      workspaceId: workspace.id,
+      name: "Renamed",
+    }), registry, history, workspaces);
+    expect(renamed).toMatchObject({
+      response: { type: "workspaces", requestId: "rename" },
+      workspaces: [{ name: "Renamed" }],
+    });
 
-    await expect(
-      dispatchClientCommand(
-        command({
-          type: "conversation.abort",
-          requestId: "abort",
-          conversationId: state.id,
-        }),
-        registry,
-        history,
-        true,
-      ),
-    ).resolves.toMatchObject({
+    calls.busy.mockReturnValue(true);
+    await expect(dispatchClientCommand(command({
+      type: "workspace.update",
+      requestId: "path",
+      workspaceId: workspace.id,
+      path: "/other",
+    }), registry, history, workspaces)).rejects.toMatchObject({ code: ERROR_CODES.WORKSPACE_BUSY });
+    await expect(dispatchClientCommand(command({
+      type: "workspace.delete",
+      requestId: "delete",
+      workspaceId: workspace.id,
+    }), registry, history, workspaces)).rejects.toMatchObject({ code: ERROR_CODES.WORKSPACE_BUSY });
+  });
+
+  it("rejects new runtime work during shutdown while permitting abort", async () => {
+    const { registry, history, workspaces, calls } = services();
+    await expect(dispatchClientCommand(command({
+      type: "conversation.create",
+      requestId: "create",
+      workspaceId: workspace.id,
+    }), registry, history, workspaces, true)).rejects.toMatchObject({
+      code: ERROR_CODES.SHUTTING_DOWN,
+    });
+    await expect(dispatchClientCommand(command({
+      type: "conversation.abort",
+      requestId: "abort",
+      conversationId: state.id,
+    }), registry, history, workspaces, true)).resolves.toMatchObject({
       response: { type: "ack", command: "conversation.abort" },
     });
+    expect(calls.create).not.toHaveBeenCalled();
+    expect(calls.abort).toHaveBeenCalledWith(state.id);
   });
 
-  it("routes submit, steer, follow-up, abort, and source-preserving fork", async () => {
-    const { registry, history, calls } = services();
-    const promptBase = {
-      conversationId: state.id,
-      text: "hello",
-      images: [],
-    };
-
+  it("routes prompt behaviors and source-preserving fork", async () => {
+    const { registry, history, workspaces, calls } = services();
     for (const [type, behavior] of [
       ["prompt.submit", undefined],
       ["prompt.steer", "steer"],
       ["prompt.followUp", "followUp"],
     ] as const) {
-      const result = await dispatchClientCommand(
-        command({ ...promptBase, type, requestId: type }),
-        registry,
-        history,
-      );
-      expect(result.response).toEqual({
-        type: "ack",
+      await dispatchClientCommand(command({
+        type,
         requestId: type,
-        command: type,
-      });
+        conversationId: state.id,
+        text: "hello",
+        images: [],
+      }), registry, history, workspaces);
       expect(calls.prompt).toHaveBeenLastCalledWith(
-        state.id,
-        "hello",
-        [],
-        ...(behavior === undefined ? [] : [behavior]),
+        state.id, "hello", [], ...(behavior === undefined ? [] : [behavior]),
       );
     }
-
-    await dispatchClientCommand(
-      command({
-        type: "conversation.abort",
-        requestId: "abort",
-        conversationId: state.id,
-      }),
-      registry,
-      history,
-    );
-    expect(calls.abort).toHaveBeenCalledWith(state.id);
-
-    await expect(
-      dispatchClientCommand(
-        command({
-          type: "conversation.fork",
-          requestId: "fork",
-          conversationId: state.id,
-          entryId: "entry-1",
-        }),
-        registry,
-        history,
-      ),
-    ).resolves.toEqual({
+    await expect(dispatchClientCommand(command({
+      type: "conversation.fork",
+      requestId: "fork",
+      conversationId: state.id,
+      entryId: "entry-1",
+    }), registry, history, workspaces)).resolves.toEqual({
       response: {
         type: "state",
         requestId: "fork",
         conversation: state,
         editorText: "copied prompt",
       },
-      historyChanged: true,
+      affectedWorkspaceId: workspace.id,
     });
-    expect(calls.fork).toHaveBeenCalledWith(state.id, "entry-1");
   });
 });

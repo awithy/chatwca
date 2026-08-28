@@ -37,12 +37,22 @@ const commands = [
     requestId,
     workspaceId: "workspace-1",
   },
-  { type: "history.list", requestId },
-  { type: "conversation.create", requestId, cwd: "/workspace" },
-  { type: "conversation.open", requestId, conversationId: "session-1" },
+  { type: "history.list", requestId, workspaceId: "workspace-1" },
+  { type: "conversation.create", requestId, workspaceId: "workspace-1" },
+  {
+    type: "conversation.open",
+    requestId,
+    workspaceId: "workspace-1",
+    conversationId: "session-1",
+  },
   { type: "conversation.state", requestId, conversationId: "session-1" },
   { type: "conversation.close", requestId, conversationId: "session-1" },
-  { type: "conversation.delete", requestId, conversationId: "session-1" },
+  {
+    type: "conversation.delete",
+    requestId,
+    workspaceId: "workspace-1",
+    conversationId: "session-1",
+  },
   {
     type: "conversation.fork",
     requestId,
@@ -75,6 +85,7 @@ const commands = [
 
 const conversationState = {
   id: "session-1",
+  workspaceId: "workspace-1",
   sessionFile: "/sessions/session-1.jsonl",
   title: "Example",
   cwd: "/workspace",
@@ -140,10 +151,30 @@ describe("ClientCommandSchema", () => {
     }
   });
 
-  it("requires a client request ID", () => {
-    expect(Value.Check(ClientCommandSchema, { type: "history.list" })).toBe(
-      false,
-    );
+  it("requires request and workspace IDs at scoped command boundaries", () => {
+    expect(Value.Check(ClientCommandSchema, {
+      type: "history.list",
+      workspaceId: "workspace-1",
+    })).toBe(false);
+    expect(Value.Check(ClientCommandSchema, {
+      type: "history.list",
+      requestId,
+    })).toBe(false);
+    expect(Value.Check(ClientCommandSchema, {
+      type: "conversation.create",
+      requestId,
+      cwd: "/workspace",
+    })).toBe(false);
+    expect(Value.Check(ClientCommandSchema, {
+      type: "conversation.open",
+      requestId,
+      conversationId: "session-1",
+    })).toBe(false);
+    expect(Value.Check(ClientCommandSchema, {
+      type: "conversation.delete",
+      requestId,
+      conversationId: "session-1",
+    })).toBe(false);
   });
 
   it("requires at least one workspace update field", () => {
@@ -254,8 +285,10 @@ describe("workspace schemas", () => {
 });
 
 describe("normalized conversation state", () => {
-  it("accepts messages containing all normalized block categories", () => {
+  it("accepts workspace-owned messages containing all normalized block categories", () => {
     expect(Value.Check(ConversationStateSchema, conversationState)).toBe(true);
+    const { workspaceId: _workspaceId, ...unowned } = conversationState;
+    expect(Value.Check(ConversationStateSchema, unowned)).toBe(false);
   });
 
   it("requires explicit server-derived fork eligibility on user messages", () => {
@@ -318,9 +351,11 @@ describe("ServerMessageSchema", () => {
       {
         type: "history",
         requestId,
+        workspaceId: "workspace-1",
         conversations: [
           {
             id: "session-1",
+            workspaceId: "workspace-1",
             sessionFile: "/sessions/session-1.jsonl",
             title: "Example",
             cwd: "/workspace",
@@ -334,6 +369,7 @@ describe("ServerMessageSchema", () => {
       { type: "state", requestId, conversation: conversationState },
       {
         type: "message.delta",
+        workspaceId: "workspace-1",
         conversationId: "session-1",
         revision: 1,
         payload: {
@@ -345,6 +381,7 @@ describe("ServerMessageSchema", () => {
       },
       {
         type: "conversation.notice",
+        workspaceId: "workspace-1",
         conversationId: "session-1",
         revision: 2,
         payload: {
@@ -363,6 +400,16 @@ describe("ServerMessageSchema", () => {
     for (const message of messages) {
       expect(Value.Check(ServerMessageSchema, message)).toBe(true);
     }
+    expect(Value.Check(ServerMessageSchema, {
+      type: "history",
+      conversations: [],
+    })).toBe(false);
+    expect(Value.Check(ServerMessageSchema, {
+      type: "conversation.status",
+      conversationId: "session-1",
+      revision: 1,
+      payload: { status: "idle" },
+    })).toBe(false);
   });
 
   it("requires safe non-negative snapshot and positive event revisions", () => {
@@ -384,6 +431,7 @@ describe("ServerMessageSchema", () => {
     expect(
       Value.Check(ServerMessageSchema, {
         type: "conversation.status",
+        workspaceId: "workspace-1",
         conversationId: "session-1",
         revision: 0,
         payload: { status: "streaming" },

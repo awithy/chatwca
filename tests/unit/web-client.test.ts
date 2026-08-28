@@ -53,6 +53,7 @@ class FakeSocket {
 function conversation(revision = 0): ConversationState {
   return {
     id: "conversation-1",
+    workspaceId: "workspace-1",
     sessionFile: "/sessions/one.jsonl",
     title: "One",
     cwd: "/workspace",
@@ -119,19 +120,22 @@ describe("ChatSocketClient", () => {
     client.connect();
     socket.server({ type: "ready", serverVersion: "1.0.0" });
 
-    const historyCommand = socket.commands()[0];
-    expect(historyCommand).toEqual({ type: "history.list", requestId: "id-1" });
+    const workspaceCommand = socket.commands()[0];
+    expect(workspaceCommand).toEqual({ type: "workspace.list", requestId: "id-1" });
     socket.server({
-      type: "history",
+      type: "workspaces",
       requestId: "id-1",
-      conversations: [],
+      workspaces: [],
     });
     await flush();
 
-    const create = client.send({ type: "conversation.create", cwd: "/workspace" });
+    const create = client.send({
+      type: "conversation.create",
+      workspaceId: "workspace-1",
+    });
     expect(socket.commands().at(-1)).toEqual({
       type: "conversation.create",
-      cwd: "/workspace",
+      workspaceId: "workspace-1",
       requestId: "id-2",
     });
     socket.server({
@@ -169,11 +173,13 @@ describe("ChatSocketClient", () => {
     });
     client.connect();
     socket.server({ type: "ready", serverVersion: "1" });
+    socket.server({ type: "workspaces", requestId: "fork-1", workspaces: [] });
     socket.server({
       type: "history",
-      requestId: "fork-1",
+      workspaceId: "workspace-1",
       conversations: [{
         id: "conversation-1",
+        workspaceId: "workspace-1",
         sessionFile: "/sessions/one.jsonl",
         title: "One",
         cwd: "/workspace",
@@ -262,9 +268,9 @@ describe("ChatSocketClient", () => {
     client.connect();
     socket.server({ type: "ready", serverVersion: "1" });
     socket.server({
-      type: "history",
+      type: "workspaces",
       requestId: "failed-fork-1",
-      conversations: [],
+      workspaces: [],
     });
     await flush();
     client.selectConversation("conversation-1");
@@ -296,7 +302,7 @@ describe("ChatSocketClient", () => {
     });
     client.connect();
     socket.server({ type: "ready", serverVersion: "1" });
-    socket.server({ type: "history", requestId: "image-1", conversations: [] });
+    socket.server({ type: "workspaces", requestId: "image-1", workspaces: [] });
     await flush();
 
     const image = {
@@ -350,40 +356,19 @@ describe("ChatSocketClient", () => {
     client.connect();
 
     sockets[0]?.server({ type: "ready", serverVersion: "1" });
-    expect(sockets[0]?.commands()[0]?.type).toBe("history.list");
+    expect(sockets[0]?.commands()[0]?.type).toBe("workspace.list");
     sockets[0]?.remoteClose();
     expect(client.getState().connection).toBe("reconnecting");
 
     await vi.advanceTimersByTimeAsync(10);
     expect(sockets).toHaveLength(2);
     sockets[1]?.server({ type: "ready", serverVersion: "1" });
-    const history = sockets[1]?.commands()[0];
-    expect(history?.type).toBe("history.list");
+    const workspaceList = sockets[1]?.commands()[0];
+    expect(workspaceList?.type).toBe("workspace.list");
     sockets[1]?.server({
-      type: "history",
-      requestId: String(history?.requestId),
-      conversations: [{
-        id: "conversation-1",
-        sessionFile: "/sessions/one.jsonl",
-        title: "One",
-        cwd: "/workspace",
-        modifiedAt: 2,
-        messageCount: 0,
-        status: "idle",
-        runnable: true,
-      }],
-    });
-    await flush();
-
-    const stateCommand = sockets[1]?.commands()[1];
-    expect(stateCommand).toMatchObject({
-      type: "conversation.state",
-      conversationId: "conversation-1",
-    });
-    sockets[1]?.server({
-      type: "state",
-      requestId: String(stateCommand?.requestId),
-      conversation: conversation(4),
+      type: "workspaces",
+      requestId: String(workspaceList?.requestId),
+      workspaces: [],
     });
     await flush();
 
@@ -392,9 +377,7 @@ describe("ChatSocketClient", () => {
       selectedConversationId: "conversation-1",
       drafts: { "conversation-1": "local draft" },
     });
-    expect(
-      client.getState().conversations["conversation-1"]?.conversation.revision,
-    ).toBe(4);
+    expect(sockets[1]?.commands()).toHaveLength(1);
     client.disconnect();
   });
 
@@ -409,13 +392,16 @@ describe("ChatSocketClient", () => {
     client.connect();
     socket.server({ type: "ready", serverVersion: "1" });
     socket.server({
-      type: "history",
+      type: "workspaces",
       requestId: "id-1",
-      conversations: [],
+      workspaces: [],
     });
     await flush();
 
-    const create = client.send({ type: "conversation.create", cwd: "/workspace" });
+    const create = client.send({
+      type: "conversation.create",
+      workspaceId: "workspace-1",
+    });
     socket.server({
       type: "state",
       requestId: "id-2",
@@ -424,6 +410,7 @@ describe("ChatSocketClient", () => {
     await create;
     socket.server({
       type: "conversation.status",
+      workspaceId: "workspace-1",
       conversationId: "conversation-1",
       revision: 4,
       payload: { status: "streaming" },
@@ -449,12 +436,12 @@ describe("ChatSocketClient", () => {
     });
     client.connect();
     socket.server({ type: "ready", serverVersion: "1" });
-    const pending = client.send({ type: "history.list" });
+    const pending = client.send({ type: "history.list", workspaceId: "workspace-1" });
     const rejection = expect(pending).rejects.toBeInstanceOf(ChatTransportError);
     await vi.advanceTimersByTimeAsync(50);
     await rejection;
 
-    const interrupted = client.send({ type: "history.list" });
+    const interrupted = client.send({ type: "history.list", workspaceId: "workspace-1" });
     const disconnected = expect(interrupted).rejects.toBeInstanceOf(ChatTransportError);
     socket.remoteClose();
     await disconnected;

@@ -11,6 +11,7 @@ import {
   type ServerConfig,
 } from "./config.js";
 import { ConversationRegistry } from "./conversation-registry.js";
+import { openDatabase } from "./database.js";
 import { PiRuntimeFactory } from "./pi-runtime.js";
 import type { OutboundFlowOptions } from "./outbound-flow.js";
 import {
@@ -18,6 +19,7 @@ import {
   WebSocketProtocol,
   type ProtocolHistory,
   type ProtocolRegistry,
+  type ProtocolWorkspaceRepository,
 } from "./protocol.js";
 import { SessionHistory } from "./session-history.js";
 import {
@@ -28,6 +30,7 @@ import {
 } from "./shutdown.js";
 import { serveWebApp } from "./static.js";
 import { hasAllowedWebSocketOrigin } from "./websocket-boundary.js";
+import { WorkspaceRepository } from "./workspace-repository.js";
 
 interface PackageMetadata {
   readonly version?: unknown;
@@ -44,6 +47,7 @@ export interface ChatWcaServer {
 export interface ChatWcaProtocolServices {
   readonly registry: ProtocolRegistry;
   readonly history: ProtocolHistory;
+  readonly workspaces?: ProtocolWorkspaceRepository;
   readonly maxInboundMessageBytes?: number;
   readonly outboundFlow?: OutboundFlowOptions;
   /** Production supplies the registry here so transport and Pi teardown share one bound. */
@@ -194,6 +198,13 @@ export function createChatWcaServer(
           serverVersion,
           registry: services.registry,
           history: services.history,
+          workspaces: services.workspaces ?? {
+            list: () => [],
+            requireAvailable: (workspaceId) => ({ id: workspaceId, path: workspaceId }),
+            create: () => { throw new Error("Workspace repository is unavailable"); },
+            update: () => { throw new Error("Workspace repository is unavailable"); },
+            delete: () => { throw new Error("Workspace repository is unavailable"); },
+          },
           maxInboundMessageBytes,
           ...(services.outboundFlow === undefined
             ? {}
@@ -275,6 +286,8 @@ export function createChatWcaServer(
 async function main(): Promise<void> {
   try {
     const config = loadConfig();
+    const database = openDatabase(config.dataDir);
+    const workspaces = new WorkspaceRepository(database.connection);
     const runtimeFactory = await PiRuntimeFactory.create({
       ...(config.piCodingAgentDir === undefined
         ? {}
@@ -283,9 +296,14 @@ async function main(): Promise<void> {
 
     let registry: ConversationRegistry | undefined;
     const history = new SessionHistory({
-      getLiveStatus: (identity) =>
-        registry?.get(identity.id)?.status ??
-        registry?.getBySessionFile(identity.sessionFile)?.status,
+      getLiveStatus: (identity) => {
+        const record =
+          registry?.get(identity.id) ??
+          registry?.getBySessionFile(identity.sessionFile);
+        return record?.workspaceId === identity.workspaceId
+          ? record.status
+          : undefined;
+      },
     });
     registry = new ConversationRegistry({
       runtimeFactory,
@@ -295,15 +313,13 @@ async function main(): Promise<void> {
         maxImageBytes: config.maxImageBytes,
         maxTotalImageBytes: config.maxTotalImageBytes,
       },
-      refreshHistory: async () => {
-        await history.refresh();
-      },
       onListenerError: (error) => console.error("ChatWCA runtime error", error),
     });
 
     const server = createChatWcaServer(config, readServerVersion(), {
       registry,
       history,
+      workspaces,
       shutdown: registry,
       onInternalError: (error) =>
         console.error("ChatWCA protocol error", error),

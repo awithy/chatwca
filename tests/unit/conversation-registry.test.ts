@@ -198,18 +198,21 @@ describe("ConversationRegistry", () => {
       throw listenerFailure;
     });
 
-    const record = await registry.create(cwd);
+    const record = await registry.create("workspace-1", cwd);
     expect(registry.size).toBe(1);
     expect(registry.get("one")).toBe(record);
     expect(registry.getBySessionFile(sessionFile)).toBe(record);
     expect(record).toMatchObject({
       id: "one",
+      workspaceId: "workspace-1",
       cwd,
       title: "First prompt title",
       status: "idle",
       revision: 0,
       createdAt: Date.parse("2025-01-01T00:00:00.000Z"),
     });
+    expect(registry.hasLiveWorkspace("workspace-1")).toBe(true);
+    expect(registry.hasLiveWorkspace("workspace-2")).toBe(false);
     expect(events.map(({ type }) => type)).toEqual(["conversation.registered"]);
 
     runtime.emit({ type: "queue_update", steering: [], followUp: [] });
@@ -220,6 +223,7 @@ describe("ConversationRegistry", () => {
     expect(events[1]).toMatchObject({
       event: {
         type: "conversation.queue",
+        workspaceId: "workspace-1",
         conversationId: "one",
         revision: 1,
         payload: { steering: [], followUp: [] },

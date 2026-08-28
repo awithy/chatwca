@@ -525,6 +525,8 @@ Use Playwright to verify:
 
 ### T10.5 Operational documentation
 
+**Status:** Complete — [`README.md`](README.md) documents verified setup and lifecycle commands, Node/Pi requirements, configuration and fixed payload/flow defaults, the no-auth trusted-LAN boundary, Pi-native persistence compatibility, bounded shutdown, and operational troubleshooting.
+
 Update `README.md` with:
 
 - install, development, build, and start commands;

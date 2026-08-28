@@ -30,6 +30,7 @@ import {
   validatePromptImages,
   type ImageValidationLimits,
 } from "./images.js";
+import { isActiveBranchUserEntry } from "./fork-target.js";
 import { serializeActiveBranch } from "./serialize.js";
 import type {
   PiConversationRuntimePort,
@@ -41,6 +42,18 @@ import type {
 const UNTITLED_CONVERSATION = "Untitled conversation";
 
 export type ConversationRegistrationSource = "create" | "open";
+
+/**
+ * A slot held for T9.2's source-preserving fork construction. The caller must
+ * release it in a `finally` block after promoting or disposing the temporary
+ * runtime. No Pi fork operation is performed by this T9.1 interface.
+ */
+export interface ForkCapacityReservation {
+  readonly sourceConversationId: string;
+  readonly sourceSessionFile: string;
+  readonly sourceCwd: string;
+  release(): void;
+}
 
 /** Mutable server-owned state for one live Pi runtime. */
 export interface ConversationRecord {
@@ -226,6 +239,7 @@ export class ConversationRegistry {
   readonly #pendingOpens = new Map<string, Promise<ConversationRecord>>();
   readonly #pendingCloses = new WeakMap<ConversationRecord, Promise<void>>();
   readonly #pendingAborts = new WeakMap<ConversationRecord, Promise<void>>();
+  readonly #forkSourceReservations = new WeakMap<ConversationRecord, number>();
   readonly #listeners = new Set<ConversationRegistryListener>();
   readonly #replacementUnsubscribes = new WeakMap<
     ConversationRecord,
@@ -381,6 +395,7 @@ export class ConversationRegistry {
     const streaming =
       record.status === "streaming" || record.session.isStreaming;
     if (
+      this.#hasForkReservation(record) ||
       record.status === "aborting" ||
       record.status === "error" ||
       (streamingBehavior === undefined ? record.status !== "idle" || streaming : !streaming)
@@ -438,6 +453,45 @@ export class ConversationRegistry {
     });
   }
 
+  /**
+   * Validate a fork source/target and reserve one live-runtime slot before any
+   * temporary fork runtime is created. The reservation also protects the idle
+   * source from prompting, closing, and LRU eviction until released.
+   */
+  async reserveFork(
+    conversationId: string,
+    entryId: string,
+  ): Promise<ForkCapacityReservation> {
+    const record = this.#required(conversationId);
+    this.#assertForkSource(record, entryId);
+    this.#incrementForkReservation(record);
+
+    let releaseCapacity: (() => void) | undefined;
+    try {
+      releaseCapacity = await this.#reserveCapacity(record, () => {
+        // Recheck after waiting for the serialized capacity decision. This
+        // closes the window with a prompt that started immediately beforehand.
+        this.#assertForkSource(record, entryId);
+      });
+    } catch (error) {
+      this.#decrementForkReservation(record);
+      throw error;
+    }
+
+    let released = false;
+    return {
+      sourceConversationId: record.id,
+      sourceSessionFile: record.sessionFile,
+      sourceCwd: record.cwd,
+      release: () => {
+        if (released) return;
+        released = true;
+        releaseCapacity?.();
+        this.#decrementForkReservation(record);
+      },
+    };
+  }
+
   /** Request cancellation of an active run. Concurrent repeats share one abort. */
   async abort(conversationId: string): Promise<void> {
     const record = this.#required(conversationId);
@@ -482,7 +536,7 @@ export class ConversationRegistry {
   /** Close one idle/error conversation while retaining its persisted history. */
   async close(conversationId: string): Promise<void> {
     const record = this.#required(conversationId);
-    if (isBusy(record)) {
+    if (isBusy(record) || this.#hasForkReservation(record)) {
       throw new AppError(ERROR_CODES.CONVERSATION_BUSY);
     }
     await this.#disposeRecord(record, "close");
@@ -518,7 +572,10 @@ export class ConversationRegistry {
    * serialized and in-flight constructions count toward the limit, preventing
    * concurrent create/open requests from temporarily exceeding it.
    */
-  async #reserveCapacity(): Promise<() => void> {
+  async #reserveCapacity(
+    protectedRecord?: ConversationRecord,
+    validate?: () => void,
+  ): Promise<() => void> {
     let unlock: () => void = () => undefined;
     const previous = this.#capacityTail;
     this.#capacityTail = new Promise<void>((resolve) => {
@@ -527,11 +584,12 @@ export class ConversationRegistry {
     await previous;
 
     try {
+      validate?.();
       while (
         this.#byId.size + this.#capacityReservations >=
         this.#maxLiveConversations
       ) {
-        const candidate = this.#leastRecentlyUsedIdle();
+        const candidate = this.#leastRecentlyUsedIdle(protectedRecord);
         if (candidate === undefined) {
           throw new AppError(ERROR_CODES.LIVE_RUNTIME_LIMIT);
         }
@@ -550,13 +608,17 @@ export class ConversationRegistry {
     }
   }
 
-  #leastRecentlyUsedIdle(): ConversationRecord | undefined {
+  #leastRecentlyUsedIdle(
+    protectedRecord?: ConversationRecord,
+  ): ConversationRecord | undefined {
     let candidate: ConversationRecord | undefined;
     for (const record of this.#byId.values()) {
       if (
+        record === protectedRecord ||
         record.status !== "idle" ||
         record.session.isStreaming ||
-        this.#pendingCloses.has(record)
+        this.#pendingCloses.has(record) ||
+        this.#hasForkReservation(record)
       ) {
         continue;
       }
@@ -642,6 +704,41 @@ export class ConversationRegistry {
       throw new AppError(ERROR_CODES.CONVERSATION_NOT_FOUND);
     }
     return record;
+  }
+
+  #assertForkSource(record: ConversationRecord, entryId: string): void {
+    if (
+      record.status !== "idle" ||
+      record.session.isStreaming ||
+      this.#pendingCloses.has(record)
+    ) {
+      throw new AppError(ERROR_CODES.FORK_SOURCE_BUSY);
+    }
+    if (
+      !isActiveBranchUserEntry(
+        record.session.sessionManager.getBranch(),
+        entryId,
+      )
+    ) {
+      throw new AppError(ERROR_CODES.INVALID_FORK_TARGET);
+    }
+  }
+
+  #hasForkReservation(record: ConversationRecord): boolean {
+    return (this.#forkSourceReservations.get(record) ?? 0) > 0;
+  }
+
+  #incrementForkReservation(record: ConversationRecord): void {
+    this.#forkSourceReservations.set(
+      record,
+      (this.#forkSourceReservations.get(record) ?? 0) + 1,
+    );
+  }
+
+  #decrementForkReservation(record: ConversationRecord): void {
+    const remaining = (this.#forkSourceReservations.get(record) ?? 1) - 1;
+    if (remaining <= 0) this.#forkSourceReservations.delete(record);
+    else this.#forkSourceReservations.set(record, remaining);
   }
 
   async #refreshDurability(record: ConversationRecord): Promise<void> {

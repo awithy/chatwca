@@ -4,6 +4,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 import { AppError, ERROR_CODES } from "../shared/errors.js";
+import { isPiEntryId } from "./fork-target.js";
 import type {
   AssistantContentBlock,
   AssistantMessage,
@@ -290,6 +291,9 @@ function serializeEntry(
       role: "user",
       blocks: serializeUserBlocks(message.content),
       ...(timestamp === undefined ? {} : { timestamp }),
+      // Synthetic stream IDs and malformed imported IDs must never enable a
+      // fork action. The registry independently revalidates this target.
+      forkEligible: isPiEntryId(entryId),
     };
     return normalized;
   }

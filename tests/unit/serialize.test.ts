@@ -60,6 +60,7 @@ describe("session serialization", () => {
       entryId: "user-1",
       role: "user",
       timestamp: 1000,
+      forkEligible: false,
       blocks: [
         {
           type: "text",
@@ -143,10 +144,38 @@ describe("session serialization", () => {
       entryId: "malformed-user",
       role: "user",
       blocks: [],
+      forkEligible: false,
     });
     expect(messages.some(({ entryId }) => entryId === "off-branch-user")).toBe(
       false,
     );
+  });
+
+  it("exposes fork eligibility only for canonical Pi user entry IDs", () => {
+    const messages = serializeSessionEntries([
+      {
+        type: "message",
+        id: "a1b2c3d4",
+        message: { role: "user", content: "eligible" },
+      },
+      {
+        type: "message",
+        id: "stream:session:1",
+        message: { role: "user", content: "synthetic" },
+      },
+      {
+        type: "message",
+        id: "deadbeef",
+        message: { role: "assistant", content: [] },
+      },
+    ]);
+
+    expect(messages).toMatchObject([
+      { entryId: "a1b2c3d4", role: "user", forkEligible: true },
+      { entryId: "stream:session:1", role: "user", forkEligible: false },
+      { entryId: "deadbeef", role: "assistant" },
+    ]);
+    expect(messages[2]).not.toHaveProperty("forkEligible");
   });
 
   it("truncates tool text on a valid UTF-8 boundary and retains byte metadata", () => {

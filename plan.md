@@ -423,6 +423,8 @@ In `src/server/images.ts`:
 
 ### T9.1 Validate fork targets
 
+**Status:** Complete — snapshots/events expose server-derived user-message eligibility, the registry verifies idle active-branch Pi user entries, and protected capacity reservations precede T9.2 fork construction.
+
 - Expose Fork only on user messages with valid Pi entry IDs.
 - On the server, require the source conversation to be idle.
 - Verify the target entry is a user message on the source's current active branch.

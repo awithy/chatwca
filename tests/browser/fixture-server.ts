@@ -80,6 +80,7 @@ function userMessage(text: string, images: readonly UiImage[]): NormalizedMessag
   return {
     entryId: `browser-user-${String(messageId)}`,
     role: "user",
+    forkEligible: false,
     blocks: [
       ...(text.length === 0 ? [] : [{ type: "text" as const, text }]),
       ...images.map((image) => ({

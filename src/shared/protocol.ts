@@ -123,6 +123,8 @@ export const UserMessageSchema = strictObject({
   role: Type.Literal("user"),
   blocks: Type.Array(UserContentBlockSchema),
   timestamp: Type.Optional(Type.Number({ minimum: 0 })),
+  /** True only when the server observed a canonical Pi entry on the active branch. */
+  forkEligible: Type.Boolean(),
 });
 export type UserMessage = Static<typeof UserMessageSchema>;
 

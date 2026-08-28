@@ -40,9 +40,15 @@ async function temporaryRoot(): Promise<string> {
   return root;
 }
 
+interface FakeSessionOptions {
+  readonly title?: string;
+  readonly prompt?: string;
+  readonly branch?: readonly unknown[];
+}
+
 function fakeSession(
   identity: PiRuntimeIdentity,
-  options: { readonly title?: string; readonly prompt?: string } = {},
+  options: FakeSessionOptions = {},
 ): AgentSession {
   const content = options.prompt;
   return {
@@ -58,7 +64,8 @@ function fakeSession(
       }),
       getSessionName: () => options.title,
       getBranch: () =>
-        content === undefined
+        options.branch ??
+        (content === undefined
           ? []
           : [
               {
@@ -68,7 +75,7 @@ function fakeSession(
                 timestamp: "2025-01-01T00:00:01.000Z",
                 message: { role: "user", content, timestamp: 1 },
               },
-            ],
+            ]),
     },
   } as unknown as AgentSession;
 }
@@ -95,7 +102,7 @@ class FakeRuntime implements PiConversationRuntimePort {
 
   constructor(
     identity: PiRuntimeIdentity,
-    readonly sessionOptions: { readonly title?: string; readonly prompt?: string } = {},
+    readonly sessionOptions: FakeSessionOptions = {},
   ) {
     this.identity = identity;
     this.session = fakeSession(identity, sessionOptions);
@@ -689,6 +696,139 @@ describe("ConversationRegistry", () => {
       { type: "conversation.closed", record: second, reason: "evict" },
     ]);
     expect(refreshHistory).toHaveBeenCalledTimes(4);
+  });
+
+  it("validates idle active-branch user fork targets and protects the reservation", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessions = path.join(root, "sessions");
+    await Promise.all([mkdir(cwd), mkdir(sessions)]);
+
+    const userEntry = {
+      type: "message",
+      id: "a1b2c3d4",
+      message: { role: "user", content: "fork this" },
+    };
+    const assistantEntry = {
+      type: "message",
+      id: "b2c3d4e5",
+      message: { role: "assistant", content: [] },
+    };
+    const runtime = new FakeRuntime(
+      identity("source", path.join(sessions, "source.jsonl"), cwd),
+      { branch: [userEntry, assistantEntry] },
+    );
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(runtime);
+    const registry = new ConversationRegistry({
+      runtimeFactory: factory,
+      maxLiveConversations: 2,
+    });
+    const source = await registry.create(cwd);
+
+    const reservation = await registry.reserveFork(source.id, userEntry.id);
+    expect(reservation).toMatchObject({
+      sourceConversationId: source.id,
+      sourceSessionFile: source.sessionFile,
+      sourceCwd: cwd,
+    });
+    await expect(registry.prompt(source.id, "race", [])).rejects.toMatchObject({
+      code: ERROR_CODES.CONVERSATION_BUSY,
+    });
+    await expect(registry.close(source.id)).rejects.toMatchObject({
+      code: ERROR_CODES.CONVERSATION_BUSY,
+    });
+
+    reservation.release();
+    reservation.release();
+    await expect(registry.prompt(source.id, "after release", [])).resolves.toBeUndefined();
+
+    source.status = "streaming";
+    await expect(
+      registry.reserveFork(source.id, userEntry.id),
+    ).rejects.toMatchObject({ code: ERROR_CODES.FORK_SOURCE_BUSY });
+  });
+
+  it("rejects non-user, off-branch, and malformed fork entry IDs", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessions = path.join(root, "sessions");
+    await Promise.all([mkdir(cwd), mkdir(sessions)]);
+
+    const runtime = new FakeRuntime(
+      identity("source", path.join(sessions, "source.jsonl"), cwd),
+      {
+        branch: [
+          {
+            type: "message",
+            id: "a1b2c3d4",
+            message: { role: "user", content: "active" },
+          },
+          {
+            type: "message",
+            id: "b2c3d4e5",
+            message: { role: "assistant", content: [] },
+          },
+        ],
+      },
+    );
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(runtime);
+    const registry = new ConversationRegistry({ runtimeFactory: factory });
+    const source = await registry.create(cwd);
+
+    for (const entryId of ["b2c3d4e5", "c3d4e5f6", "not-a-pi-id"]) {
+      await expect(registry.reserveFork(source.id, entryId)).rejects.toMatchObject({
+        code: ERROR_CODES.INVALID_FORK_TARGET,
+      });
+    }
+    expect(runtime.disposed).toBe(false);
+  });
+
+  it("reserves fork capacity without evicting its idle source", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessions = path.join(root, "sessions");
+    await Promise.all([mkdir(cwd), mkdir(sessions)]);
+
+    const branch = [{
+      type: "message",
+      id: "a1b2c3d4",
+      message: { role: "user", content: "fork this" },
+    }];
+    const sourceRuntime = new FakeRuntime(
+      identity("source", path.join(sessions, "source.jsonl"), cwd),
+      { branch },
+    );
+    const otherRuntime = new FakeRuntime(
+      identity("other", path.join(sessions, "other.jsonl"), cwd),
+    );
+    const nextRuntime = new FakeRuntime(
+      identity("next", path.join(sessions, "next.jsonl"), cwd),
+    );
+    const factory = new FakeFactory();
+    factory.createPersistent
+      .mockResolvedValueOnce(sourceRuntime)
+      .mockResolvedValueOnce(otherRuntime)
+      .mockResolvedValueOnce(nextRuntime);
+    const registry = new ConversationRegistry({
+      runtimeFactory: factory,
+      maxLiveConversations: 2,
+    });
+    const source = await registry.create(cwd);
+    await registry.create(cwd);
+
+    const reservation = await registry.reserveFork(source.id, "a1b2c3d4");
+    expect(sourceRuntime.disposed).toBe(false);
+    expect(otherRuntime.disposed).toBe(true);
+    expect(registry.records).toEqual([source]);
+    await expect(registry.create(cwd)).rejects.toMatchObject({
+      code: ERROR_CODES.LIVE_RUNTIME_LIMIT,
+    });
+    expect(factory.createPersistent).toHaveBeenCalledTimes(2);
+
+    reservation.release();
+    await expect(registry.create(cwd)).resolves.toMatchObject({ id: "next" });
   });
 
   it("returns a stable capacity error when all runtime slots are active", async () => {

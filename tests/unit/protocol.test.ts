@@ -65,6 +65,7 @@ const conversationState = {
     {
       entryId: "entry-1",
       role: "user",
+      forkEligible: false,
       blocks: [
         { type: "text", text: "hello" },
         {
@@ -168,6 +169,23 @@ describe("ClientCommandSchema", () => {
 describe("normalized conversation state", () => {
   it("accepts messages containing all normalized block categories", () => {
     expect(Value.Check(ConversationStateSchema, conversationState)).toBe(true);
+  });
+
+  it("requires explicit server-derived fork eligibility on user messages", () => {
+    const [user, assistant] = conversationState.messages;
+    expect(
+      Value.Check(ConversationStateSchema, {
+        ...conversationState,
+        messages: [{ ...user, forkEligible: true }, assistant],
+      }),
+    ).toBe(true);
+    const { forkEligible: _forkEligible, ...unmarkedUser } = user;
+    expect(
+      Value.Check(ConversationStateSchema, {
+        ...conversationState,
+        messages: [unmarkedUser, assistant],
+      }),
+    ).toBe(false);
   });
 
   it("applies the closed-object policy recursively", () => {

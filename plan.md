@@ -156,6 +156,8 @@ In `src/shared/errors.ts`:
 
 ### T3.2 Implement the shared Pi services and runtime factory
 
+**Status:** Complete — the process-wide model runtime, persistent create/open factory, replacement-safe conversation adapter, capability metadata, and isolated faux-provider integration coverage are implemented in [`src/server/pi-runtime.ts`](src/server/pi-runtime.ts).
+
 In `src/server/pi-runtime.ts`:
 
 - Create one process-wide `ModelRuntime`.

@@ -15,7 +15,7 @@
     "build:server": "tsc -p tsconfig.server.json",
     "build:web": "vite build",
     "start": "node dist/server/server/index.js",
-    "typecheck": "tsc --noEmit -p tsconfig.server.json && tsc --noEmit -p tsconfig.web.json",
+    "typecheck": "tsc --noEmit -p tsconfig.server.json && tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.tests.json",
     "test": "vitest run --passWithNoTests",
     "test:unit": "vitest run tests/unit --passWithNoTests",
     "test:integration": "vitest run tests/integration --passWithNoTests",

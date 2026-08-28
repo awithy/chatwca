@@ -106,6 +106,24 @@ describe("server image validation", () => {
     );
   });
 
+  it("accepts payloads exactly at the count, per-image, and aggregate boundaries", () => {
+    const first = image("image/png", [
+      ...signatures["image/png"],
+      ...new Array<number>(56).fill(0),
+    ]);
+    const second = image("image/png", [
+      ...signatures["image/png"],
+      ...new Array<number>(56).fill(1),
+    ]);
+
+    expect(
+      validatePromptImages([first, second], {
+        supportsImages: true,
+        limits: { maxImages: 2, maxImageBytes: 64, maxTotalImageBytes: 128 },
+      }),
+    ).toHaveLength(2);
+  });
+
   it("enforces image count before decoding", () => {
     const decode = vi.spyOn(Buffer, "from");
     try {

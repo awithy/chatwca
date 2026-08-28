@@ -412,6 +412,8 @@ In `src/server/images.ts`:
 
 ### T8.3 Test image behavior
 
+**Status:** Complete — server boundary and browser ingestion coverage exercise valid/spoofed/malformed payloads, configured limits, capability rejection, paste/drop/select/remove/resize, and successful isolated submission.
+
 - Unit-test valid formats, spoofed MIME values, malformed base64, count limits, individual/aggregate size limits, and text-only model rejection.
 - Browser-test paste, drop, selection, preview removal, resizing, and successful submission.
 

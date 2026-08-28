@@ -243,6 +243,8 @@ In `src/server/conversation-registry.ts`:
 
 ### T4.5 Add registry tests
 
+**Status:** Complete — registry and real-Pi integration coverage verifies duplicate/canonical indexing, independent runtimes, LRU and active-run capacity behavior, monotonic lifecycle revisions, replacement re-subscription, and leak-free disposal.
+
 Cover:
 
 - duplicate open suppression;
@@ -552,18 +554,18 @@ Run these at the end of every milestone:
 
 ## Release acceptance checklist
 
-- [ ] Server defaults to `0.0.0.0:8787` and works from another LAN machine.
-- [ ] There is no authentication/authorization flow and same-authority WebSocket origin checks work.
-- [ ] Any valid accessible local directory can be used for a conversation.
-- [ ] Pi-native history survives browser/server restarts and remains Pi CLI-compatible.
-- [ ] Multiple live conversations run independently and switching does not interrupt background work.
-- [ ] Text, thinking, tool calls, tool results, queue changes, and errors stream incrementally.
-- [ ] Reconnects and revision gaps recover through authoritative snapshots.
-- [ ] PNG, JPEG, and WebP prompts work within configured limits on vision-capable models.
-- [ ] Forking creates a new persisted session, prefills the editor, and leaves the source unchanged.
-- [ ] Idle LRU eviction, close, deletion guardrails, abort, and graceful shutdown behave as designed.
-- [ ] The dark-only UI is keyboard accessible, responsive at common laptop sizes, and does not render raw model HTML.
-- [ ] Unit, integration, and browser test suites pass with isolated temporary Pi state.
+- [x] Server defaults to `0.0.0.0:8787` and works from another LAN machine.
+- [x] There is no authentication/authorization flow and same-authority WebSocket origin checks work.
+- [x] Any valid accessible local directory can be used for a conversation.
+- [x] Pi-native history survives browser/server restarts and remains Pi CLI-compatible.
+- [x] Multiple live conversations run independently and switching does not interrupt background work.
+- [x] Text, thinking, tool calls, tool results, queue changes, and errors stream incrementally.
+- [x] Reconnects and revision gaps recover through authoritative snapshots.
+- [x] PNG, JPEG, and WebP prompts work within configured limits on vision-capable models.
+- [x] Forking creates a new persisted session, prefills the editor, and leaves the source unchanged.
+- [x] Idle LRU eviction, close, deletion guardrails, abort, and graceful shutdown behave as designed.
+- [x] The dark-only UI is keyboard accessible, responsive at common laptop sizes, and does not render raw model HTML.
+- [x] Unit, integration, and browser test suites pass with isolated temporary Pi state.
 
 ## Explicitly deferred
 

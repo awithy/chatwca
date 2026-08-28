@@ -212,6 +212,8 @@ In `src/server/conversation-registry.ts`:
 
 ### T4.2 Implement lifecycle operations
 
+**Status:** Complete — authoritative snapshots, busy-safe close, full registry disposal, lifecycle history refresh hooks, and externally removed session handling are implemented in [`src/server/conversation-registry.ts`](src/server/conversation-registry.ts).
+
 - Create, open, get state, close, and dispose conversations.
 - Refuse close while streaming/aborting unless the run has first completed or been aborted.
 - Keep persisted history after close.

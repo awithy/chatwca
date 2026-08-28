@@ -45,6 +45,8 @@ function fakeSession(
   const content = options.prompt;
   return {
     isStreaming: false,
+    getSteeringMessages: () => [],
+    getFollowUpMessages: () => [],
     sessionManager: {
       getHeader: () => ({
         type: "session",
@@ -251,6 +253,139 @@ describe("ConversationRegistry", () => {
     expect(registry.records).toEqual([first]);
     expect(firstRuntime.disposed).toBe(false);
     expect(secondRuntime.disposeSpy).toHaveBeenCalledOnce();
+  });
+
+  it("returns authoritative snapshots and detects when a new session becomes durable", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessionFile = path.join(root, "sessions", "state.jsonl");
+    await Promise.all([mkdir(cwd), mkdir(path.dirname(sessionFile))]);
+
+    const runtime = new FakeRuntime(identity("state", sessionFile, cwd), {
+      prompt: "Snapshot prompt",
+    });
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(runtime);
+    const refreshHistory = vi.fn();
+    const registry = new ConversationRegistry({
+      runtimeFactory: factory,
+      refreshHistory,
+    });
+    const eventTypes: string[] = [];
+    registry.subscribe((event) => eventTypes.push(event.type));
+
+    await registry.create(cwd);
+    await expect(registry.getState("state")).resolves.toMatchObject({
+      id: "state",
+      title: "Snapshot prompt",
+      durable: false,
+      revision: 0,
+      messages: [
+        { entryId: "entry-1", role: "user", blocks: [{ type: "text" }] },
+      ],
+      queue: { steering: [], followUp: [] },
+    });
+
+    await writeFile(sessionFile, "persisted");
+    await expect(registry.getState("state")).resolves.toMatchObject({
+      durable: true,
+      revision: 1,
+    });
+    expect(eventTypes).toEqual([
+      "conversation.registered",
+      "conversation.state-changed",
+    ]);
+    expect(refreshHistory).toHaveBeenCalledTimes(2);
+  });
+
+  it("refuses to close active runs and fully removes an idle runtime", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessionFile = path.join(root, "sessions", "close.jsonl");
+    await Promise.all([mkdir(cwd), mkdir(path.dirname(sessionFile))]);
+
+    const runtime = new FakeRuntime(identity("close", sessionFile, cwd));
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(runtime);
+    const refreshHistory = vi.fn();
+    const registry = new ConversationRegistry({
+      runtimeFactory: factory,
+      refreshHistory,
+    });
+    const record = await registry.create(cwd);
+    record.status = "streaming";
+
+    await expect(registry.close("close")).rejects.toMatchObject({
+      code: "conversation_busy",
+    });
+    expect(runtime.disposed).toBe(false);
+
+    record.status = "idle";
+    await registry.close("close");
+    expect(runtime.disposeSpy).toHaveBeenCalledOnce();
+    expect(runtime.events.size).toBe(0);
+    expect(runtime.replacements.size).toBe(0);
+    expect(registry.size).toBe(0);
+    expect(registry.get("close")).toBeUndefined();
+    expect(registry.getBySessionFile(sessionFile)).toBeUndefined();
+    expect(refreshHistory).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports externally removed live session files and refreshes history", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessionFile = path.join(root, "missing.jsonl");
+    await mkdir(cwd);
+    await writeFile(sessionFile, "persisted");
+
+    const runtime = new FakeRuntime(identity("missing", sessionFile, cwd));
+    const factory = new FakeFactory();
+    factory.openPersistent.mockResolvedValue(runtime);
+    const refreshHistory = vi.fn();
+    const registry = new ConversationRegistry({
+      runtimeFactory: factory,
+      refreshHistory,
+    });
+    const record = await registry.open(sessionFile);
+    await rm(sessionFile);
+
+    await expect(registry.getState("missing")).rejects.toMatchObject({
+      code: "session_file_missing",
+    });
+    expect(record.status).toBe("error");
+    expect(record.revision).toBe(1);
+    expect(refreshHistory).toHaveBeenCalledTimes(2);
+  });
+
+  it("disposes all records, including active ones, without leaked listeners", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessions = path.join(root, "sessions");
+    await Promise.all([mkdir(cwd), mkdir(sessions)]);
+
+    const firstRuntime = new FakeRuntime(
+      identity("first", path.join(sessions, "first.jsonl"), cwd),
+    );
+    const secondRuntime = new FakeRuntime(
+      identity("second", path.join(sessions, "second.jsonl"), cwd),
+    );
+    const factory = new FakeFactory();
+    factory.createPersistent
+      .mockResolvedValueOnce(firstRuntime)
+      .mockResolvedValueOnce(secondRuntime);
+    const registry = new ConversationRegistry({ runtimeFactory: factory });
+    const first = await registry.create(cwd);
+    await registry.create(cwd);
+    first.status = "streaming";
+
+    await registry.dispose();
+    await registry.dispose();
+
+    expect(registry.size).toBe(0);
+    expect(firstRuntime.disposeSpy).toHaveBeenCalledOnce();
+    expect(secondRuntime.disposeSpy).toHaveBeenCalledOnce();
+    expect(firstRuntime.events.size).toBe(0);
+    expect(secondRuntime.events.size).toBe(0);
   });
 
   it("refreshes both indexes and the active session reference after replacement", async () => {

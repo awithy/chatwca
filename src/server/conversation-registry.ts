@@ -1,4 +1,4 @@
-import { realpath } from "node:fs/promises";
+import { access, realpath } from "node:fs/promises";
 import path from "node:path";
 
 import type {
@@ -8,7 +8,13 @@ import type {
 
 import { AppError, ERROR_CODES, toAppError } from "../shared/errors.js";
 import { nextRevision } from "../shared/revisions.js";
-import type { LiveConversationStatus } from "../shared/protocol.js";
+import type {
+  ConversationState,
+  LiveConversationStatus,
+  ModelInfo,
+  QueueState,
+} from "../shared/protocol.js";
+import { serializeActiveBranch } from "./serialize.js";
 import type {
   PiConversationRuntimePort,
   PiRuntimeFactoryPort,
@@ -32,6 +38,8 @@ export interface ConversationRecord {
   readonly createdAt: number;
   lastActiveAt: number;
   revision: number;
+  /** Whether Pi has materialized this session's JSONL file at least once. */
+  durable: boolean;
   /** The registry-owned Pi event subscription. */
   unsubscribe: () => void;
 }
@@ -51,6 +59,15 @@ export type ConversationRegistryEvent =
       readonly type: "conversation.replaced";
       readonly record: ConversationRecord;
       readonly replacement: PiRuntimeReplacement;
+    }
+  | {
+      readonly type: "conversation.closed";
+      readonly record: ConversationRecord;
+      readonly reason: "close" | "dispose";
+    }
+  | {
+      readonly type: "conversation.state-changed";
+      readonly record: ConversationRecord;
     };
 
 export type ConversationRegistryListener = (
@@ -63,6 +80,8 @@ export interface ConversationRegistryOptions {
   readonly now?: () => number;
   /** Registry observers are isolated from Pi callbacks; failures are reported here. */
   readonly onListenerError?: (error: unknown) => void;
+  /** Refreshes the Pi-native history projection after lifecycle changes. */
+  readonly refreshHistory?: () => void | Promise<void>;
 }
 
 function firstUserText(session: AgentSession): string | undefined {
@@ -111,6 +130,39 @@ function safeNow(now: () => number): number {
   return value;
 }
 
+function modelInfoOf(
+  model: PiConversationRuntimePort["model"],
+): ModelInfo | null {
+  if (model === undefined) return null;
+  return {
+    id: model.id,
+    provider: model.provider,
+    ...(model.name.trim() ? { name: model.name } : {}),
+    supportsImages: model.supportsImages,
+  };
+}
+
+function queueOf(session: AgentSession): QueueState {
+  return {
+    steering: session.getSteeringMessages().map((text) => ({
+      text,
+      imageCount: 0,
+    })),
+    followUp: session.getFollowUpMessages().map((text) => ({
+      text,
+      imageCount: 0,
+    })),
+  };
+}
+
+function isBusy(record: ConversationRecord): boolean {
+  return (
+    record.status === "streaming" ||
+    record.status === "aborting" ||
+    record.session.isStreaming
+  );
+}
+
 function unresolvedCanonicalFile(sessionFile: string): Promise<string> {
   const absolute = path.resolve(sessionFile);
   return realpath(absolute).catch(async (error: unknown) => {
@@ -146,19 +198,23 @@ export class ConversationRegistry {
   readonly #runtimeFactory: PiRuntimeFactoryPort;
   readonly #now: () => number;
   readonly #onListenerError: (error: unknown) => void;
+  readonly #refreshHistoryCallback: () => void | Promise<void>;
   readonly #byId = new Map<string, ConversationRecord>();
   readonly #bySessionFile = new Map<string, ConversationRecord>();
   readonly #pendingOpens = new Map<string, Promise<ConversationRecord>>();
+  readonly #pendingCloses = new WeakMap<ConversationRecord, Promise<void>>();
   readonly #listeners = new Set<ConversationRegistryListener>();
   readonly #replacementUnsubscribes = new WeakMap<
     ConversationRecord,
     () => void
   >();
+  #disposePromise: Promise<void> | undefined;
 
   constructor(options: ConversationRegistryOptions) {
     this.#runtimeFactory = options.runtimeFactory;
     this.#now = options.now ?? Date.now;
     this.#onListenerError = options.onListenerError ?? (() => undefined);
+    this.#refreshHistoryCallback = options.refreshHistory ?? (() => undefined);
   }
 
   get size(): number {
@@ -188,7 +244,9 @@ export class ConversationRegistry {
   async create(cwd: string): Promise<ConversationRecord> {
     const runtime = await this.#runtimeFactory.createPersistent(cwd);
     try {
-      return await this.#register(runtime, "create");
+      const record = await this.#register(runtime, "create");
+      await this.#refreshHistory();
+      return record;
     } catch (error) {
       await runtime.dispose().catch(() => undefined);
       throw error;
@@ -196,9 +254,26 @@ export class ConversationRegistry {
   }
 
   async open(sessionFile: string): Promise<ConversationRecord> {
-    const canonical = await canonicalFile(sessionFile);
+    let canonical: string;
+    try {
+      canonical = await canonicalFile(sessionFile);
+    } catch (error) {
+      if (
+        error instanceof AppError &&
+        error.code === ERROR_CODES.SESSION_FILE_MISSING
+      ) {
+        await this.#refreshHistory();
+      }
+      throw error;
+    }
+
     const existing = this.#bySessionFile.get(canonical);
     if (existing !== undefined) {
+      const closing = this.#pendingCloses.get(existing);
+      if (closing !== undefined) {
+        await closing;
+        return this.open(canonical);
+      }
       this.#touch(existing);
       return existing;
     }
@@ -209,12 +284,67 @@ export class ConversationRegistry {
     const opening = this.#openAndRegister(canonical);
     this.#pendingOpens.set(canonical, opening);
     try {
-      return await opening;
+      const record = await opening;
+      await this.#refreshHistory();
+      return record;
+    } catch (error) {
+      if (
+        error instanceof AppError &&
+        error.code === ERROR_CODES.SESSION_FILE_MISSING
+      ) {
+        await this.#refreshHistory();
+      }
+      throw error;
     } finally {
       if (this.#pendingOpens.get(canonical) === opening) {
         this.#pendingOpens.delete(canonical);
       }
     }
+  }
+
+  /** Build an authoritative snapshot and update access/LRU bookkeeping. */
+  async getState(conversationId: string): Promise<ConversationState> {
+    const record = this.#required(conversationId);
+    if (this.#pendingCloses.has(record)) {
+      throw new AppError(ERROR_CODES.CONVERSATION_BUSY);
+    }
+
+    await this.#refreshDurability(record);
+    this.#touch(record);
+    return {
+      id: record.id,
+      sessionFile: record.sessionFile,
+      title: record.title,
+      cwd: record.cwd,
+      model: modelInfoOf(record.runtime.model),
+      status: record.status,
+      createdAt: record.createdAt,
+      lastActiveAt: record.lastActiveAt,
+      revision: record.revision,
+      durable: record.durable,
+      messages: serializeActiveBranch(record.session.sessionManager),
+      queue: queueOf(record.session),
+    };
+  }
+
+  /** Close one idle/error conversation while retaining its persisted history. */
+  async close(conversationId: string): Promise<void> {
+    const record = this.#required(conversationId);
+    if (isBusy(record)) {
+      throw new AppError(ERROR_CODES.CONVERSATION_BUSY);
+    }
+    await this.#disposeRecord(record, "close");
+  }
+
+  /** Dispose every owned runtime. Active runs are allowed for shutdown cleanup. */
+  dispose(): Promise<void> {
+    this.#disposePromise ??= (async () => {
+      await Promise.allSettled(
+        this.records.map((record) => this.#disposeRecord(record, "dispose")),
+      );
+      await this.#refreshHistory();
+    })();
+    return this.#disposePromise;
   }
 
   async #openAndRegister(canonical: string): Promise<ConversationRecord> {
@@ -253,6 +383,7 @@ export class ConversationRegistry {
       createdAt: createdAtOf(runtime.session, now),
       lastActiveAt: now,
       revision: 0,
+      durable: source === "open",
       unsubscribe: () => undefined,
     };
 
@@ -281,6 +412,94 @@ export class ConversationRegistry {
     );
     this.#emit({ type: "conversation.registered", source, record });
     return record;
+  }
+
+  #required(conversationId: string): ConversationRecord {
+    const record = this.#byId.get(conversationId);
+    if (record === undefined) {
+      throw new AppError(ERROR_CODES.CONVERSATION_NOT_FOUND);
+    }
+    return record;
+  }
+
+  async #refreshDurability(record: ConversationRecord): Promise<void> {
+    let exists = true;
+    try {
+      await access(record.sessionFile);
+    } catch (error) {
+      const code =
+        typeof error === "object" && error !== null && "code" in error
+          ? (error as { readonly code?: unknown }).code
+          : undefined;
+      if (code !== "ENOENT") {
+        throw toAppError(error, { source: "filesystem", target: "session" });
+      }
+      exists = false;
+    }
+
+    if (!exists && record.durable) {
+      if (record.status !== "error") {
+        record.status = "error";
+        record.revision = nextRevision(record.revision);
+        this.#emit({ type: "conversation.state-changed", record });
+      }
+      await this.#refreshHistory();
+      throw new AppError(ERROR_CODES.SESSION_FILE_MISSING);
+    }
+
+    const currentTitle = titleOf(record.session);
+    const changed =
+      currentTitle !== record.title || (exists && !record.durable);
+    if (!changed) return;
+
+    record.title = currentTitle;
+    if (exists) record.durable = true;
+    record.revision = nextRevision(record.revision);
+    this.#emit({ type: "conversation.state-changed", record });
+    await this.#refreshHistory();
+  }
+
+  #disposeRecord(
+    record: ConversationRecord,
+    reason: "close" | "dispose",
+  ): Promise<void> {
+    const existing = this.#pendingCloses.get(record);
+    if (existing !== undefined) return existing;
+
+    const closing = (async () => {
+      let disposalError: unknown;
+      record.unsubscribe();
+      record.unsubscribe = () => undefined;
+      this.#replacementUnsubscribes.get(record)?.();
+      this.#replacementUnsubscribes.delete(record);
+
+      try {
+        await record.runtime.dispose();
+      } catch (error) {
+        disposalError = error;
+      } finally {
+        if (this.#byId.get(record.id) === record) this.#byId.delete(record.id);
+        if (this.#bySessionFile.get(record.sessionFile) === record) {
+          this.#bySessionFile.delete(record.sessionFile);
+        }
+        this.#emit({ type: "conversation.closed", record, reason });
+        if (reason === "close") await this.#refreshHistory();
+      }
+
+      if (disposalError !== undefined) {
+        throw toAppError(disposalError, { source: "internal" });
+      }
+    })();
+    this.#pendingCloses.set(record, closing);
+    return closing;
+  }
+
+  async #refreshHistory(): Promise<void> {
+    try {
+      await this.#refreshHistoryCallback();
+    } catch (error) {
+      this.#onListenerError(error);
+    }
   }
 
   #replaceIdentity(

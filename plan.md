@@ -146,6 +146,8 @@ In `src/shared/errors.ts`:
 
 ### T3.1 Implement CWD handling
 
+**Status:** Complete — canonical CWD resolution, directory/access validation, stored-CWD availability inspection, and filesystem coverage are implemented in [`src/server/cwd.ts`](src/server/cwd.ts).
+
 - Resolve requested paths to absolute paths.
 - Canonicalize with `realpath` when possible.
 - Require an existing directory for new conversations.

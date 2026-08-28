@@ -417,6 +417,22 @@ const registry: ProtocolRegistry = {
   async getState(conversationId) {
     return fixtureById(conversationId).state;
   },
+  async rename(conversationId, title) {
+    const fixture = fixtureById(conversationId);
+    fixture.state = {
+      ...fixture.state,
+      title: title.trim(),
+      revision: fixture.state.revision + 1,
+      lastActiveAt: nextTime(),
+    };
+    for (const listener of listeners) {
+      listener({
+        type: "conversation.state-changed",
+        record: fixture.state as never,
+      });
+    }
+    return fixture.state;
+  },
   async close(conversationId) {
     const fixture = fixtureById(conversationId);
     if (fixture.state.status !== "idle" && fixture.state.status !== "error") {

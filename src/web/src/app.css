@@ -884,6 +884,7 @@ pre {
 }
 
 .conversation-heading {
+  flex: 1 1 auto;
   min-width: 0;
 }
 
@@ -905,6 +906,7 @@ pre {
 }
 
 .conversation-heading h1 {
+  min-width: 0;
   margin: 0;
   overflow: hidden;
   font-size: clamp(1rem, 2vw, 1.25rem);
@@ -912,6 +914,75 @@ pre {
   letter-spacing: -0.01em;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.conversation-title-row,
+.conversation-title-form {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  max-width: min(34rem, 100%);
+}
+
+.conversation-title-row h1 {
+  flex: 0 1 auto;
+}
+
+.edit-title-button,
+.title-save-button,
+.title-cancel-button {
+  flex: 0 0 auto;
+  min-height: 1.75rem;
+  padding: 0.2rem 0.45rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 0.38rem;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 650;
+  background: var(--panel-raised);
+}
+
+.edit-title-button {
+  display: inline-grid;
+  place-items: center;
+  width: 1.75rem;
+  padding: 0;
+  font-size: 0.9rem;
+}
+
+.edit-title-button:hover:not(:disabled),
+.title-save-button:hover:not(:disabled),
+.title-cancel-button:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--panel-hover);
+}
+
+.conversation-title-form input {
+  flex: 1 1 10rem;
+  min-width: 4rem;
+  height: 2rem;
+  padding: 0 0.55rem;
+  border: 1px solid var(--accent-border);
+  border-radius: 0.4rem;
+  color: var(--text);
+  font-size: clamp(1rem, 2vw, 1.25rem);
+  font-weight: 680;
+  background: var(--field-bg);
+}
+
+.conversation-title-form input[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.title-save-button {
+  border-color: var(--accent-border);
+  color: var(--accent-text);
+  background: var(--accent);
+}
+
+.title-save-button:hover:not(:disabled) {
+  color: var(--accent-text);
+  background: var(--accent-hover);
 }
 
 .conversation-workspace-path {

@@ -32,6 +32,36 @@ function event<T extends ConversationEvent>(value: T): ConversationEvent {
 }
 
 describe("web chat state", () => {
+  it("synchronizes a live projection title from authoritative history", () => {
+    let state = reduceChatClientState(createInitialChatClientState(), {
+      type: "workspace.select",
+      workspaceId: "workspace-1",
+    });
+    state = reduceChatClientState(state, {
+      type: "snapshot",
+      conversation: conversation(),
+    });
+    state = reduceChatClientState(state, {
+      type: "history",
+      workspaceId: "workspace-1",
+      conversations: [{
+        id: "conversation-1",
+        workspaceId: "workspace-1",
+        sessionFile: "/sessions/one.jsonl",
+        title: "Renamed conversation",
+        cwd: "/workspace",
+        modifiedAt: 2,
+        messageCount: 0,
+        status: "idle",
+        runnable: true,
+      }],
+    });
+
+    expect(state.conversations["conversation-1"]?.conversation.title).toBe(
+      "Renamed conversation",
+    );
+  });
+
   it("applies contiguous deltas, ignores duplicates, and requests a snapshot on gaps", () => {
     let state = reduceChatClientState(createInitialChatClientState(), {
       type: "snapshot",

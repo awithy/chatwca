@@ -30,7 +30,7 @@ Each conversation:
 - Preserve compatibility with sessions created by the Pi CLI.
 - Create, rename, update, list, and remove named workspaces.
 - Optionally store a workspace's Pi sessions under `<workspace>/.chatwca/sessions`.
-- List, open, switch, create, and delete persisted conversations within a selected workspace.
+- List, open, switch, create, rename, and delete persisted conversations within a selected workspace.
 - Avoid scanning sessions belonging to unselected workspaces.
 - Keep multiple conversations alive concurrently.
 - Associate every conversation with a registered workspace and explicit working directory.
@@ -293,7 +293,7 @@ interface ConversationSummary {
 }
 ```
 
-The first non-empty user prompt becomes the default title. A later naming feature can persist an explicit name through Pi's session metadata.
+The first non-empty user prompt becomes the default title. The user can replace it with an explicit name, persisted as Pi-native session metadata through `SessionManager.appendSessionInfo()`.
 
 Deleting history is allowed only for files returned by a fresh Pi listing for the specified workspace. A live session cannot be deleted until its runtime has been disposed.
 
@@ -485,6 +485,7 @@ type ClientCommand =
   | { type: "conversation.create"; workspaceId: string }
   | { type: "conversation.open"; workspaceId: string; conversationId: string }
   | { type: "conversation.state"; conversationId: string }
+  | { type: "conversation.rename"; conversationId: string; title: string }
   | { type: "conversation.close"; conversationId: string }
   | { type: "conversation.delete"; workspaceId: string; conversationId: string }
   | { type: "conversation.fork"; conversationId: string; entryId: string }
@@ -537,7 +538,7 @@ Reverse proxies are optional. HTTP is sufficient for the intended segmented LAN 
 │       ├── New conversation
 │       └── Selected-workspace conversation rows with status
 └── <ConversationPage>
-    ├── <ConversationHeader> workspace, title, cwd, model, status
+    ├── <ConversationHeader> workspace, editable title, cwd, model, status
     ├── <MessageTimeline>
     │   ├── User messages and images
     │   ├── Assistant markdown
@@ -596,6 +597,7 @@ Errors use stable codes and human-readable messages. Important cases include:
 - image sent to a text-only model;
 - malformed or oversized image payload;
 - prompt submitted to a missing conversation;
+- blank or oversized conversation title;
 - fork target not on the current branch;
 - fork attempted while the source is streaming;
 - live-runtime limit with no idle eviction candidate;
@@ -727,6 +729,7 @@ The initial release is complete when:
 - no Pi conversations are listed until the browser selects a workspace;
 - selecting a workspace lists only sessions associated with that workspace path;
 - a user can create a persistent conversation in the selected workspace;
+- a user can edit a conversation title and the Pi-native name survives browser and server restarts;
 - workspace definitions and Pi history survive browser and server restarts;
 - a user can switch workspaces or conversations while another conversation continues streaming;
 - text, thinking, tool calls, and tool results render incrementally;

@@ -277,6 +277,21 @@ export function App() {
     }
   }
 
+  async function renameConversation(title: string): Promise<void> {
+    if (selectedConversation === undefined || pendingActionRef.current !== null) return;
+    setConversationError(null);
+    try {
+      await runExclusive("conversation.rename", () => client.send({
+        type: "conversation.rename",
+        conversationId: selectedConversation.id,
+        title,
+      }));
+    } catch (error) {
+      setConversationError(errorMessage(error, "Unable to rename the conversation."));
+      throw error;
+    }
+  }
+
   async function closeConversation(): Promise<void> {
     if (selectedConversation === undefined || pendingActionRef.current !== null) return;
     setConversationError(null);
@@ -427,7 +442,10 @@ export function App() {
                   ? "close"
                   : pendingAction === "conversation.delete"
                     ? "delete"
-                    : "other"}
+                    : pendingAction === "conversation.rename"
+                      ? "rename"
+                      : "other"}
+              onRename={renameConversation}
               onClose={() => void closeConversation()}
               onDelete={() => void deleteConversation()}
             />

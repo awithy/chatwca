@@ -57,6 +57,11 @@ function services() {
   const create = vi.fn(async () => ({ id: state.id }));
   const open = vi.fn(async () => ({ id: state.id }));
   const close = vi.fn(async () => undefined);
+  const rename = vi.fn(async (_conversationId: string, title: string) => ({
+    ...state,
+    title,
+    revision: state.revision + 1,
+  }));
   const fork = vi.fn(async () => ({ conversation: state, editorText: "copied prompt" }));
   const prompt = vi.fn(async () => undefined);
   const abort = vi.fn(async () => undefined);
@@ -68,6 +73,7 @@ function services() {
     create,
     open,
     getState: vi.fn(async () => state),
+    rename,
     close,
     fork,
     prompt,
@@ -97,7 +103,7 @@ function services() {
     registry,
     history,
     workspaces,
-    calls: { create, open, close, fork, prompt, abort, delete: deleteSession, busy },
+    calls: { create, open, rename, close, fork, prompt, abort, delete: deleteSession, busy },
   };
 }
 
@@ -164,6 +170,21 @@ describe("server WebSocket protocol", () => {
     }), registry, history, workspaces);
     expect(history.resolve).toHaveBeenCalledWith(workspace, state.id);
     expect(calls.open).toHaveBeenCalledWith(workspace, state.sessionFile);
+
+    await expect(dispatchClientCommand(command({
+      type: "conversation.rename",
+      requestId: "rename-conversation",
+      conversationId: state.id,
+      title: "Renamed conversation",
+    }), registry, history, workspaces)).resolves.toMatchObject({
+      response: {
+        type: "state",
+        requestId: "rename-conversation",
+        conversation: { title: "Renamed conversation" },
+      },
+      affectedWorkspaceId: workspace.id,
+    });
+    expect(calls.rename).toHaveBeenCalledWith(state.id, "Renamed conversation");
 
     await expect(dispatchClientCommand(command({
       type: "conversation.delete",

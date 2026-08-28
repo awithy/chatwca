@@ -91,7 +91,7 @@ ChatWCA starts with no selected workspace. Before creating or opening a conversa
 2. Enter a name and a directory path on the **server** machine. An absolute path is recommended. The directory must already exist and be readable/searchable by the server process.
 3. Optionally enable **Store sessions in this workspace**. It is disabled by default and cannot be changed after creation. Enabled workspaces use `<workspace>/.chatwca/sessions`; otherwise they use Pi's default session store.
 4. Select the workspace. Only then does ChatWCA ask Pi for sessions whose exact working directory is that workspace path.
-5. Create a new conversation or open one from the selected workspace's history.
+5. Create a new conversation or open one from the selected workspace's history. An open conversation's title can be edited from its header; the custom title is stored in Pi's native session metadata.
 
 Workspace definitions persist across browser and server restarts, but browser selection is intentionally in memory only and resets after a full page load. Starting ChatWCA or connecting a browser loads the small SQLite workspace list; it does **not** scan Pi session history. ChatWCA performs no automatic discovery or import of directories from existing global Pi history.
 
@@ -163,7 +163,7 @@ Use a single ChatWCA process. The process-wide registry prevents duplicate live 
 ChatWCA uses two independent stores:
 
 - `./data/chatwca.sqlite` contains only registered workspace IDs, names, canonical directory paths, immutable session-storage policies, and timestamps. `CHATWCA_DATA_DIR` changes its parent directory. The repository's `/data/` rule ignores the database and its `-wal`, `-shm`, and journal sidecars.
-- Pi's native append-only JSONL store remains canonical for messages, images, and conversation metadata. A workspace uses either Pi's default session store under `~/.pi/agent/sessions` (affected by `PI_CODING_AGENT_DIR`) or its own `<workspace>/.chatwca/sessions` directory. ChatWCA does not copy Pi sessions into SQLite or maintain a separate image store.
+- Pi's native append-only JSONL store remains canonical for messages, images, editable conversation titles, and conversation metadata. A workspace uses either Pi's default session store under `~/.pi/agent/sessions` (affected by `PI_CODING_AGENT_DIR`) or its own `<workspace>/.chatwca/sessions` directory. ChatWCA does not copy Pi sessions into SQLite or maintain a separate image store.
 
 At startup and browser connection ChatWCA reads workspace rows only. Selecting a workspace invokes `SessionManager.list()` for that exact working directory and its configured session location. Open and delete operations are authorized by another fresh listing in the same workspace; normal application operation never performs a global `SessionManager.listAll()` scan and never parses JSONL to build history.
 

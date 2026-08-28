@@ -380,10 +380,26 @@ export function reduceChatClientState(
       // lifecycle, but it says nothing about other workspaces or a new live
       // session which is not durable yet. Only listed closed snapshots are
       // discarded here; explicit delete acknowledgements handle deletions.
+      const summaries = new Map(
+        action.conversations.map((summary) => [summary.id, summary]),
+      );
       const conversations = Object.fromEntries(
-        Object.entries(state.conversations).filter(([id, projection]) =>
-          projection.conversation.workspaceId !== action.workspaceId || !closed.has(id)
-        ),
+        Object.entries(state.conversations)
+          .filter(([id, projection]) =>
+            projection.conversation.workspaceId !== action.workspaceId || !closed.has(id)
+          )
+          .map(([id, projection]) => {
+            const summary = summaries.get(id);
+            return summary === undefined
+              ? [id, projection]
+              : [id, {
+                  ...projection,
+                  conversation: {
+                    ...projection.conversation,
+                    title: summary.title,
+                  },
+                }];
+          }),
       );
       return {
         ...state,

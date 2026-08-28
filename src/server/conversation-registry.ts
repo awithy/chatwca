@@ -14,6 +14,7 @@ import {
   DEFAULT_MAX_LIVE_CONVERSATIONS,
   DEFAULT_MAX_TOTAL_IMAGE_BYTES,
 } from "./config.js";
+import { MAX_CONVERSATION_TITLE_LENGTH } from "../shared/protocol.js";
 import type {
   ConversationEvent,
   ConversationState,
@@ -458,6 +459,40 @@ export class ConversationRegistry {
       }),
       queue: queueOf(record.session),
     };
+  }
+
+  /** Persist a user-defined Pi session name and return the updated snapshot. */
+  async rename(conversationId: string, title: string): Promise<ConversationState> {
+    this.#assertAcceptingWork();
+    const record = this.#required(conversationId);
+    if (this.#pendingCloses.has(record)) {
+      throw new AppError(ERROR_CODES.CONVERSATION_BUSY);
+    }
+
+    const normalized = title.trim();
+    if (
+      normalized.length === 0 ||
+      normalized.length > MAX_CONVERSATION_TITLE_LENGTH
+    ) {
+      throw new AppError(ERROR_CODES.INVALID_CONVERSATION_TITLE);
+    }
+    if (record.session.sessionManager.getSessionName()?.trim() === normalized) {
+      return this.getState(conversationId);
+    }
+
+    const previousTitle = record.title;
+    try {
+      record.session.sessionManager.appendSessionInfo(normalized);
+    } catch (error) {
+      throw toAppError(error, { source: "filesystem", target: "session" });
+    }
+
+    this.#touch(record);
+    await this.#refreshDurability(record);
+    if (record.title === previousTitle) {
+      await this.#refreshHistory(record.workspaceId);
+    }
+    return this.getState(conversationId);
   }
 
   /** Resolve a browser image reference from this runtime's canonical active branch. */

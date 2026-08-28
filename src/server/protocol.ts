@@ -33,6 +33,7 @@ export interface ProtocolRegistry {
     sessionFile: string,
   ): Promise<{ readonly id: string }>;
   getState(conversationId: string): Promise<ConversationState>;
+  rename(conversationId: string, title: string): Promise<ConversationState>;
   close(conversationId: string): Promise<void>;
   fork(conversationId: string, entryId: string): Promise<{
     readonly conversation: ConversationState;
@@ -240,6 +241,20 @@ export async function dispatchClientCommand(
           conversation: await registry.getState(command.conversationId),
         },
       };
+    case "conversation.rename": {
+      const conversation = await registry.rename(
+        command.conversationId,
+        command.title,
+      );
+      return {
+        response: {
+          type: "state",
+          requestId: command.requestId,
+          conversation,
+        },
+        affectedWorkspaceId: conversation.workspaceId,
+      };
+    }
     case "conversation.close": {
       const workspaceId = (await registry.getState(command.conversationId)).workspaceId;
       await registry.close(command.conversationId);

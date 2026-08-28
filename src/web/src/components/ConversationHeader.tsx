@@ -1,7 +1,10 @@
-import type {
-  ConversationState,
-  ConversationSummary,
-  WorkspaceSummary,
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+
+import {
+  MAX_CONVERSATION_TITLE_LENGTH,
+  type ConversationState,
+  type ConversationSummary,
+  type WorkspaceSummary,
 } from "../../../shared/protocol.js";
 import {
   canCloseConversation,
@@ -15,7 +18,8 @@ export interface ConversationHeaderProps {
   readonly workspace: WorkspaceSummary;
   readonly loading: boolean;
   readonly connected: boolean;
-  readonly actionPending: "close" | "delete" | "other" | null;
+  readonly actionPending: "close" | "delete" | "rename" | "other" | null;
+  readonly onRename: (title: string) => Promise<void>;
   readonly onClose: () => void;
   readonly onDelete: () => void;
 }
@@ -46,9 +50,14 @@ export function ConversationHeader({
   loading,
   connected,
   actionPending,
+  onRename,
   onClose,
   onDelete,
 }: ConversationHeaderProps) {
+  const displayTitle = conversation?.title.trim() || conversationTitle(summary);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(displayTitle);
+  const titleInput = useRef<HTMLInputElement>(null);
   const model = conversation?.model;
   const modelLabel = model === undefined
     ? "Loading model…"
@@ -60,6 +69,45 @@ export function ConversationHeader({
   const actualStatus = conversation?.status ?? summary.status;
   const closeEnabled = conversation !== undefined && canCloseConversation(conversation.status);
   const deleteEnabled = canDeleteConversation(actualStatus);
+  const renameEnabled = conversation !== undefined && connected && !loading && actionPending === null;
+  const normalizedDraft = titleDraft.trim();
+  const saveEnabled = renameEnabled && normalizedDraft.length > 0 && normalizedDraft !== displayTitle;
+
+  useEffect(() => {
+    setEditingTitle(false);
+    setTitleDraft(displayTitle);
+  }, [summary.id]);
+
+  useEffect(() => {
+    if (!editingTitle) setTitleDraft(displayTitle);
+  }, [displayTitle, editingTitle]);
+
+  useEffect(() => {
+    if (editingTitle) titleInput.current?.select();
+  }, [editingTitle]);
+
+  function cancelTitleEdit(): void {
+    setTitleDraft(displayTitle);
+    setEditingTitle(false);
+  }
+
+  async function submitTitle(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (!saveEnabled) return;
+    try {
+      await onRename(normalizedDraft);
+      setEditingTitle(false);
+    } catch {
+      titleInput.current?.focus();
+    }
+  }
+
+  function handleTitleKeyDown(event: KeyboardEvent<HTMLInputElement>): void {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancelTitleEdit();
+    }
+  }
 
   return (
     <header className="conversation-header">
@@ -68,7 +116,45 @@ export function ConversationHeader({
           <span>{workspace.name}</span>
           {!workspace.available && <strong>Workspace unavailable</strong>}
         </p>
-        <h1>{conversationTitle(summary)}</h1>
+        {editingTitle ? (
+          <form className="conversation-title-form" onSubmit={(event) => void submitTitle(event)}>
+            <label className="visually-hidden" htmlFor="conversation-title-input">Conversation title</label>
+            <input
+              ref={titleInput}
+              id="conversation-title-input"
+              value={titleDraft}
+              maxLength={MAX_CONVERSATION_TITLE_LENGTH}
+              aria-invalid={normalizedDraft.length === 0}
+              disabled={!connected || loading || actionPending !== null}
+              onChange={(event) => setTitleDraft(event.target.value)}
+              onKeyDown={handleTitleKeyDown}
+            />
+            <button className="title-save-button" type="submit" disabled={!saveEnabled}>
+              {actionPending === "rename" ? "Saving…" : "Save"}
+            </button>
+            <button
+              className="title-cancel-button"
+              type="button"
+              disabled={actionPending === "rename"}
+              onClick={cancelTitleEdit}
+            >
+              Cancel
+            </button>
+          </form>
+        ) : (
+          <div className="conversation-title-row">
+            <h1 title={displayTitle}>{displayTitle}</h1>
+            <button
+              className="edit-title-button"
+              type="button"
+              aria-label="Edit conversation title"
+              disabled={!renameEnabled}
+              onClick={() => setEditingTitle(true)}
+            >
+              <span aria-hidden="true">✎</span>
+            </button>
+          </div>
+        )}
         <p className="conversation-workspace-path" title={workspace.path}>
           <span aria-hidden="true">⌁</span>
           {workspace.path}

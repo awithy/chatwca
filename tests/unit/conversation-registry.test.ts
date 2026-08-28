@@ -55,6 +55,7 @@ function fakeSession(
   options: FakeSessionOptions = {},
 ): AgentSession {
   const content = options.prompt;
+  let sessionName = options.title;
   return {
     isStreaming: false,
     model: options.sdkModel,
@@ -67,7 +68,10 @@ function fakeSession(
         timestamp: "2025-01-01T00:00:00.000Z",
         cwd: identity.cwd,
       }),
-      getSessionName: () => options.title,
+      getSessionName: () => sessionName,
+      appendSessionInfo: (name: string) => {
+        sessionName = name;
+      },
       getBranch: () =>
         options.branch ??
         (content === undefined
@@ -177,6 +181,36 @@ function ownership(cwd: string, id = cwd) {
 }
 
 describe("ConversationRegistry", () => {
+  it("persists trimmed conversation titles and rejects blank titles", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessionFile = path.join(root, "sessions", "rename.jsonl");
+    await Promise.all([mkdir(cwd), mkdir(path.dirname(sessionFile))]);
+
+    const runtime = new FakeRuntime(identity("rename", sessionFile, cwd), {
+      title: "Original title",
+    });
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(runtime);
+    const registry = new ConversationRegistry({ runtimeFactory: factory });
+    const events: ConversationRegistryEvent[] = [];
+    registry.subscribe((event) => events.push(event));
+    await registry.create(ownership(cwd, "workspace-1"));
+
+    await expect(registry.rename("rename", "  Updated title  ")).resolves.toMatchObject({
+      title: "Updated title",
+      revision: 1,
+    });
+    expect(runtime.session.sessionManager.getSessionName()).toBe("Updated title");
+    expect(events.at(-1)).toMatchObject({
+      type: "conversation.state-changed",
+      record: { title: "Updated title", revision: 1 },
+    });
+    await expect(registry.rename("rename", "   ")).rejects.toMatchObject({
+      code: ERROR_CODES.INVALID_CONVERSATION_TITLE,
+    });
+  });
+
   it("owns indexed records and emits lifecycle/Pi events without a socket", async () => {
     const root = await temporaryRoot();
     const cwd = path.join(root, "workspace");

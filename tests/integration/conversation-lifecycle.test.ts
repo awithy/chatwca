@@ -216,6 +216,12 @@ describe("complete conversation lifecycle integration", () => {
     ]);
     expect(existsSync(persisted.sessionFile)).toBe(true);
 
+    const renamed = await firstServices.registry.rename(
+      created.id,
+      "Persistent custom title",
+    );
+    expect(renamed.title).toBe("Persistent custom title");
+
     await expect(
       firstServices.history.delete(historyWorkspace(cwd), created.id),
     ).rejects.toMatchObject({ code: ERROR_CODES.LIVE_SESSION_DELETE });
@@ -230,6 +236,7 @@ describe("complete conversation lifecycle integration", () => {
       expect.objectContaining({
         id: created.id,
         sessionFile: persisted.sessionFile,
+        title: "Persistent custom title",
         status: "closed",
         runnable: true,
         messageCount: 2,
@@ -239,6 +246,7 @@ describe("complete conversation lifecycle integration", () => {
     const reopened = await secondServices.registry.open(historyWorkspace(cwd), persisted.sessionFile);
     const recovered = await secondServices.registry.getState(reopened.id);
     expect(recovered.id).toBe(created.id);
+    expect(recovered.title).toBe("Persistent custom title");
     expect(recovered.messages.map(({ entryId }) => entryId)).toEqual(entryIds);
     expect(recovered.messages.map(textOf)).toEqual(persisted.messages.map(textOf));
 

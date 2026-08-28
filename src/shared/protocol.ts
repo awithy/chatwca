@@ -16,6 +16,7 @@ const strictObject = <T extends Record<string, TSchema>>(properties: T) =>
 
 const NonEmptyStringSchema = Type.String({ minLength: 1 });
 const IdentifierSchema = Type.String({ minLength: 1, maxLength: 512 });
+export const MAX_CONVERSATION_TITLE_LENGTH = 200;
 export const RequestIdSchema = Type.String({ minLength: 1, maxLength: 128 });
 export const RevisionSchema = Type.Integer({
   minimum: 0,
@@ -321,6 +322,12 @@ export const ConversationStateCommandSchema = strictObject({
   requestId: RequestIdSchema,
   conversationId: IdentifierSchema,
 });
+export const ConversationRenameCommandSchema = strictObject({
+  type: Type.Literal("conversation.rename"),
+  requestId: RequestIdSchema,
+  conversationId: IdentifierSchema,
+  title: Type.String({ minLength: 1, maxLength: MAX_CONVERSATION_TITLE_LENGTH }),
+});
 export const ConversationCloseCommandSchema = strictObject({
   type: Type.Literal("conversation.close"),
   requestId: RequestIdSchema,
@@ -373,6 +380,9 @@ export type ConversationOpenCommand = Static<
 export type ConversationStateCommand = Static<
   typeof ConversationStateCommandSchema
 >;
+export type ConversationRenameCommand = Static<
+  typeof ConversationRenameCommandSchema
+>;
 export type ConversationCloseCommand = Static<
   typeof ConversationCloseCommandSchema
 >;
@@ -398,6 +408,7 @@ export const ClientCommandSchema = Type.Union([
   ConversationCreateCommandSchema,
   ConversationOpenCommandSchema,
   ConversationStateCommandSchema,
+  ConversationRenameCommandSchema,
   ConversationCloseCommandSchema,
   ConversationDeleteCommandSchema,
   ConversationForkCommandSchema,
@@ -509,6 +520,7 @@ export type CommandSuccessByType = {
   "conversation.create": Correlated<StateMessage>;
   "conversation.open": Correlated<StateMessage>;
   "conversation.state": Correlated<StateMessage>;
+  "conversation.rename": Correlated<StateMessage>;
   "conversation.close": AckFor<"conversation.close">;
   "conversation.delete": AckFor<"conversation.delete">;
   "conversation.fork": ForkStateMessage;

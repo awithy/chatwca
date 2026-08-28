@@ -23,6 +23,7 @@ export const ERROR_CODES = {
   TOO_MANY_IMAGES: "too_many_images",
   TOTAL_IMAGE_BYTES_EXCEEDED: "total_image_bytes_exceeded",
   CONVERSATION_NOT_FOUND: "conversation_not_found",
+  INVALID_CONVERSATION_TITLE: "invalid_conversation_title",
   CONVERSATION_BUSY: "conversation_busy",
   INVALID_FORK_TARGET: "invalid_fork_target",
   FORK_SOURCE_BUSY: "fork_source_busy",
@@ -65,6 +66,7 @@ const DEFAULT_MESSAGES: Readonly<Record<ErrorCode, string>> = {
   too_many_images: "The prompt contains too many images.",
   total_image_bytes_exceeded: "The images exceed the total allowed size.",
   conversation_not_found: "The conversation was not found.",
+  invalid_conversation_title: "Enter a conversation title between 1 and 200 characters.",
   conversation_busy: "The conversation is busy.",
   invalid_fork_target: "The fork target is not a user message on the active branch.",
   fork_source_busy: "A conversation cannot be forked while it is running.",
@@ -124,6 +126,7 @@ export type ErrorContext =
       readonly source: "registry";
       readonly issue:
         | "missing"
+        | "title"
         | "busy"
         | "fork-target"
         | "fork-busy"
@@ -208,6 +211,8 @@ function contextCode(error: unknown, context: ErrorContext): ErrorCode {
       switch (context.issue) {
         case "missing":
           return ERROR_CODES.CONVERSATION_NOT_FOUND;
+        case "title":
+          return ERROR_CODES.INVALID_CONVERSATION_TITLE;
         case "busy":
           return ERROR_CODES.CONVERSATION_BUSY;
         case "fork-target":

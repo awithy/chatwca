@@ -92,6 +92,7 @@ function isExpectedResponse(
         message.conversation.workspaceId === command.workspaceId &&
         message.conversation.id === command.conversationId;
     case "conversation.state":
+    case "conversation.rename":
       return message.type === "state" &&
         message.conversation.id === command.conversationId;
     case "conversation.fork":

@@ -209,6 +209,25 @@ export class ChatSocketClient {
     this.#dispatch({ type: "draft", conversationId, text });
   }
 
+  /**
+   * Create a server-side fork, then make its returned editor text a local,
+   * conversation-specific draft. Selection and draft changes happen only after
+   * the authoritative fork snapshot has been accepted; no prompt is submitted.
+   */
+  async forkConversation(
+    conversationId: string,
+    entryId: string,
+  ): Promise<CommandSuccessByType["conversation.fork"]> {
+    const result = await this.send<"conversation.fork">({
+      type: "conversation.fork",
+      conversationId,
+      entryId,
+    });
+    this.setDraft(result.conversation.id, result.editorText);
+    this.selectConversation(result.conversation.id);
+    return result;
+  }
+
   async reload(): Promise<void> {
     await this.#recover(this.#generation);
   }

@@ -742,6 +742,30 @@ pre {
   font-size: 0.67rem;
 }
 
+.message-fork-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-height: 1.75rem;
+  margin-left: auto;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 0.4rem;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 680;
+  background: var(--panel-raised);
+}
+
+.message-fork-button:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--panel-hover);
+}
+
+.message-fork-button[aria-busy="true"] {
+  color: var(--warning-text);
+}
+
 .message-blocks {
   display: grid;
   gap: 0.65rem;

@@ -21,6 +21,9 @@ export interface MessageTimelineProps {
   readonly queue: QueueState;
   readonly streaming: boolean;
   readonly cwd: string;
+  readonly canFork?: boolean;
+  readonly forkingEntryId?: string | null;
+  readonly onFork?: (entryId: string) => void;
 }
 
 function formatTime(timestamp: number | undefined): string | null {
@@ -185,6 +188,9 @@ export function MessageTimeline({
   queue,
   streaming,
   cwd,
+  canFork = false,
+  forkingEntryId = null,
+  onFork,
 }: MessageTimelineProps) {
   const timelineRef = useRef<HTMLDivElement>(null);
   const followOutputRef = useRef(true);
@@ -248,7 +254,33 @@ export function MessageTimeline({
                 {time !== null && timestamp !== undefined && (
                   <time dateTime={new Date(timestamp).toISOString()}>{time}</time>
                 )}
+                {message.role === "user" && message.forkEligible && (() => {
+                  const isForking = forkingEntryId === message.entryId;
+                  const anotherForkPending = forkingEntryId !== null && !isForking;
+                  return (
+                    <button
+                      className="message-fork-button"
+                      type="button"
+                      disabled={!canFork || forkingEntryId !== null || onFork === undefined}
+                      aria-busy={isForking || undefined}
+                      aria-label="Fork conversation from this message"
+                      title={!canFork ? "Forking is available while this conversation is idle and connected." : undefined}
+                      onClick={() => onFork?.(message.entryId)}
+                    >
+                      <span aria-hidden="true">⑂</span>
+                      {isForking ? "Forking…" : "Fork"}
+                      {anotherForkPending && (
+                        <span className="visually-hidden">Another fork is being created.</span>
+                      )}
+                    </button>
+                  );
+                })()}
               </header>
+              {message.role === "user" && forkingEntryId === message.entryId && (
+                <span className="visually-hidden" role="status">
+                  Creating a new conversation from this message.
+                </span>
+              )}
               <MessageContent
                 blocks={message.blocks}
                 markdown={message.role === "assistant"}

@@ -444,6 +444,8 @@ In `src/server/images.ts`:
 
 ### T9.3 Build the fork UI
 
+**Status:** Complete — eligible user-message actions invoke the source-preserving fork command, atomically select/prefill the returned conversation without submission, and expose accessible pending/error feedback with focused UI/client coverage.
+
 - Add Fork actions to eligible user messages.
 - Select the new conversation after successful fork.
 - Prefill its composer with `editorText` without automatically submitting it.

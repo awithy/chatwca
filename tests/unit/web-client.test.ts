@@ -128,6 +128,133 @@ describe("ChatSocketClient", () => {
     client.disconnect();
   });
 
+  it("selects a successful fork and prefills only its local draft without submitting", async () => {
+    let request = 0;
+    const socket = new FakeSocket();
+    const client = new ChatSocketClient({
+      url: "ws://test/ws",
+      webSocketFactory: () => socket as unknown as WebSocket,
+      requestId: () => `fork-${++request}`,
+    });
+    client.connect();
+    socket.server({ type: "ready", serverVersion: "1" });
+    socket.server({
+      type: "history",
+      requestId: "fork-1",
+      conversations: [{
+        id: "conversation-1",
+        sessionFile: "/sessions/one.jsonl",
+        title: "One",
+        cwd: "/workspace",
+        modifiedAt: 2,
+        messageCount: 1,
+        status: "idle",
+        runnable: true,
+      }],
+    });
+    await flush();
+    socket.server({
+      type: "state",
+      conversation: {
+        ...conversation(2),
+        messages: [{
+          entryId: "user-entry-1",
+          role: "user",
+          blocks: [{ type: "text", text: "Keep the source" }],
+          forkEligible: true,
+        }],
+      },
+    });
+    client.selectConversation("conversation-1");
+    client.setDraft("conversation-1", "source draft");
+
+    const pending = client.forkConversation("conversation-1", "user-entry-1");
+    expect(socket.commands().at(-1)).toEqual({
+      type: "conversation.fork",
+      requestId: "fork-2",
+      conversationId: "conversation-1",
+      entryId: "user-entry-1",
+    });
+
+    const forked = {
+      ...conversation(0),
+      id: "conversation-2",
+      sessionFile: "/sessions/two.jsonl",
+      title: "Forked",
+      messages: [],
+    };
+    socket.server({
+      type: "state",
+      requestId: "fork-2",
+      conversation: forked,
+      editorText: "Keep the source",
+    });
+    await expect(pending).resolves.toMatchObject({ conversation: forked });
+
+    expect(client.getState()).toMatchObject({
+      selectedConversationId: "conversation-2",
+      drafts: {
+        "conversation-1": "source draft",
+        "conversation-2": "Keep the source",
+      },
+    });
+    expect(
+      client.getState().conversations["conversation-1"]?.conversation.messages,
+    ).toMatchObject([{ entryId: "user-entry-1", blocks: [{ text: "Keep the source" }] }]);
+    expect(client.getState().conversations["conversation-2"]?.conversation).toEqual(forked);
+    expect(client.getState().history).toMatchObject([{
+      id: "conversation-1",
+      title: "One",
+    }]);
+    expect(socket.commands().filter((command) =>
+      typeof command.type === "string" && command.type.startsWith("prompt."),
+    )).toEqual([]);
+
+    client.setDraft("conversation-2", "Edited copied prompt");
+    expect(client.getState().drafts).toMatchObject({
+      "conversation-1": "source draft",
+      "conversation-2": "Edited copied prompt",
+    });
+    client.setDraft("conversation-2", "");
+    expect(client.getState().drafts["conversation-2"]).toBe("");
+    client.disconnect();
+  });
+
+  it("does not change selection or drafts when a fork fails", async () => {
+    let request = 0;
+    const socket = new FakeSocket();
+    const client = new ChatSocketClient({
+      url: "ws://test/ws",
+      webSocketFactory: () => socket as unknown as WebSocket,
+      requestId: () => `failed-fork-${++request}`,
+    });
+    client.connect();
+    socket.server({ type: "ready", serverVersion: "1" });
+    socket.server({
+      type: "history",
+      requestId: "failed-fork-1",
+      conversations: [],
+    });
+    await flush();
+    client.selectConversation("conversation-1");
+    client.setDraft("conversation-1", "unchanged");
+
+    const pending = client.forkConversation("conversation-1", "user-entry-1");
+    socket.server({
+      type: "error",
+      requestId: "failed-fork-2",
+      code: "fork_source_busy",
+      message: "A conversation cannot be forked while it is running.",
+    });
+
+    await expect(pending).rejects.toMatchObject({ code: "fork_source_busy" });
+    expect(client.getState()).toMatchObject({
+      selectedConversationId: "conversation-1",
+      drafts: { "conversation-1": "unchanged" },
+    });
+    client.disconnect();
+  });
+
   it("serializes prepared image payloads into prompt commands", async () => {
     let request = 0;
     const socket = new FakeSocket();

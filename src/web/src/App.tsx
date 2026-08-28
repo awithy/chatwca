@@ -36,6 +36,10 @@ export function App() {
   const [loadingConversationId, setLoadingConversationId] = useState<string | null>(null);
   const [conversationError, setConversationError] = useState<string | null>(null);
   const [lifecycleAction, setLifecycleAction] = useState<"close" | "delete" | null>(null);
+  const [forkAction, setForkAction] = useState<{
+    readonly conversationId: string;
+    readonly entryId: string;
+  } | null>(null);
   const { client, state: chat } = useChatSocket();
 
   useEffect(() => {
@@ -72,13 +76,25 @@ export function App() {
     ),
     [chat.conversations],
   );
-  const selectedSummary = chat.history.find(
-    (conversation) => conversation.id === chat.selectedConversationId,
-  );
   const selectedProjection = chat.selectedConversationId === null
     ? undefined
     : chat.conversations[chat.selectedConversationId];
   const selectedConversation = selectedProjection?.conversation;
+  const selectedSummary = chat.history.find(
+    (conversation) => conversation.id === chat.selectedConversationId,
+  ) ?? (selectedConversation === undefined ? undefined : {
+    id: selectedConversation.id,
+    sessionFile: selectedConversation.sessionFile,
+    title: selectedConversation.title,
+    cwd: selectedConversation.cwd,
+    createdAt: selectedConversation.createdAt,
+    modifiedAt: selectedConversation.lastActiveAt,
+    messageCount: selectedConversation.messages.length,
+    status: selectedConversation.status === "aborting"
+      ? "streaming" as const
+      : selectedConversation.status,
+    runnable: true,
+  });
 
   async function createConversation(cwd: string): Promise<void> {
     setConversationError(null);
@@ -151,6 +167,26 @@ export function App() {
       type: "conversation.abort",
       conversationId: selectedConversation.id,
     });
+  }
+
+  async function forkConversation(entryId: string): Promise<void> {
+    if (
+      selectedConversation === undefined ||
+      selectedConversation.status !== "idle" ||
+      forkAction !== null
+    ) return;
+
+    const conversationId = selectedConversation.id;
+    setForkAction({ conversationId, entryId });
+    setConversationError(null);
+    try {
+      await client.forkConversation(conversationId, entryId);
+      setSidebarOpen(false);
+    } catch (error) {
+      setConversationError(errorMessage(error, "Unable to fork the conversation."));
+    } finally {
+      setForkAction(null);
+    }
   }
 
   async function closeConversation(): Promise<void> {
@@ -301,6 +337,11 @@ export function App() {
                     queue={selectedConversation.queue}
                     streaming={selectedConversation.status === "streaming"}
                     cwd={selectedConversation.cwd}
+                    canFork={connected && selectedConversation.status === "idle"}
+                    forkingEntryId={forkAction?.conversationId === selectedConversation.id
+                      ? forkAction.entryId
+                      : null}
+                    onFork={(entryId) => void forkConversation(entryId)}
                   />
                   <Composer
                     key={selectedConversation.id}

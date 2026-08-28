@@ -5,6 +5,7 @@ import type {
   UserContentBlock,
   AssistantContentBlock,
 } from "../../../shared/protocol.js";
+import { MarkdownContent } from "./MarkdownContent.js";
 
 export interface MessageTimelineProps {
   readonly messages: readonly NormalizedMessage[];
@@ -24,8 +25,10 @@ function formatTime(timestamp: number | undefined): string | null {
 
 function TextContent({
   blocks,
+  markdown,
 }: {
   readonly blocks: readonly (UserContentBlock | AssistantContentBlock)[];
+  readonly markdown: boolean;
 }) {
   const visible = blocks.filter(
     (block): block is Extract<typeof block, { type: "text" | "image" }> =>
@@ -35,7 +38,11 @@ function TextContent({
   return (
     <div className="message-blocks">
       {visible.map((block, index) => block.type === "text" ? (
-        <p className="message-text" key={`text-${index}`}>{block.text}</p>
+        markdown ? (
+          <MarkdownContent text={block.text} key={`text-${index}`} />
+        ) : (
+          <p className="message-text" key={`text-${index}`}>{block.text}</p>
+        )
       ) : (
         <span className="message-attachment" key={`image-${index}`}>
           <span aria-hidden="true">▧</span>
@@ -100,7 +107,10 @@ export function MessageTimeline({ messages, streaming, cwd }: MessageTimelinePro
                   <time dateTime={new Date(timestamp).toISOString()}>{time}</time>
                 )}
               </header>
-              <TextContent blocks={message.blocks} />
+              <TextContent
+                blocks={message.blocks}
+                markdown={message.role === "assistant"}
+              />
               {message.role === "assistant" && message.error !== undefined && (
                 <p className="message-error" role="alert">{message.error.message}</p>
               )}

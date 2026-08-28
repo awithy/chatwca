@@ -357,6 +357,8 @@ In `src/web/styles/app.css`:
 
 ### T7.1 Render safe Markdown
 
+**Status:** Complete — assistant text uses explicit HTML-skipping React Markdown with GFM support, safe URL handling, streamed-partial coverage, and bounded rich-content styling in [`src/web/src/components/MarkdownContent.tsx`](src/web/src/components/MarkdownContent.tsx).
+
 - Use `react-markdown` and `remark-gfm`.
 - Do not enable raw HTML rendering.
 - Style code blocks, tables, blockquotes, links, and long unbroken content.

@@ -743,16 +743,119 @@ pre {
   min-width: 0;
 }
 
-.message-text {
-  margin: 0;
+.message-text,
+.message-markdown {
+  min-width: 0;
   color: var(--text);
   font-size: 0.92rem;
   line-height: 1.65;
   overflow-wrap: anywhere;
+}
+
+.message-text {
+  margin: 0;
   white-space: pre-wrap;
 }
 
-.message-assistant.is-streaming .message-text:last-child::after {
+.message-markdown > :first-child {
+  margin-top: 0;
+}
+
+.message-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.message-markdown p,
+.message-markdown ul,
+.message-markdown ol,
+.message-markdown blockquote,
+.message-markdown pre,
+.message-markdown table {
+  margin-top: 0;
+  margin-bottom: 0.8rem;
+}
+
+.message-markdown h1,
+.message-markdown h2,
+.message-markdown h3,
+.message-markdown h4,
+.message-markdown h5,
+.message-markdown h6 {
+  margin: 1.2em 0 0.45em;
+  color: var(--text);
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.message-markdown h1 { font-size: 1.35rem; }
+.message-markdown h2 { font-size: 1.2rem; }
+.message-markdown h3 { font-size: 1.05rem; }
+.message-markdown h4,
+.message-markdown h5,
+.message-markdown h6 { font-size: 0.95rem; }
+
+.message-markdown ul,
+.message-markdown ol {
+  padding-left: 1.6rem;
+}
+
+.message-markdown li + li {
+  margin-top: 0.22rem;
+}
+
+.message-markdown li > input[type="checkbox"] {
+  margin: 0 0.4rem 0 -1.25rem;
+  accent-color: var(--accent);
+}
+
+.message-markdown blockquote {
+  padding: 0.2rem 0 0.2rem 0.9rem;
+  border-left: 3px solid var(--border-control);
+  color: var(--muted);
+}
+
+.message-markdown blockquote > :first-child { margin-top: 0; }
+.message-markdown blockquote > :last-child { margin-bottom: 0; }
+
+.message-markdown pre {
+  white-space: pre;
+}
+
+.message-markdown table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  border-spacing: 0;
+  border-collapse: collapse;
+  scrollbar-color: var(--border-control) transparent;
+}
+
+.message-markdown th,
+.message-markdown td {
+  min-width: 7rem;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.message-markdown th {
+  background: var(--panel-raised);
+}
+
+.message-markdown hr {
+  margin: 1.25rem 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+.message-markdown img {
+  max-width: 100%;
+  height: auto;
+}
+
+.message-assistant.is-streaming :is(.message-text, .message-markdown):last-child::after {
   content: "";
   display: inline-block;
   width: 0.48em;

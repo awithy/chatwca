@@ -342,6 +342,8 @@ Implement:
 
 ### T6.4 Add the dark-only design system
 
+**Status:** Complete — the single dark token palette, contrast-checked controls and rich-text colors, keyboard focus treatment, bounded code regions, and reduced-motion behavior are implemented in [`src/web/src/app.css`](src/web/src/app.css).
+
 In `src/web/styles/app.css`:
 
 - Define a single dark palette with CSS custom properties.

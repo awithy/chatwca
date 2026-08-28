@@ -16,8 +16,14 @@ if [[ ! -d node_modules ]]; then
 fi
 
 # Bind to loopback by default so the unauthenticated app is not exposed to the LAN.
-export CHATWCA_HOST="${CHATWCA_HOST:-127.0.0.1}"
-export CHATWCA_PORT="${CHATWCA_PORT:-8787}"
+# Read host/port through Node so .env uses the same parser and precedence as the server.
+if [[ -f .env ]]; then
+  export CHATWCA_HOST="$(node --env-file=.env -p 'process.env.CHATWCA_HOST ?? "127.0.0.1"')"
+  export CHATWCA_PORT="$(node --env-file=.env -p 'process.env.CHATWCA_PORT ?? "8787"')"
+else
+  export CHATWCA_HOST="${CHATWCA_HOST:-127.0.0.1}"
+  export CHATWCA_PORT="${CHATWCA_PORT:-8787}"
+fi
 
 npm run build
 

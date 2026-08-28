@@ -1,7 +1,8 @@
 import express from "express";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createServer as createHttpServer, type Server } from "node:http";
 import path from "node:path";
+import { loadEnvFile } from "node:process";
 import { fileURLToPath } from "node:url";
 import WebSocket, { WebSocketServer } from "ws";
 
@@ -429,6 +430,11 @@ export async function startChatWcaServer(
 
 async function main(): Promise<void> {
   try {
+    const environmentFile = path.resolve(process.cwd(), ".env");
+    if (existsSync(environmentFile)) {
+      loadEnvFile(environmentFile);
+    }
+
     const server = await startChatWcaServer({
       onInternalError: (error) => console.error("ChatWCA internal error", error),
     });

@@ -1,0 +1,21 @@
+[Unit]
+Description=ChatWCA web interface for the Pi coding agent
+Documentation=file:/home/adrian/projects/chatwca/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=adrian
+WorkingDirectory=/home/adrian/projects/chatwca
+Environment=NODE_ENV=production
+EnvironmentFile=-/home/adrian/projects/chatwca/.env
+ExecStart=/usr/bin/node /home/adrian/projects/chatwca/dist/server/server/index.js
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=310s
+SyslogIdentifier=chatwca
+
+[Install]
+WantedBy=multi-user.target

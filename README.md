@@ -52,6 +52,27 @@ npm start
 
 `npm start` runs the already-built `dist/server/server/index.js`; it does not build first. With default settings, open `http://127.0.0.1:8787` on the server or `http://<server-lan-address>:8787` from the trusted LAN. `0.0.0.0` is a bind address, not a browser destination.
 
+### systemd
+
+A system service for this checkout and the `adrian` user is provided at [`systemd/chatwca.service`](systemd/chatwca.service). It uses `/usr/bin/node`, loads the optional repository `.env`, and runs the existing production build. Build before installing or restarting it:
+
+```sh
+npm ci
+npm run build
+sudo install -m 0644 systemd/chatwca.service /etc/systemd/system/chatwca.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now chatwca.service
+```
+
+Inspect its state and logs with:
+
+```sh
+systemctl status chatwca.service
+journalctl -u chatwca.service -f
+```
+
+After application updates, run `npm ci`, rebuild, and use `sudo systemctl restart chatwca.service`. If the checkout or user changes, update `User`, `WorkingDirectory`, `EnvironmentFile`, `ExecStart`, and `Documentation` in the service file.
+
 Operational endpoints are:
 
 ```text
@@ -74,6 +95,14 @@ Workspace definitions persist across browser and server restarts, but browser se
 You can rename a workspace at any time. Changing its path or removing it requires closing all live conversations in that workspace first. Removing a workspace unregisters only its ChatWCA metadata: the directory, its contents, and all Pi JSONL sessions are retained.
 
 ## Configuration
+
+When started through the server entry point, ChatWCA loads an optional `.env` file from the repository/current working directory before reading its configuration. Copy the included template and edit it:
+
+```sh
+cp .env.example .env
+```
+
+For example, set `CHATWCA_HOST` to an IP address assigned to the server. Variables already present in the shell environment take precedence over values in `.env`. The `.env` file is gitignored so credentials and machine-specific settings are not committed.
 
 These are all environment variables interpreted by ChatWCA or explicitly passed through to its Pi runtime:
 

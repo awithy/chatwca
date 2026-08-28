@@ -811,7 +811,7 @@ pre {
   white-space: nowrap;
 }
 
-.conversation-cwd {
+.conversation-workspace-path {
   display: flex;
   align-items: center;
   gap: 0.35rem;
@@ -1829,7 +1829,7 @@ pre {
     padding: 0.75rem 1rem;
   }
 
-  .conversation-cwd {
+  .conversation-workspace-path {
     max-width: 52vw;
   }
 
@@ -1863,7 +1863,7 @@ pre {
     gap: 0.75rem;
   }
 
-  .conversation-cwd {
+  .conversation-workspace-path {
     max-width: 65vw;
   }
 

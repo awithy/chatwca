@@ -1,6 +1,6 @@
 # ChatWCA Design
 
-**Status:** Proposed
+**Status:** Implemented
 
 **Runtime:** Node.js 22.19+, TypeScript
 
@@ -66,7 +66,7 @@ Pi resources already configured on the host—models, credentials, context files
 - Browsers may run on another machine in the same segmented LAN.
 - The LAN controls which devices can reach the configured port.
 - The Node.js process has the same filesystem permissions as the operator.
-- The process can create and write the local `./data` directory containing ChatWCA's SQLite database.
+- The process can create and write the configured ChatWCA data directory (`./data` by default) containing the SQLite database.
 - There is one ChatWCA server process. A restart interrupts active model requests, but completed session history remains persisted by Pi.
 - The application is not a sandbox. Pi tools can read, write, edit, and execute commands in the selected workspace with the server process's permissions.
 
@@ -162,7 +162,7 @@ interface WorkspaceSummary extends Workspace {
 
 The workspace repository stores metadata in `./data/chatwca.sqlite`, resolved relative to the server process's current working directory. The entire `/data/` directory is gitignored, including SQLite journal, WAL, and shared-memory files. `CHATWCA_DATA_DIR` may override the directory for deployments and tests.
 
-The server creates the data directory and initializes the database during startup. `better-sqlite3` is used because workspace operations are small and serialized, and it avoids relying on Node's experimental `node:sqlite` API. The connection enables foreign keys, a bounded busy timeout, and WAL mode, and is closed during graceful shutdown.
+The server creates the data directory and initializes the database during startup. `better-sqlite3` is used because workspace operations are small and serialized, and it avoids relying on Node's experimental `node:sqlite` API. The connection enables foreign keys, a bounded busy timeout, and WAL mode, and is closed during graceful shutdown. Operational backups should stop ChatWCA before a plain file copy so `chatwca.sqlite` and any WAL/shared-memory sidecars are captured consistently; Pi's agent/session directory must be backed up separately.
 
 Initial schema:
 

@@ -9,7 +9,7 @@ import {
 test("streams text while its background sidebar status remains authoritative", async ({ page }) => {
   const prompt = "Keep streaming in background";
   await waitForConnected(page);
-  await createConversation(page, "/tmp/chatwca-browser-background");
+  await createConversation(page);
 
   const composer = page.getByRole("textbox", { name: "Message" });
   await composer.fill(prompt);

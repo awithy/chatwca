@@ -93,7 +93,7 @@ test("paste, drop, selection, removal, resizing, and image submission", async ({
   const oversizedDimensions = solidPng(3000, 1000);
 
   await waitForConnected(page);
-  await createConversation(page, "/tmp/chatwca-browser-images");
+  await createConversation(page);
   const composer = page.getByRole("textbox", { name: "Message" });
   await expect(composer).toBeEnabled();
 

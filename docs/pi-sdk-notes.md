@@ -59,9 +59,9 @@ SessionManager.listAll(onProgress?)
 SessionManager.listAll(sessionDir?, onProgress?)
 ```
 
-`listAll()` does not take a CWD. It scans Pi's complete default session root, or the supplied session directory. `SessionInfo` includes `path`, `id`, `cwd`, optional `name`, optional `parentSessionPath`, `created`, `modified`, `messageCount`, `firstMessage`, and `allMessagesText`.
+`listAll()` does not take a CWD. It scans Pi's complete default session root, or the supplied session directory. It is an SDK capability, but ChatWCA normal operation does not call it. ChatWCA uses `SessionManager.list(workspace.path)` only after a browser selects a workspace, and repeats that same scoped listing to authorize open and delete operations. Startup, browser connection, and workspace listing do not list Pi sessions. `SessionInfo` includes `path`, `id`, `cwd`, optional `name`, optional `parentSessionPath`, `created`, `modified`, `messageCount`, `firstMessage`, and `allMessagesText`.
 
-There is no exported session-deletion API. Pi's own TUI tries the external `trash` command and falls back to `fs.unlink`. ChatWCA will implement deletion at its filesystem boundary, but only after resolving the requested file through a fresh `SessionManager.list()`/`listAll()` allow-set and confirming that it is not live.
+There is no exported session-deletion API. Pi's own TUI tries the external `trash` command and falls back to `fs.unlink`. ChatWCA implements deletion at its filesystem boundary, but only after resolving the requested file through a fresh `SessionManager.list(workspace.path)` allow-set, verifying workspace ownership, and confirming that it is not live.
 
 ## Persistence and durability
 
@@ -74,7 +74,7 @@ Pi persistence is synchronous and append-only once a session file exists, but a 
 
 Therefore empty and user-only conversations are not returned by listing APIs and do not survive process exit. ChatWCA must not claim that a newly created session is durable until the first assistant message has ended. This is accepted SDK behavior; no application JSONL writer will be added.
 
-Opening uses the CWD from the session header unless `cwdOverride` is passed. Runtime creation rejects a missing stored CWD. History can still expose the `SessionInfo`, so ChatWCA should check CWD availability before constructing a runtime.
+Opening uses the CWD from the session header unless `cwdOverride` is passed. Runtime creation rejects a missing stored CWD. ChatWCA does not pass a CWD override: it verifies that each scoped listing result's canonical header CWD equals the selected workspace path before the session may be opened.
 
 ## Events, prompting, and abort
 

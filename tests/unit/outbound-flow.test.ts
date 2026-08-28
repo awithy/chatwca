@@ -29,10 +29,10 @@ class FakeSocket implements OutboundSocket {
     this.closes.push({ code, reason });
   }
 
-  flush(): void {
+  flush(error?: Error | null): void {
     this.bufferedAmount = 0;
     const callbacks = this.#callbacks.splice(0);
-    for (const callback of callbacks) callback();
+    for (const callback of callbacks) callback(error as Error | undefined);
   }
 }
 
@@ -107,6 +107,20 @@ describe("outbound WebSocket flow control", () => {
 
     socket.flush();
     expect(flow.bufferedBytes).toBe(0);
+    flow.dispose();
+  });
+
+  it("treats ws null and undefined send callback values as success", () => {
+    const socket = new FakeSocket();
+    const onError = vi.fn();
+    const flow = new OutboundFlowController(socket, { onError });
+
+    flow.send(status(1));
+    socket.flush(null);
+    flow.send(status(2));
+    socket.flush();
+
+    expect(onError).not.toHaveBeenCalled();
     flow.dispose();
   });
 

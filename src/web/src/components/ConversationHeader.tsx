@@ -69,7 +69,7 @@ export function ConversationHeader({
           {!workspace.available && <strong>Workspace unavailable</strong>}
         </p>
         <h1>{conversationTitle(summary)}</h1>
-        <p className="conversation-cwd" title={workspace.path}>
+        <p className="conversation-workspace-path" title={workspace.path}>
           <span aria-hidden="true">⌁</span>
           {workspace.path}
         </p>

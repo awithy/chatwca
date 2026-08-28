@@ -40,7 +40,7 @@ async function createSelectedConversation(
 ): Promise<void> {
   await page.getByRole("button", { name: `New conversation in ${workspaceName}` }).click();
   await expect(page.getByRole("textbox", { name: "Message" })).toBeEnabled();
-  await expect(page.locator(".conversation-cwd")).toContainText(workspacePath);
+  await expect(page.locator(".conversation-workspace-path")).toContainText(workspacePath);
 }
 
 test("does not request Pi history before a workspace is selected", async ({ page }) => {

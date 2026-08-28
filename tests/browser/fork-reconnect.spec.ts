@@ -10,7 +10,7 @@ import {
 test("fork selects a new conversation and prefills an editable unsent prompt", async ({ page }) => {
   const sourcePrompt = "Fork this editable prompt";
   await waitForConnected(page);
-  await createConversation(page, "/tmp/chatwca-browser-fork");
+  await createConversation(page);
   await submitAndWait(page, sourcePrompt);
 
   const sourceRow = page.locator("button.conversation-row").filter({
@@ -71,7 +71,7 @@ test("recovers only the in-memory selected workspace and conversation after a so
 
   const prompt = "Reconnect while streaming";
   await waitForConnected(page);
-  await createConversation(page, "/tmp/chatwca-browser-reconnect");
+  await createConversation(page);
   await page.getByRole("textbox", { name: "Message" }).fill(prompt);
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.locator(".header-status")).toContainText("Running");

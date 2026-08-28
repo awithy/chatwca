@@ -1,8 +1,8 @@
 # ChatWCA Workspace Changes Plan
 
-This plan updates the existing ChatWCA implementation to match the workspace design in [`docs/design.md`](docs/design.md). The application is already implemented around a global Pi history list; this work replaces that behavior with SQLite-backed workspace definitions and workspace-scoped Pi session discovery.
+This plan records the completed migration to the workspace design in [`docs/design.md`](docs/design.md). The previous implementation used a global Pi history list; the migration replaced that behavior with SQLite-backed workspace definitions and workspace-scoped Pi session discovery.
 
-All tasks below are pending unless marked otherwise.
+**Status: Complete.** All phases and tasks below have been implemented and validated.
 
 ## Delivery principles
 
@@ -485,7 +485,7 @@ Add a repository test or static assertion that production server source does not
 
 ## Phase 10 — Documentation and final cleanup
 
-### T10.1 Update user documentation
+### T10.1 Update user documentation — Complete
 
 Update `README.md` to describe:
 
@@ -500,7 +500,7 @@ Update `README.md` to describe:
 
 Keep `docs/pi-sdk-notes.md` accurate: `listAll()` may remain documented as an SDK capability, but state that ChatWCA normal operation uses `SessionManager.list(cwd)`.
 
-### T10.2 Remove obsolete global-history code and copy
+### T10.2 Remove obsolete global-history code and copy — Complete
 
 - Remove dead default-CWD UI/config paths.
 - Remove global history caches, broadcasts, and `listAll()` adapters.
@@ -508,7 +508,7 @@ Keep `docs/pi-sdk-notes.md` accurate: `listAll()` may remain documented as an SD
 - Ensure public errors and UI text consistently use “workspace” for the registered entity and “working directory” only for the underlying path.
 - Confirm no generated database or WAL file is tracked by Git.
 
-### T10.3 Run final gates
+### T10.3 Run final gates — Complete
 
 Run:
 
@@ -553,22 +553,22 @@ Temporary compilation breaks should be confined to a commit while shared protoco
 
 ## Completion checklist
 
-- [ ] `/data/` is gitignored.
-- [ ] `better-sqlite3` is installed and locked.
-- [ ] `CHATWCA_DATA_DIR` defaults to `./data`; `CHATWCA_DEFAULT_CWD` is removed.
-- [ ] SQLite initializes `data/chatwca.sqlite` and persists workspace rows.
-- [ ] Workspace CRUD validates names and canonical directory paths.
-- [ ] Workspace removal never deletes directories or Pi sessions.
-- [ ] Startup and browser connection do not list Pi sessions.
-- [ ] Selecting a workspace uses `SessionManager.list(workspace.path)`.
-- [ ] Production server code does not call `SessionManager.listAll()`.
-- [ ] History responses and broadcasts are workspace-scoped.
-- [ ] Fresh scoped listings authorize conversation open and delete.
-- [ ] Conversation records, states, summaries, and events carry workspace ownership.
-- [ ] Forks inherit source workspace ownership.
-- [ ] Live-runtime LRU remains process-wide and background runs survive workspace switches.
-- [ ] Path update/removal is rejected while the workspace owns a live runtime.
-- [ ] Initial connection lists workspaces only; reconnect lists only the selected workspace's history.
-- [ ] The UI supports workspace create/select/edit/remove and no longer requests a CWD per conversation.
-- [ ] Unit, integration, browser, build, typecheck, and SDK smoke checks pass.
-- [ ] README and operational documentation match the workspace behavior.
+- [x] `/data/` is gitignored.
+- [x] `better-sqlite3` is installed and locked.
+- [x] `CHATWCA_DATA_DIR` defaults to `./data`; `CHATWCA_DEFAULT_CWD` is removed.
+- [x] SQLite initializes `data/chatwca.sqlite` and persists workspace rows.
+- [x] Workspace CRUD validates names and canonical directory paths.
+- [x] Workspace removal never deletes directories or Pi sessions.
+- [x] Startup and browser connection do not list Pi sessions.
+- [x] Selecting a workspace uses `SessionManager.list(workspace.path)`.
+- [x] Production server code does not call `SessionManager.listAll()`.
+- [x] History responses and broadcasts are workspace-scoped.
+- [x] Fresh scoped listings authorize conversation open and delete.
+- [x] Conversation records, states, summaries, and events carry workspace ownership.
+- [x] Forks inherit source workspace ownership.
+- [x] Live-runtime LRU remains process-wide and background runs survive workspace switches.
+- [x] Path update/removal is rejected while the workspace owns a live runtime.
+- [x] Initial connection lists workspaces only; reconnect lists only the selected workspace's history.
+- [x] The UI supports workspace create/select/edit/remove and no longer requests a CWD per conversation.
+- [x] Unit, integration, browser, build, typecheck, and SDK smoke checks pass.
+- [x] README and operational documentation match the workspace behavior.

@@ -483,7 +483,7 @@ export class WebSocketProtocol {
     if (socket.readyState !== WebSocket.OPEN) return;
     try {
       socket.send(JSON.stringify({ type: "server.shutdown", gracePeriodMs } satisfies ServerMessage), (error) => {
-        if (error !== undefined) this.#onInternalError(error);
+        if (error !== undefined && error !== null) this.#onInternalError(error);
       });
       socket.close(WEBSOCKET_RESTART_CLOSE_CODE, WEBSOCKET_RESTART_CLOSE_REASON);
     } catch (error) {

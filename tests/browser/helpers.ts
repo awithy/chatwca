@@ -1,6 +1,6 @@
 import { expect, type Page } from "@playwright/test";
 
-export const DEFAULT_CWD = "/tmp/chatwca-browser-workspace";
+export const DEFAULT_WORKSPACE_PATH = "/tmp/chatwca-browser-workspace";
 
 export async function waitForConnected(page: Page): Promise<void> {
   await page.goto("/");
@@ -11,13 +11,12 @@ export async function waitForConnected(page: Page): Promise<void> {
   await expect(page.getByRole("heading", { name: "Conversations" })).toBeVisible();
 }
 
-export async function createConversation(
-  page: Page,
-  _legacyCwd?: string,
-): Promise<void> {
+export async function createConversation(page: Page): Promise<void> {
   await page.getByRole("button", { name: /New conversation in Browser workspace/ }).click();
   await expect(page.getByRole("textbox", { name: "Message" })).toBeEnabled();
-  await expect(page.locator(".conversation-cwd")).toContainText(DEFAULT_CWD);
+  await expect(page.locator(".conversation-workspace-path")).toContainText(
+    DEFAULT_WORKSPACE_PATH,
+  );
 }
 
 export async function submitAndWait(

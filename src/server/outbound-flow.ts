@@ -221,7 +221,7 @@ export class OutboundFlowController {
   #write(item: QueuedMessage): void {
     try {
       this.#socket.send(item.data, (error) => {
-        if (error !== undefined) this.#onError(error);
+        if (error !== undefined && error !== null) this.#onError(error);
         this.#pump();
       });
     } catch (error) {

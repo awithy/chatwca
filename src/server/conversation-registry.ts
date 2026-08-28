@@ -8,6 +8,7 @@ import type {
 
 import { AppError, ERROR_CODES, toAppError } from "../shared/errors.js";
 import { nextRevision } from "../shared/revisions.js";
+import { DEFAULT_MAX_LIVE_CONVERSATIONS } from "./config.js";
 import type {
   ConversationState,
   LiveConversationStatus,
@@ -63,7 +64,7 @@ export type ConversationRegistryEvent =
   | {
       readonly type: "conversation.closed";
       readonly record: ConversationRecord;
-      readonly reason: "close" | "dispose";
+      readonly reason: "close" | "evict" | "dispose";
     }
   | {
       readonly type: "conversation.state-changed";
@@ -78,6 +79,8 @@ export interface ConversationRegistryOptions {
   readonly runtimeFactory: PiRuntimeFactoryPort;
   /** Injectable wall clock for deterministic ownership/LRU tests. */
   readonly now?: () => number;
+  /** Maximum number of runtime records owned at once. */
+  readonly maxLiveConversations?: number;
   /** Registry observers are isolated from Pi callbacks; failures are reported here. */
   readonly onListenerError?: (error: unknown) => void;
   /** Refreshes the Pi-native history projection after lifecycle changes. */
@@ -197,6 +200,7 @@ async function canonicalFile(sessionFile: string): Promise<string> {
 export class ConversationRegistry {
   readonly #runtimeFactory: PiRuntimeFactoryPort;
   readonly #now: () => number;
+  readonly #maxLiveConversations: number;
   readonly #onListenerError: (error: unknown) => void;
   readonly #refreshHistoryCallback: () => void | Promise<void>;
   readonly #byId = new Map<string, ConversationRecord>();
@@ -208,11 +212,21 @@ export class ConversationRegistry {
     ConversationRecord,
     () => void
   >();
+  #capacityReservations = 0;
+  #capacityTail = Promise.resolve();
   #disposePromise: Promise<void> | undefined;
 
   constructor(options: ConversationRegistryOptions) {
     this.#runtimeFactory = options.runtimeFactory;
     this.#now = options.now ?? Date.now;
+    this.#maxLiveConversations =
+      options.maxLiveConversations ?? DEFAULT_MAX_LIVE_CONVERSATIONS;
+    if (
+      !Number.isSafeInteger(this.#maxLiveConversations) ||
+      this.#maxLiveConversations <= 0
+    ) {
+      throw new RangeError("maxLiveConversations must be a positive integer");
+    }
     this.#onListenerError = options.onListenerError ?? (() => undefined);
     this.#refreshHistoryCallback = options.refreshHistory ?? (() => undefined);
   }
@@ -242,14 +256,18 @@ export class ConversationRegistry {
   }
 
   async create(cwd: string): Promise<ConversationRecord> {
-    const runtime = await this.#runtimeFactory.createPersistent(cwd);
+    const releaseCapacity = await this.#reserveCapacity();
+    let runtime: PiConversationRuntimePort | undefined;
     try {
+      runtime = await this.#runtimeFactory.createPersistent(cwd);
       const record = await this.#register(runtime, "create");
       await this.#refreshHistory();
       return record;
     } catch (error) {
-      await runtime.dispose().catch(() => undefined);
+      await runtime?.dispose().catch(() => undefined);
       throw error;
+    } finally {
+      releaseCapacity();
     }
   }
 
@@ -348,13 +366,78 @@ export class ConversationRegistry {
   }
 
   async #openAndRegister(canonical: string): Promise<ConversationRecord> {
-    const runtime = await this.#runtimeFactory.openPersistent(canonical);
+    const releaseCapacity = await this.#reserveCapacity();
+    let runtime: PiConversationRuntimePort | undefined;
     try {
+      runtime = await this.#runtimeFactory.openPersistent(canonical);
       return await this.#register(runtime, "open");
     } catch (error) {
-      await runtime.dispose().catch(() => undefined);
+      await runtime?.dispose().catch(() => undefined);
       throw error;
+    } finally {
+      releaseCapacity();
     }
+  }
+
+  /**
+   * Reserve a slot before constructing a runtime. Capacity decisions are
+   * serialized and in-flight constructions count toward the limit, preventing
+   * concurrent create/open requests from temporarily exceeding it.
+   */
+  async #reserveCapacity(): Promise<() => void> {
+    let unlock: () => void = () => undefined;
+    const previous = this.#capacityTail;
+    this.#capacityTail = new Promise<void>((resolve) => {
+      unlock = resolve;
+    });
+    await previous;
+
+    try {
+      while (
+        this.#byId.size + this.#capacityReservations >=
+        this.#maxLiveConversations
+      ) {
+        const candidate = this.#leastRecentlyUsedIdle();
+        if (candidate === undefined) {
+          throw new AppError(ERROR_CODES.LIVE_RUNTIME_LIMIT);
+        }
+        await this.#disposeRecord(candidate, "evict");
+      }
+
+      this.#capacityReservations += 1;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        this.#capacityReservations -= 1;
+      };
+    } finally {
+      unlock();
+    }
+  }
+
+  #leastRecentlyUsedIdle(): ConversationRecord | undefined {
+    let candidate: ConversationRecord | undefined;
+    for (const record of this.#byId.values()) {
+      if (
+        record.status !== "idle" ||
+        record.session.isStreaming ||
+        this.#pendingCloses.has(record)
+      ) {
+        continue;
+      }
+      if (
+        candidate === undefined ||
+        record.lastActiveAt < candidate.lastActiveAt ||
+        (record.lastActiveAt === candidate.lastActiveAt &&
+          (record.createdAt < candidate.createdAt ||
+            (record.createdAt === candidate.createdAt &&
+              record.id.localeCompare(candidate.id) < 0)))
+      ) {
+        candidate = record;
+      }
+    }
+    return candidate;
   }
 
   async #register(
@@ -461,7 +544,7 @@ export class ConversationRegistry {
 
   #disposeRecord(
     record: ConversationRecord,
-    reason: "close" | "dispose",
+    reason: "close" | "evict" | "dispose",
   ): Promise<void> {
     const existing = this.#pendingCloses.get(record);
     if (existing !== undefined) return existing;
@@ -483,7 +566,7 @@ export class ConversationRegistry {
           this.#bySessionFile.delete(record.sessionFile);
         }
         this.#emit({ type: "conversation.closed", record, reason });
-        if (reason === "close") await this.#refreshHistory();
+        if (reason !== "dispose") await this.#refreshHistory();
       }
 
       if (disposalError !== undefined) {

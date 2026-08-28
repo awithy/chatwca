@@ -251,8 +251,11 @@ describe("ConversationRegistry", () => {
 
     expect(first).toBe(second);
     expect(registry.records).toEqual([first]);
-    expect(firstRuntime.disposed).toBe(false);
-    expect(secondRuntime.disposeSpy).toHaveBeenCalledOnce();
+    expect([firstRuntime.disposed, secondRuntime.disposed].sort()).toEqual([
+      false,
+      true,
+    ]);
+    expect((first.runtime as FakeRuntime).disposed).toBe(false);
   });
 
   it("returns authoritative snapshots and detects when a new session becomes durable", async () => {
@@ -386,6 +389,148 @@ describe("ConversationRegistry", () => {
     expect(secondRuntime.disposeSpy).toHaveBeenCalledOnce();
     expect(firstRuntime.events.size).toBe(0);
     expect(secondRuntime.events.size).toBe(0);
+  });
+
+  it("evicts the least-recently-used idle runtime before creating another", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessions = path.join(root, "sessions");
+    await Promise.all([mkdir(cwd), mkdir(sessions)]);
+
+    const firstRuntime = new FakeRuntime(
+      identity("first", path.join(sessions, "first.jsonl"), cwd),
+    );
+    const secondRuntime = new FakeRuntime(
+      identity("second", path.join(sessions, "second.jsonl"), cwd),
+    );
+    const thirdRuntime = new FakeRuntime(
+      identity("third", path.join(sessions, "third.jsonl"), cwd),
+    );
+    const factory = new FakeFactory();
+    factory.createPersistent
+      .mockResolvedValueOnce(firstRuntime)
+      .mockResolvedValueOnce(secondRuntime)
+      .mockResolvedValueOnce(thirdRuntime);
+    let clock = 100;
+    const refreshHistory = vi.fn();
+    const registry = new ConversationRegistry({
+      runtimeFactory: factory,
+      maxLiveConversations: 2,
+      now: () => ++clock,
+      refreshHistory,
+    });
+    const closed: ConversationRegistryEvent[] = [];
+    registry.subscribe((event) => {
+      if (event.type === "conversation.closed") closed.push(event);
+    });
+
+    const first = await registry.create(cwd);
+    const second = await registry.create(cwd);
+    await registry.getState(first.id);
+    const third = await registry.create(cwd);
+
+    expect(secondRuntime.disposeSpy).toHaveBeenCalledOnce();
+    expect(firstRuntime.disposed).toBe(false);
+    expect(thirdRuntime.disposed).toBe(false);
+    expect(registry.records).toEqual([first, third]);
+    expect(closed).toMatchObject([
+      { type: "conversation.closed", record: second, reason: "evict" },
+    ]);
+    expect(refreshHistory).toHaveBeenCalledTimes(4);
+  });
+
+  it("returns a stable capacity error when all runtime slots are active", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessions = path.join(root, "sessions");
+    await Promise.all([mkdir(cwd), mkdir(sessions)]);
+
+    const firstRuntime = new FakeRuntime(
+      identity("first", path.join(sessions, "first.jsonl"), cwd),
+    );
+    const secondRuntime = new FakeRuntime(
+      identity("second", path.join(sessions, "second.jsonl"), cwd),
+    );
+    const factory = new FakeFactory();
+    factory.createPersistent
+      .mockResolvedValueOnce(firstRuntime)
+      .mockResolvedValueOnce(secondRuntime);
+    const registry = new ConversationRegistry({
+      runtimeFactory: factory,
+      maxLiveConversations: 1,
+    });
+    const first = await registry.create(cwd);
+    first.status = "streaming";
+
+    await expect(registry.create(cwd)).rejects.toMatchObject({
+      code: "live_runtime_limit",
+    });
+    expect(factory.createPersistent).toHaveBeenCalledTimes(1);
+    expect(firstRuntime.disposed).toBe(false);
+  });
+
+  it("counts in-flight runtime construction against capacity", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessions = path.join(root, "sessions");
+    await Promise.all([mkdir(cwd), mkdir(sessions)]);
+
+    const runtime = new FakeRuntime(
+      identity("first", path.join(sessions, "first.jsonl"), cwd),
+    );
+    const factory = new FakeFactory();
+    let release: (() => void) | undefined;
+    factory.createPersistent.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve(runtime);
+        }),
+    );
+    const registry = new ConversationRegistry({
+      runtimeFactory: factory,
+      maxLiveConversations: 1,
+    });
+
+    const first = registry.create(cwd);
+    await vi.waitFor(() => expect(factory.createPersistent).toHaveBeenCalledOnce());
+    await expect(registry.create(cwd)).rejects.toMatchObject({
+      code: "live_runtime_limit",
+    });
+    expect(factory.createPersistent).toHaveBeenCalledOnce();
+    release?.();
+    await expect(first).resolves.toMatchObject({ id: "first" });
+  });
+
+  it("opens an already-live session at capacity without eviction", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessionFile = path.join(root, "session.jsonl");
+    await mkdir(cwd);
+    await writeFile(sessionFile, "persisted");
+
+    const runtime = new FakeRuntime(identity("open", sessionFile, cwd));
+    const factory = new FakeFactory();
+    factory.openPersistent.mockResolvedValue(runtime);
+    const registry = new ConversationRegistry({
+      runtimeFactory: factory,
+      maxLiveConversations: 1,
+    });
+
+    const first = await registry.open(sessionFile);
+    await expect(registry.open(sessionFile)).resolves.toBe(first);
+    expect(runtime.disposed).toBe(false);
+    expect(factory.openPersistent).toHaveBeenCalledOnce();
+  });
+
+  it("validates the configured live-runtime limit", () => {
+    const factory = new FakeFactory();
+    expect(
+      () =>
+        new ConversationRegistry({
+          runtimeFactory: factory,
+          maxLiveConversations: 0,
+        }),
+    ).toThrow("maxLiveConversations must be a positive integer");
   });
 
   it("refreshes both indexes and the active session reference after replacement", async () => {

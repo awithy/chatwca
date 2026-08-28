@@ -222,6 +222,8 @@ In `src/server/conversation-registry.ts`:
 
 ### T4.3 Implement the live-runtime limit
 
+**Status:** Complete — capacity reservations, deterministic idle LRU eviction, active-run protection, and concurrent limit coverage are implemented in [`src/server/conversation-registry.ts`](src/server/conversation-registry.ts).
+
 - Enforce `CHATWCA_MAX_LIVE_CONVERSATIONS` before opening/creating/forking.
 - Evict the least-recently-used idle record.
 - Never evict streaming or aborting records.

@@ -275,6 +275,30 @@ describe("web chat state", () => {
     });
   });
 
+  it("drops stale live projections when authoritative history marks them closed", () => {
+    let state = reduceChatClientState(createInitialChatClientState(), {
+      type: "snapshot",
+      conversation: conversation(4),
+    });
+
+    state = reduceChatClientState(state, {
+      type: "history",
+      conversations: [{
+        id: "conversation-1",
+        sessionFile: "/sessions/one.jsonl",
+        title: "One",
+        cwd: "/workspace",
+        modifiedAt: 2,
+        messageCount: 1,
+        status: "closed",
+        runnable: true,
+      }],
+    });
+
+    expect(state.history[0]?.status).toBe("closed");
+    expect(state.conversations["conversation-1"]).toBeUndefined();
+  });
+
   it("keeps selection and drafts local and replaces them independently", () => {
     let state = createInitialChatClientState();
     state = reduceChatClientState(state, {

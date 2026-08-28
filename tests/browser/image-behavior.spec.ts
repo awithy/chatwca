@@ -2,6 +2,12 @@ import { deflateSync } from "node:zlib";
 
 import { expect, test, type Page } from "@playwright/test";
 
+import {
+  createConversation,
+  deleteSelectedConversation,
+  waitForConnected,
+} from "./helpers.js";
+
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 function crc32(data: Buffer): number {
@@ -86,9 +92,8 @@ test("paste, drop, selection, removal, resizing, and image submission", async ({
   const smallImage = solidPng(32, 16);
   const oversizedDimensions = solidPng(3000, 1000);
 
-  await page.goto("/");
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: /Image behavior/ }).click();
+  await waitForConnected(page);
+  await createConversation(page, "/tmp/chatwca-browser-images");
   const composer = page.getByRole("textbox", { name: "Message" });
   await expect(composer).toBeEnabled();
 
@@ -125,4 +130,6 @@ test("paste, drop, selection, removal, resizing, and image submission", async ({
   const submittedMessage = page.locator(".chat-message.message-user").last();
   await expect(submittedMessage).toContainText("Describe this resized image");
   await expect(submittedMessage).toContainText("submitted.png");
+  await expect(page.locator(".header-status")).toContainText("Idle");
+  await deleteSelectedConversation(page);
 });

@@ -509,6 +509,8 @@ Using temporary Pi session roots and a deterministic fake model/provider, cover:
 
 ### T10.4 Complete browser coverage
 
+**Status:** Complete — deterministic, isolated Playwright coverage exercises the full browser lifecycle, background streaming and rich blocks, all image ingestion paths, fork editing, transport recovery, keyboard/responsive dark UI behavior, and same-authority access over a non-loopback host with the fixture bound to `0.0.0.0`.
+
 Use Playwright to verify:
 
 - create, switch, close, reopen, and delete;

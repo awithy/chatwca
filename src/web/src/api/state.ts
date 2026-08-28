@@ -288,9 +288,17 @@ export function reduceChatClientState(
         lastError: null,
       };
     case "history": {
-      const listed = new Set(action.conversations.map((item) => item.id));
+      const live = new Set(
+        action.conversations
+          .filter((item) => item.status !== "closed")
+          .map((item) => item.id),
+      );
+      // A close acknowledgement has no conversation event. History is the
+      // authoritative lifecycle projection, so discard stale live snapshots
+      // when a listed session becomes closed (as well as when it is deleted).
+      // Selecting that row will then follow the normal open + fresh snapshot path.
       const conversations = Object.fromEntries(
-        Object.entries(state.conversations).filter(([id]) => listed.has(id)),
+        Object.entries(state.conversations).filter(([id]) => live.has(id)),
       );
       return { ...state, history: [...action.conversations], conversations };
     }

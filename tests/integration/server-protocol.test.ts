@@ -12,6 +12,7 @@ import {
 import type {
   ProtocolHistory,
   ProtocolRegistry,
+  ProtocolWorkspaceRepository,
 } from "../../src/server/protocol.js";
 import type {
   ConversationState,
@@ -37,6 +38,34 @@ const state: ConversationState = {
   messages: [],
   queue: { steering: [], followUp: [] },
 };
+const defaultWorkspace: WorkspaceSummary = {
+  id: WORKSPACE_ID,
+  name: "Workspace",
+  path: state.cwd,
+  createdAt: 1,
+  updatedAt: 1,
+  available: true,
+};
+
+function fixedWorkspaces(
+  rows: readonly WorkspaceSummary[] = [
+    defaultWorkspace,
+    { ...defaultWorkspace, id: "workspace-2", name: "Other workspace", path: "/other" },
+  ],
+): ProtocolWorkspaceRepository {
+  return {
+    list: () => [...rows],
+    requireAvailable: (workspaceId) => {
+      const workspace = rows.find(({ id }) => id === workspaceId);
+      if (workspace === undefined) throw new Error("Unknown test workspace");
+      return workspace;
+    },
+    create: () => { throw new Error("Unexpected workspace create"); },
+    update: () => { throw new Error("Unexpected workspace update"); },
+    delete: () => { throw new Error("Unexpected workspace delete"); },
+  };
+}
+
 const summary: ConversationSummary = {
   id: state.id,
   workspaceId: WORKSPACE_ID,
@@ -148,6 +177,7 @@ describe("WebSocket command server", () => {
     const server = createChatWcaServer(config, "reconnect-test", {
       registry,
       history,
+      workspaces: fixedWorkspaces(),
     });
     servers.push(server);
     await new Promise<void>((resolve) =>
@@ -261,6 +291,7 @@ describe("WebSocket command server", () => {
     const server = createChatWcaServer(config, "protocol-test", {
       registry,
       history,
+      workspaces: fixedWorkspaces(),
     });
     servers.push(server);
     await new Promise<void>((resolve) =>
@@ -352,8 +383,10 @@ describe("WebSocket command server", () => {
       record: { id: "other", workspaceId: "workspace-2" } as never,
     });
     await vi.waitFor(() => {
-      expect(history.list).toHaveBeenCalledWith({ id: WORKSPACE_ID, path: WORKSPACE_ID });
-      expect(history.list).toHaveBeenCalledWith({ id: "workspace-2", path: "workspace-2" });
+      expect(history.list).toHaveBeenCalledWith(defaultWorkspace);
+      expect(history.list).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "workspace-2", path: "/other" }),
+      );
     });
     releaseBroadcastHistory?.();
     await expect(Promise.all([firstHistory, secondHistory])).resolves.toEqual([
@@ -610,6 +643,7 @@ describe("WebSocket command server", () => {
     const server = createChatWcaServer(config, "payload-limit-test", {
       registry,
       history,
+      workspaces: fixedWorkspaces(),
       maxInboundMessageBytes: 128,
       onInternalError: () => undefined,
     });

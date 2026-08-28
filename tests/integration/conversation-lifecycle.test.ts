@@ -31,6 +31,7 @@ import {
   PiRuntimeFactory,
   type PiRuntimeFactoryPort,
 } from "../../src/server/pi-runtime.js";
+import type { ProtocolWorkspaceRepository } from "../../src/server/protocol.js";
 import { SessionHistory } from "../../src/server/session-history.js";
 import { ERROR_CODES } from "../../src/shared/errors.js";
 import type {
@@ -54,6 +55,26 @@ interface RuntimeServices {
 
 function historyWorkspace(cwd: string) {
   return { id: cwd, path: cwd } as const;
+}
+
+function fixedWorkspaceRepository(cwd: string): ProtocolWorkspaceRepository {
+  const workspace = {
+    ...historyWorkspace(cwd),
+    name: "Integration workspace",
+    createdAt: 1,
+    updatedAt: 1,
+    available: true,
+  };
+  return {
+    list: () => [workspace],
+    requireAvailable: (workspaceId) => {
+      if (workspaceId !== workspace.id) throw new Error("Unknown test workspace");
+      return workspace;
+    },
+    create: () => { throw new Error("Unexpected workspace create"); },
+    update: () => { throw new Error("Unexpected workspace update"); },
+    delete: () => { throw new Error("Unexpected workspace delete"); },
+  };
 }
 
 const temporaryRoots: string[] = [];
@@ -174,7 +195,7 @@ describe("complete conversation lifecycle integration", () => {
     faux.setResponses([fauxAssistantMessage("Persisted deterministic response")]);
     const firstServices = createServices(factory, sessionDir);
 
-    const created = await firstServices.registry.create(cwd);
+    const created = await firstServices.registry.create(historyWorkspace(cwd));
     const initial = await firstServices.registry.getState(created.id);
     expect(initial).toMatchObject({ durable: false, messages: [] });
 
@@ -215,7 +236,7 @@ describe("complete conversation lifecycle integration", () => {
       }),
     );
 
-    const reopened = await secondServices.registry.open(persisted.sessionFile);
+    const reopened = await secondServices.registry.open(historyWorkspace(cwd), persisted.sessionFile);
     const recovered = await secondServices.registry.getState(reopened.id);
     expect(recovered.id).toBe(created.id);
     expect(recovered.messages.map(({ entryId }) => entryId)).toEqual(entryIds);
@@ -239,13 +260,13 @@ describe("complete conversation lifecycle integration", () => {
     ]);
     const { registry, history } = createServices(factory, sessionDir);
 
-    const first = await registry.create(cwd);
+    const first = await registry.create(historyWorkspace(cwd));
     await registry.prompt(first.id, "Workspace A prompt", []);
     await waitForIdle(first);
     const firstFile = first.sessionFile;
     await registry.close(first.id);
 
-    const second = await registry.create(secondCwd);
+    const second = await registry.create(historyWorkspace(secondCwd));
     await registry.prompt(second.id, "Workspace B prompt", []);
     await waitForIdle(second);
     const secondFile = second.sessionFile;
@@ -291,8 +312,8 @@ describe("complete conversation lifecycle integration", () => {
       },
     ]);
     const { registry } = createServices(factory, sessionDir);
-    const first = await registry.create(cwd);
-    const second = await registry.create(secondCwd);
+    const first = await registry.create(historyWorkspace(cwd));
+    const second = await registry.create(historyWorkspace(secondCwd));
 
     await registry.prompt(first.id, "Run in the background", []);
     await vi.waitFor(() => expect(first.status).toBe("streaming"));
@@ -349,7 +370,7 @@ describe("complete conversation lifecycle integration", () => {
       fauxAssistantMessage("Answer after follow-up"),
     ]);
     const { registry } = createServices(factory, sessionDir);
-    const record = await registry.create(cwd);
+    const record = await registry.create(historyWorkspace(cwd));
     const queueEvents: Extract<ConversationRegistryEvent, { type: "conversation.event" }>[] = [];
     registry.subscribe((event) => {
       if (
@@ -406,7 +427,7 @@ describe("complete conversation lifecycle integration", () => {
       }),
     ]);
     const { registry } = createServices(factory, sessionDir);
-    const record = await registry.create(cwd);
+    const record = await registry.create(historyWorkspace(cwd));
     const statuses: string[] = [];
     registry.subscribe((event) => {
       if (
@@ -456,7 +477,7 @@ describe("complete conversation lifecycle integration", () => {
     const { cwd, sessionDir, factory, faux } = await isolatedPi();
     faux.setResponses([fauxAssistantMessage("Baseline response")]);
     const services = createServices(factory, sessionDir);
-    const record = await services.registry.create(cwd);
+    const record = await services.registry.create(historyWorkspace(cwd));
     await services.registry.prompt(record.id, "Baseline prompt", []);
     await waitForIdle(record);
 
@@ -481,6 +502,7 @@ describe("complete conversation lifecycle integration", () => {
     const server = createChatWcaServer(config, "lifecycle-integration", {
       registry: services.registry,
       history: services.history,
+      workspaces: fixedWorkspaceRepository(cwd),
       shutdown: services.registry,
     });
     servers.push(server);
@@ -554,10 +576,10 @@ describe("complete conversation lifecycle integration", () => {
       now: () => ++clock,
     });
 
-    const first = await registry.create(cwd);
-    const second = await registry.create(secondCwd);
+    const first = await registry.create(historyWorkspace(cwd));
+    const second = await registry.create(historyWorkspace(secondCwd));
     await registry.getState(first.id);
-    const third = await registry.create(cwd);
+    const third = await registry.create(historyWorkspace(cwd));
 
     expect(registry.records).toEqual([first, third]);
     expect(first.runtime.disposed).toBe(false);
@@ -589,7 +611,7 @@ describe("complete conversation lifecycle integration", () => {
       expect(third.status).toBe("streaming");
     });
 
-    await expect(registry.create(secondCwd)).rejects.toMatchObject({
+    await expect(registry.create(historyWorkspace(secondCwd))).rejects.toMatchObject({
       code: ERROR_CODES.LIVE_RUNTIME_LIMIT,
     });
     expect(registry.records).toEqual([first, third]);
@@ -609,13 +631,13 @@ describe("complete conversation lifecycle integration", () => {
     ]);
     const { registry, history } = createServices(factory, sessionDir);
 
-    const missingWorkspace = await registry.create(cwd);
+    const missingWorkspace = await registry.create(historyWorkspace(cwd));
     await registry.prompt(missingWorkspace.id, "Stored in removed workspace", []);
     await waitForIdle(missingWorkspace);
     const missingWorkspaceFile = missingWorkspace.sessionFile;
     await registry.close(missingWorkspace.id);
 
-    const missingSession = await registry.create(secondCwd);
+    const missingSession = await registry.create(historyWorkspace(secondCwd));
     await registry.prompt(missingSession.id, "Session file will disappear", []);
     await waitForIdle(missingSession);
     const missingSessionFile = missingSession.sessionFile;
@@ -625,7 +647,7 @@ describe("complete conversation lifecycle integration", () => {
     await expect(history.list(historyWorkspace(cwd))).rejects.toMatchObject({
       code: ERROR_CODES.WORKSPACE_UNAVAILABLE,
     });
-    await expect(registry.open(missingWorkspaceFile)).rejects.toMatchObject({
+    await expect(registry.open(historyWorkspace(cwd), missingWorkspaceFile)).rejects.toMatchObject({
       code: ERROR_CODES.CWD_NOT_FOUND,
     });
 
@@ -637,7 +659,7 @@ describe("complete conversation lifecycle integration", () => {
       }),
     );
     await unlink(missingSessionFile);
-    await expect(registry.open(missingSessionFile)).rejects.toMatchObject({
+    await expect(registry.open(historyWorkspace(secondCwd), missingSessionFile)).rejects.toMatchObject({
       code: ERROR_CODES.SESSION_FILE_MISSING,
     });
     await expect(

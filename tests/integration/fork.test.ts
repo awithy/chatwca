@@ -256,7 +256,7 @@ describe("conversation fork integration", () => {
     });
     registries.push(registry);
 
-    const source = await registry.create(cwd);
+    const source = await registry.create({ id: cwd, path: cwd });
     await registry.prompt(source.id, "Keep this earlier turn.", []);
     await vi.waitFor(() => expect(messageEntries(source.session)).toHaveLength(2));
     await waitForIdle(source);
@@ -283,6 +283,13 @@ describe("conversation fork integration", () => {
     const server = createChatWcaServer(config, "fork-integration", {
       registry,
       history,
+      workspaces: {
+        list: () => [],
+        requireAvailable: (workspaceId) => ({ id: workspaceId, path: cwd }),
+        create: () => { throw new Error("Unexpected workspace create"); },
+        update: () => { throw new Error("Unexpected workspace update"); },
+        delete: () => { throw new Error("Unexpected workspace delete"); },
+      },
     });
     servers.push(server);
     await new Promise<void>((resolve) =>
@@ -381,7 +388,7 @@ describe("conversation fork integration", () => {
     });
     registries.push(registry);
 
-    const source = await registry.create(cwd);
+    const source = await registry.create({ id: cwd, path: cwd });
     await registry.prompt(source.id, "Root user prompt", []);
     await vi.waitFor(() => expect(messageEntries(source.session)).toHaveLength(2));
     await waitForIdle(source);
@@ -443,7 +450,7 @@ describe("conversation fork integration", () => {
     });
     registries.push(registry);
 
-    const source = await registry.create(cwd);
+    const source = await registry.create({ id: cwd, path: cwd });
     await registry.prompt(source.id, "Do not fork during this run", []);
     await vi.waitFor(() => {
       expect(source.status).toBe("streaming");
@@ -471,7 +478,7 @@ describe("conversation fork integration", () => {
     });
     registries.push(registry);
 
-    const source = await registry.create(cwd);
+    const source = await registry.create({ id: cwd, path: cwd });
     await registry.prompt(source.id, "Fork target", []);
     await vi.waitFor(() => expect(messageEntries(source.session)).toHaveLength(2));
     await waitForIdle(source);

@@ -43,6 +43,12 @@ const UNTITLED_CONVERSATION = "Untitled conversation";
 
 export type ConversationRegistrationSource = "create" | "open" | "fork";
 
+/** Repository-resolved, canonical ownership supplied by trusted server code. */
+export interface ConversationWorkspace {
+  readonly id: string;
+  readonly path: string;
+}
+
 /**
  * A slot held for T9.2's source-preserving fork construction. The caller must
  * release it in a `finally` block after promoting or disposing the temporary
@@ -66,7 +72,9 @@ export interface ForkConversationResult {
 /** Mutable server-owned state for one live Pi runtime. */
 export interface ConversationRecord {
   id: string;
+  /** Immutable ChatWCA ownership, independent of replaceable Pi identity. */
   readonly workspaceId: string;
+  readonly workspacePath: string;
   sessionFile: string;
   cwd: string;
   title: string;
@@ -332,15 +340,15 @@ export class ConversationRegistry {
     return this.#abortActivePromise;
   }
 
-  async create(workspaceId: string, cwd?: string): Promise<ConversationRecord> {
+  async create(workspace: ConversationWorkspace): Promise<ConversationRecord> {
     this.#assertAcceptingWork();
-    const workspaceCwd = cwd ?? workspaceId;
+    const ownership = this.#normalizeWorkspace(workspace);
     const releaseCapacity = await this.#reserveCapacity();
     let runtime: PiConversationRuntimePort | undefined;
     try {
-      runtime = await this.#runtimeFactory.createPersistent(workspaceCwd);
+      runtime = await this.#runtimeFactory.createPersistent(ownership.path);
       this.#assertAcceptingWork();
-      const record = await this.#register(runtime, "create", undefined, workspaceId);
+      const record = await this.#register(runtime, ownership, "create");
       await this.#refreshHistory(record.workspaceId);
       return record;
     } catch (error) {
@@ -351,18 +359,21 @@ export class ConversationRegistry {
     }
   }
 
-  async open(workspaceId: string, sessionFile?: string): Promise<ConversationRecord> {
+  async open(
+    workspace: ConversationWorkspace,
+    sessionFile: string,
+  ): Promise<ConversationRecord> {
     this.#assertAcceptingWork();
-    const requestedFile = sessionFile ?? workspaceId;
+    const ownership = this.#normalizeWorkspace(workspace);
     let canonical: string;
     try {
-      canonical = await canonicalFile(requestedFile);
+      canonical = await canonicalFile(sessionFile);
     } catch (error) {
       if (
         error instanceof AppError &&
         error.code === ERROR_CODES.SESSION_FILE_MISSING
       ) {
-        await this.#refreshHistory(workspaceId);
+        await this.#refreshHistory(ownership.id);
       }
       throw error;
     }
@@ -373,11 +384,9 @@ export class ConversationRegistry {
       const closing = this.#pendingCloses.get(existing);
       if (closing !== undefined) {
         await closing;
-        return this.open(workspaceId, canonical);
+        return this.open(ownership, canonical);
       }
-      if (sessionFile !== undefined && existing.workspaceId !== workspaceId) {
-        throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
-      }
+      this.#assertWorkspaceOwner(existing, ownership);
       this.#touch(existing);
       return existing;
     }
@@ -385,16 +394,12 @@ export class ConversationRegistry {
     const pending = this.#pendingOpens.get(canonical);
     if (pending !== undefined) {
       const record = await pending;
-      if (sessionFile !== undefined && record.workspaceId !== workspaceId) {
-        throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
-      }
+      this.#assertWorkspaceOwner(record, ownership);
+      this.#touch(record);
       return record;
     }
 
-    const opening = this.#openAndRegister(
-      sessionFile === undefined ? undefined : workspaceId,
-      canonical,
-    );
+    const opening = this.#openAndRegister(ownership, canonical);
     this.#pendingOpens.set(canonical, opening);
     try {
       const record = await opening;
@@ -405,7 +410,7 @@ export class ConversationRegistry {
         error instanceof AppError &&
         error.code === ERROR_CODES.SESSION_FILE_MISSING
       ) {
-        await this.#refreshHistory(workspaceId);
+        await this.#refreshHistory(ownership.id);
       }
       throw error;
     } finally {
@@ -611,9 +616,9 @@ export class ConversationRegistry {
 
       registered = await this.#register(
         temporary,
+        { id: source.workspaceId, path: source.workspacePath },
         "fork",
         reservation.promote,
-        source.workspaceId,
       );
       if (registered.runtime !== temporary) {
         throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
@@ -726,7 +731,7 @@ export class ConversationRegistry {
   }
 
   async #openAndRegister(
-    workspaceId: string | undefined,
+    workspace: ConversationWorkspace,
     canonical: string,
   ): Promise<ConversationRecord> {
     const releaseCapacity = await this.#reserveCapacity();
@@ -734,7 +739,7 @@ export class ConversationRegistry {
     try {
       runtime = await this.#runtimeFactory.openPersistent(canonical);
       this.#assertAcceptingWork();
-      return await this.#register(runtime, "open", undefined, workspaceId);
+      return await this.#register(runtime, workspace, "open");
     } catch (error) {
       await runtime?.dispose().catch(() => undefined);
       throw error;
@@ -815,21 +820,20 @@ export class ConversationRegistry {
 
   async #register(
     runtime: PiConversationRuntimePort,
+    workspace: ConversationWorkspace,
     source: ConversationRegistrationSource,
     onRegistered?: () => void,
-    workspaceId?: string,
   ): Promise<ConversationRecord> {
     this.#assertAcceptingWork();
     const identity = runtime.identity;
+    this.#assertIdentityInWorkspace(identity, workspace);
     const sessionFile = await canonicalFile(identity.sessionFile);
     this.#assertAcceptingWork();
     const duplicate =
       this.#byId.get(identity.sessionId) ?? this.#bySessionFile.get(sessionFile);
     if (duplicate !== undefined) {
       await runtime.dispose();
-      if (workspaceId !== undefined && duplicate.workspaceId !== workspaceId) {
-        throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
-      }
+      this.#assertWorkspaceOwner(duplicate, workspace);
       this.#touch(duplicate);
       return duplicate;
     }
@@ -837,9 +841,10 @@ export class ConversationRegistry {
     const now = safeNow(this.#now);
     const record: ConversationRecord = {
       id: identity.sessionId,
-      workspaceId: workspaceId ?? path.resolve(identity.cwd),
+      workspaceId: workspace.id,
+      workspacePath: workspace.path,
       sessionFile,
-      cwd: path.resolve(identity.cwd),
+      cwd: workspace.path,
       title: titleOf(runtime.session),
       runtime,
       session: runtime.session,
@@ -858,9 +863,7 @@ export class ConversationRegistry {
       this.#byId.get(record.id) ?? this.#bySessionFile.get(record.sessionFile);
     if (raced !== undefined) {
       await runtime.dispose();
-      if (workspaceId !== undefined && raced.workspaceId !== workspaceId) {
-        throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
-      }
+      this.#assertWorkspaceOwner(raced, workspace);
       this.#touch(raced);
       return raced;
     }
@@ -901,6 +904,34 @@ export class ConversationRegistry {
     onRegistered?.();
     this.#emit({ type: "conversation.registered", source, record });
     return record;
+  }
+
+  #normalizeWorkspace(workspace: ConversationWorkspace): ConversationWorkspace {
+    if (!workspace.id || !workspace.path || !path.isAbsolute(workspace.path)) {
+      throw new AppError(ERROR_CODES.WORKSPACE_UNAVAILABLE);
+    }
+    return { id: workspace.id, path: path.resolve(workspace.path) };
+  }
+
+  #assertWorkspaceOwner(
+    record: ConversationRecord,
+    workspace: ConversationWorkspace,
+  ): void {
+    if (
+      record.workspaceId !== workspace.id ||
+      record.workspacePath !== workspace.path
+    ) {
+      throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
+    }
+  }
+
+  #assertIdentityInWorkspace(
+    identity: PiRuntimeIdentity,
+    workspace: ConversationWorkspace,
+  ): void {
+    if (path.resolve(identity.cwd) !== workspace.path) {
+      throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
+    }
   }
 
   #assertAcceptingWork(): void {
@@ -1078,6 +1109,10 @@ export class ConversationRegistry {
     replacement: PiRuntimeReplacement,
   ): void {
     const current = record.runtime.identity;
+    this.#assertIdentityInWorkspace(current, {
+      id: record.workspaceId,
+      path: record.workspacePath,
+    });
     const sessionFile = path.resolve(current.sessionFile);
     const idOwner = this.#byId.get(current.sessionId);
     const fileOwner = this.#bySessionFile.get(sessionFile);
@@ -1096,7 +1131,7 @@ export class ConversationRegistry {
 
     record.id = current.sessionId;
     record.sessionFile = sessionFile;
-    record.cwd = path.resolve(current.cwd);
+    record.cwd = record.workspacePath;
     record.session = record.runtime.session;
     record.title = titleOf(record.session);
     this.#normalizers.get(record)?.dispose();
@@ -1106,6 +1141,7 @@ export class ConversationRegistry {
     this.#byId.set(record.id, record);
     this.#bySessionFile.set(record.sessionFile, record);
     this.#emit({ type: "conversation.replaced", record, replacement });
+    void this.#refreshHistory(record.workspaceId);
   }
 
   #createNormalizer(record: ConversationRecord): PiEventNormalizer {

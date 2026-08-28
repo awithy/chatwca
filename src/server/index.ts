@@ -47,7 +47,8 @@ export interface ChatWcaServer {
 export interface ChatWcaProtocolServices {
   readonly registry: ProtocolRegistry;
   readonly history: ProtocolHistory;
-  readonly workspaces?: ProtocolWorkspaceRepository;
+  /** Required authority for every browser workspace and conversation lifecycle command. */
+  readonly workspaces: ProtocolWorkspaceRepository;
   readonly maxInboundMessageBytes?: number;
   readonly outboundFlow?: OutboundFlowOptions;
   /** Production supplies the registry here so transport and Pi teardown share one bound. */
@@ -198,13 +199,7 @@ export function createChatWcaServer(
           serverVersion,
           registry: services.registry,
           history: services.history,
-          workspaces: services.workspaces ?? {
-            list: () => [],
-            requireAvailable: (workspaceId) => ({ id: workspaceId, path: workspaceId }),
-            create: () => { throw new Error("Workspace repository is unavailable"); },
-            update: () => { throw new Error("Workspace repository is unavailable"); },
-            delete: () => { throw new Error("Workspace repository is unavailable"); },
-          },
+          workspaces: services.workspaces,
           maxInboundMessageBytes,
           ...(services.outboundFlow === undefined
             ? {}

@@ -125,6 +125,13 @@ describe("server graceful shutdown", () => {
     const server = createChatWcaServer(config, "shutdown-test", {
       registry,
       history,
+      workspaces: {
+        list: () => [],
+        requireAvailable: (workspaceId) => ({ id: workspaceId, path: "/tmp" }),
+        create: () => { throw new Error("Unexpected workspace create"); },
+        update: () => { throw new Error("Unexpected workspace update"); },
+        delete: () => { throw new Error("Unexpected workspace delete"); },
+      },
       shutdown: owner,
     });
     const port = await listen(server);

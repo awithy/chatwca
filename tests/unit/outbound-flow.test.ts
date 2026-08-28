@@ -36,10 +36,14 @@ class FakeSocket implements OutboundSocket {
   }
 }
 
-function toolUpdate(revision: number, content: string): ServerMessage {
+function toolUpdate(
+  revision: number,
+  content: string,
+  workspaceId = "workspace-1",
+): ServerMessage {
   return {
     type: "tool.updated",
-    workspaceId: "workspace-1",
+    workspaceId,
     conversationId: "conversation-1",
     revision,
     payload: {
@@ -141,6 +145,29 @@ describe("outbound WebSocket flow control", () => {
       4,
     ]);
     expect(socket.closes).toEqual([]);
+    flow.dispose();
+  });
+
+  it("keeps identical conversation/tool flow keys isolated by workspace ownership", () => {
+    vi.useFakeTimers();
+    const socket = new FakeSocket();
+    socket.bufferedAmount = 100;
+    const flow = new OutboundFlowController(socket, {
+      highWaterBytes: 100,
+      maxQueueBytes: 4_096,
+      slowClientTimeoutMs: 1_000,
+      pollIntervalMs: 10,
+    });
+    const first = toolUpdate(1, "workspace one", "workspace-1");
+    const second = toolUpdate(1, "workspace two", "workspace-2");
+
+    flow.send(first);
+    flow.send(second);
+    socket.bufferedAmount = 0;
+    vi.advanceTimersByTime(10);
+    socket.flush();
+
+    expect(socket.sent).toEqual([first, second]);
     flow.dispose();
   });
 

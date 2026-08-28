@@ -172,6 +172,10 @@ function identity(id: string, sessionFile: string, cwd: string): PiRuntimeIdenti
   return { sessionId: id, sessionFile, cwd };
 }
 
+function ownership(cwd: string, id = cwd) {
+  return { id, path: cwd } as const;
+}
+
 describe("ConversationRegistry", () => {
   it("owns indexed records and emits lifecycle/Pi events without a socket", async () => {
     const root = await temporaryRoot();
@@ -198,7 +202,7 @@ describe("ConversationRegistry", () => {
       throw listenerFailure;
     });
 
-    const record = await registry.create("workspace-1", cwd);
+    const record = await registry.create(ownership(cwd, "workspace-1"));
     expect(registry.size).toBe(1);
     expect(registry.get("one")).toBe(record);
     expect(registry.getBySessionFile(sessionFile)).toBe(record);
@@ -248,7 +252,7 @@ describe("ConversationRegistry", () => {
     registry.subscribe((item) => {
       if (item.type === "conversation.event") normalized.push(item);
     });
-    const record = await registry.create(cwd);
+    const record = await registry.create(ownership(cwd));
 
     runtime.emit({ type: "agent_start" });
     runtime.emit({ type: "queue_update", steering: ["steer"], followUp: [] });
@@ -287,7 +291,7 @@ describe("ConversationRegistry", () => {
     const factory = new FakeFactory();
     factory.createPersistent.mockResolvedValue(runtime);
     const registry = new ConversationRegistry({ runtimeFactory: factory });
-    const record = await registry.create(cwd);
+    const record = await registry.create(ownership(cwd));
 
     await expect(registry.prompt(record.id, "hello", [])).resolves.toBeUndefined();
     expect(finishRun).toBeTypeOf("function");
@@ -336,7 +340,7 @@ describe("ConversationRegistry", () => {
         maxTotalImageBytes: 16,
       },
     });
-    const record = await registry.create(cwd);
+    const record = await registry.create(ownership(cwd));
     const data = Buffer.from([
       0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
     ]).toString("base64");
@@ -371,7 +375,7 @@ describe("ConversationRegistry", () => {
     const factory = new FakeFactory();
     factory.createPersistent.mockResolvedValue(runtime);
     const registry = new ConversationRegistry({ runtimeFactory: factory });
-    const record = await registry.create(cwd);
+    const record = await registry.create(ownership(cwd));
 
     await expect(
       registry.prompt(record.id, "describe", [
@@ -405,7 +409,7 @@ describe("ConversationRegistry", () => {
         statuses.push(item.event.payload.status);
       }
     });
-    const record = await registry.create(cwd);
+    const record = await registry.create(ownership(cwd));
 
     runtime.promptSpy.mockImplementationOnce(async (_text, options) => {
       options?.preflightResult?.(false);
@@ -446,7 +450,7 @@ describe("ConversationRegistry", () => {
         statuses.push(item.event.payload.status);
       }
     });
-    const record = await registry.create(cwd);
+    const record = await registry.create(ownership(cwd));
     record.status = "streaming";
 
     let finishAbort: (() => void) | undefined;
@@ -489,8 +493,8 @@ describe("ConversationRegistry", () => {
     );
     const registry = new ConversationRegistry({ runtimeFactory: factory });
 
-    const first = registry.open(alias);
-    const second = registry.open(realFile);
+    const first = registry.open(ownership(cwd), alias);
+    const second = registry.open(ownership(cwd), realFile);
     await vi.waitFor(() => expect(factory.openPersistent).toHaveBeenCalledTimes(1));
     release?.();
 
@@ -499,8 +503,55 @@ describe("ConversationRegistry", () => {
     expect(firstRecord.sessionFile).toBe(realFile);
     expect(factory.openPersistent).toHaveBeenCalledWith(realFile);
 
-    await expect(registry.open(alias)).resolves.toBe(firstRecord);
+    await expect(registry.open(ownership(cwd), alias)).resolves.toBe(firstRecord);
     expect(factory.openPersistent).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects duplicate opens requested through a different workspace owner", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessionFile = path.join(root, "session.jsonl");
+    await mkdir(cwd);
+    await writeFile(sessionFile, "persisted");
+
+    const runtime = new FakeRuntime(identity("owned", sessionFile, cwd));
+    const factory = new FakeFactory();
+    factory.openPersistent.mockResolvedValue(runtime);
+    const registry = new ConversationRegistry({ runtimeFactory: factory });
+
+    const first = await registry.open(ownership(cwd, "workspace-a"), sessionFile);
+    await expect(
+      registry.open(ownership(cwd, "workspace-b"), sessionFile),
+    ).rejects.toMatchObject({ code: ERROR_CODES.SESSION_UNAVAILABLE });
+
+    expect(registry.records).toEqual([first]);
+    expect(first).toMatchObject({
+      workspaceId: "workspace-a",
+      workspacePath: cwd,
+    });
+    expect(factory.openPersistent).toHaveBeenCalledOnce();
+    expect(runtime.disposed).toBe(false);
+  });
+
+  it("rejects a factory runtime whose CWD does not match authoritative workspace ownership", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const otherCwd = path.join(root, "other");
+    const sessionFile = path.join(root, "sessions", "wrong-cwd.jsonl");
+    await Promise.all([mkdir(cwd), mkdir(otherCwd), mkdir(path.dirname(sessionFile))]);
+
+    const runtime = new FakeRuntime(identity("wrong-cwd", sessionFile, otherCwd));
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(runtime);
+    const registry = new ConversationRegistry({ runtimeFactory: factory });
+
+    await expect(
+      registry.create(ownership(cwd, "workspace-owner")),
+    ).rejects.toMatchObject({ code: ERROR_CODES.SESSION_UNAVAILABLE });
+    expect(factory.createPersistent).toHaveBeenCalledWith(cwd);
+    expect(runtime.disposeSpy).toHaveBeenCalledOnce();
+    expect(registry.size).toBe(0);
+    expect(registry.hasLiveWorkspace("workspace-owner")).toBe(false);
   });
 
   it("suppresses duplicate create identities and disposes the extra runtime", async () => {
@@ -518,8 +569,8 @@ describe("ConversationRegistry", () => {
     const registry = new ConversationRegistry({ runtimeFactory: factory });
 
     const [first, second] = await Promise.all([
-      registry.create(cwd),
-      registry.create(cwd),
+      registry.create(ownership(cwd)),
+      registry.create(ownership(cwd)),
     ]);
 
     expect(first).toBe(second);
@@ -550,7 +601,7 @@ describe("ConversationRegistry", () => {
     const eventTypes: string[] = [];
     registry.subscribe((event) => eventTypes.push(event.type));
 
-    await registry.create(cwd);
+    await registry.create(ownership(cwd));
     await expect(registry.getState("state")).resolves.toMatchObject({
       id: "state",
       title: "Snapshot prompt",
@@ -588,7 +639,7 @@ describe("ConversationRegistry", () => {
       runtimeFactory: factory,
       refreshHistory,
     });
-    const record = await registry.create(cwd);
+    const record = await registry.create(ownership(cwd));
     record.status = "streaming";
 
     await expect(registry.close("close")).rejects.toMatchObject({
@@ -604,6 +655,7 @@ describe("ConversationRegistry", () => {
     expect(registry.size).toBe(0);
     expect(registry.get("close")).toBeUndefined();
     expect(registry.getBySessionFile(sessionFile)).toBeUndefined();
+    expect(registry.hasLiveWorkspace(cwd)).toBe(false);
     expect(refreshHistory).toHaveBeenCalledTimes(2);
   });
 
@@ -622,7 +674,7 @@ describe("ConversationRegistry", () => {
       runtimeFactory: factory,
       refreshHistory,
     });
-    const record = await registry.open(sessionFile);
+    const record = await registry.open(ownership(cwd), sessionFile);
     await rm(sessionFile);
 
     await expect(registry.getState("missing")).rejects.toMatchObject({
@@ -645,7 +697,7 @@ describe("ConversationRegistry", () => {
     const factory = new FakeFactory();
     factory.createPersistent.mockResolvedValue(runtime);
     const registry = new ConversationRegistry({ runtimeFactory: factory });
-    const record = await registry.create(cwd);
+    const record = await registry.create(ownership(cwd));
     record.status = "streaming";
 
     registry.beginShutdown();
@@ -656,8 +708,8 @@ describe("ConversationRegistry", () => {
     expect(runtime.abortSpy).toHaveBeenCalledOnce();
 
     for (const operation of [
-      () => registry.create(cwd),
-      () => registry.open(sessionFile),
+      () => registry.create(ownership(cwd)),
+      () => registry.open(ownership(cwd), sessionFile),
       () => registry.prompt(record.id, "new work", []),
       () => registry.fork(record.id, "entry-1"),
     ]) {
@@ -688,8 +740,8 @@ describe("ConversationRegistry", () => {
       .mockResolvedValueOnce(firstRuntime)
       .mockResolvedValueOnce(secondRuntime);
     const registry = new ConversationRegistry({ runtimeFactory: factory });
-    const first = await registry.create(cwd);
-    await registry.create(cwd);
+    const first = await registry.create(ownership(cwd));
+    await registry.create(ownership(cwd));
     first.status = "streaming";
 
     await registry.dispose();
@@ -735,10 +787,10 @@ describe("ConversationRegistry", () => {
       if (event.type === "conversation.closed") closed.push(event);
     });
 
-    const first = await registry.create(cwd);
-    const second = await registry.create(cwd);
+    const first = await registry.create(ownership(cwd));
+    const second = await registry.create(ownership(cwd));
     await registry.getState(first.id);
-    const third = await registry.create(cwd);
+    const third = await registry.create(ownership(cwd));
 
     expect(secondRuntime.disposeSpy).toHaveBeenCalledOnce();
     expect(firstRuntime.disposed).toBe(false);
@@ -776,7 +828,7 @@ describe("ConversationRegistry", () => {
       runtimeFactory: factory,
       maxLiveConversations: 2,
     });
-    const source = await registry.create(cwd);
+    const source = await registry.create(ownership(cwd));
 
     const reservation = await registry.reserveFork(source.id, userEntry.id);
     expect(reservation).toMatchObject({
@@ -853,7 +905,7 @@ describe("ConversationRegistry", () => {
     registry.subscribe((event) => {
       if (event.type === "conversation.registered") registeredEvents.push(event);
     });
-    const source = await registry.create(cwd);
+    const source = await registry.create(ownership(cwd, "fork-workspace"));
     const sourceIdentity = source.runtime.identity;
     const sourceSession = source.session;
     const sourceListenerCount = sourceRuntime.events.size;
@@ -866,7 +918,12 @@ describe("ConversationRegistry", () => {
     });
     expect(result).toMatchObject({
       editorText: "copy this prompt",
-      conversation: { id: "forked", sessionFile: forkFile, cwd },
+      conversation: {
+        id: "forked",
+        workspaceId: "fork-workspace",
+        sessionFile: forkFile,
+        cwd,
+      },
     });
     expect(registry.size).toBe(2);
     expect(registry.get("source")).toBe(source);
@@ -923,7 +980,7 @@ describe("ConversationRegistry", () => {
       runtimeFactory: factory,
       maxLiveConversations: 2,
     });
-    const source = await registry.create(cwd);
+    const source = await registry.create(ownership(cwd));
     const forking = registry.fork(source.id, "a1b2c3d4");
     await vi.waitFor(() => expect(temporary.forkSpy).toHaveBeenCalledOnce());
 
@@ -974,7 +1031,7 @@ describe("ConversationRegistry", () => {
       runtimeFactory: factory,
       maxLiveConversations: 2,
     });
-    const source = await registry.create(cwd);
+    const source = await registry.create(ownership(cwd));
 
     await expect(registry.fork(source.id, "a1b2c3d4")).rejects.toMatchObject({
       code: ERROR_CODES.PI_RUNTIME_REPLACE_FAILED,
@@ -993,7 +1050,7 @@ describe("ConversationRegistry", () => {
       identity("next", path.join(sessions, "next.jsonl"), cwd),
     );
     factory.createPersistent.mockResolvedValueOnce(nextRuntime);
-    await expect(registry.create(cwd)).resolves.toMatchObject({ id: "next" });
+    await expect(registry.create(ownership(cwd))).resolves.toMatchObject({ id: "next" });
   });
 
   it("rejects non-user, off-branch, and malformed fork entry IDs", async () => {
@@ -1022,7 +1079,7 @@ describe("ConversationRegistry", () => {
     const factory = new FakeFactory();
     factory.createPersistent.mockResolvedValue(runtime);
     const registry = new ConversationRegistry({ runtimeFactory: factory });
-    const source = await registry.create(cwd);
+    const source = await registry.create(ownership(cwd));
 
     for (const entryId of ["b2c3d4e5", "c3d4e5f6", "not-a-pi-id"]) {
       await expect(registry.reserveFork(source.id, entryId)).rejects.toMatchObject({
@@ -1062,20 +1119,20 @@ describe("ConversationRegistry", () => {
       runtimeFactory: factory,
       maxLiveConversations: 2,
     });
-    const source = await registry.create(cwd);
-    await registry.create(cwd);
+    const source = await registry.create(ownership(cwd));
+    await registry.create(ownership(cwd));
 
     const reservation = await registry.reserveFork(source.id, "a1b2c3d4");
     expect(sourceRuntime.disposed).toBe(false);
     expect(otherRuntime.disposed).toBe(true);
     expect(registry.records).toEqual([source]);
-    await expect(registry.create(cwd)).rejects.toMatchObject({
+    await expect(registry.create(ownership(cwd))).rejects.toMatchObject({
       code: ERROR_CODES.LIVE_RUNTIME_LIMIT,
     });
     expect(factory.createPersistent).toHaveBeenCalledTimes(2);
 
     reservation.release();
-    await expect(registry.create(cwd)).resolves.toMatchObject({ id: "next" });
+    await expect(registry.create(ownership(cwd))).resolves.toMatchObject({ id: "next" });
   });
 
   it("returns a stable capacity error when all runtime slots are active", async () => {
@@ -1098,10 +1155,10 @@ describe("ConversationRegistry", () => {
       runtimeFactory: factory,
       maxLiveConversations: 1,
     });
-    const first = await registry.create(cwd);
+    const first = await registry.create(ownership(cwd));
     first.status = "streaming";
 
-    await expect(registry.create(cwd)).rejects.toMatchObject({
+    await expect(registry.create(ownership(cwd))).rejects.toMatchObject({
       code: "live_runtime_limit",
     });
     expect(factory.createPersistent).toHaveBeenCalledTimes(1);
@@ -1130,9 +1187,9 @@ describe("ConversationRegistry", () => {
       maxLiveConversations: 1,
     });
 
-    const first = registry.create(cwd);
+    const first = registry.create(ownership(cwd));
     await vi.waitFor(() => expect(factory.createPersistent).toHaveBeenCalledOnce());
-    await expect(registry.create(cwd)).rejects.toMatchObject({
+    await expect(registry.create(ownership(cwd))).rejects.toMatchObject({
       code: "live_runtime_limit",
     });
     expect(factory.createPersistent).toHaveBeenCalledOnce();
@@ -1155,8 +1212,8 @@ describe("ConversationRegistry", () => {
       maxLiveConversations: 1,
     });
 
-    const first = await registry.open(sessionFile);
-    await expect(registry.open(sessionFile)).resolves.toBe(first);
+    const first = await registry.open(ownership(cwd), sessionFile);
+    await expect(registry.open(ownership(cwd), sessionFile)).resolves.toBe(first);
     expect(runtime.disposed).toBe(false);
     expect(factory.openPersistent).toHaveBeenCalledOnce();
   });
@@ -1184,10 +1241,11 @@ describe("ConversationRegistry", () => {
     });
     const factory = new FakeFactory();
     factory.createPersistent.mockResolvedValue(runtime);
-    const registry = new ConversationRegistry({ runtimeFactory: factory });
+    const refreshHistory = vi.fn();
+    const registry = new ConversationRegistry({ runtimeFactory: factory, refreshHistory });
     const eventTypes: string[] = [];
     registry.subscribe((event) => eventTypes.push(event.type));
-    const record = await registry.create(cwd);
+    const record = await registry.create(ownership(cwd, "immutable-owner"));
     const oldSession = record.session;
 
     runtime.replace(identity("new", newFile, cwd));
@@ -1198,7 +1256,13 @@ describe("ConversationRegistry", () => {
     expect(registry.getBySessionFile(newFile)).toBe(record);
     expect(record.session).toBe(runtime.session);
     expect(record.session).not.toBe(oldSession);
+    expect(record).toMatchObject({
+      workspaceId: "immutable-owner",
+      workspacePath: cwd,
+      cwd,
+    });
     expect(record.revision).toBe(1);
+    expect(refreshHistory).toHaveBeenLastCalledWith("immutable-owner");
 
     runtime.emit({ type: "queue_update", steering: [], followUp: ["after"] });
     expect(record.revision).toBe(2);

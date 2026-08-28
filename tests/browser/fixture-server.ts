@@ -10,6 +10,7 @@ import {
 import type {
   ProtocolHistory,
   ProtocolRegistry,
+  ProtocolWorkspaceRepository,
 } from "../../src/server/protocol.js";
 import type {
   AssistantMessage,
@@ -19,6 +20,7 @@ import type {
   NormalizedMessage,
   UiImage,
   UserMessage,
+  WorkspaceSummary,
 } from "../../src/shared/protocol.js";
 
 /**
@@ -33,6 +35,14 @@ const PORT = 8787;
 const CWD = "/tmp/chatwca-browser-workspace";
 const WORKSPACE_ID = "browser-workspace";
 const SESSION_ROOT = "/tmp/chatwca-browser-sessions";
+const WORKSPACE: WorkspaceSummary = {
+  id: WORKSPACE_ID,
+  name: "Browser workspace",
+  path: CWD,
+  createdAt: 1,
+  updatedAt: 1,
+  available: true,
+};
 const IMAGE_LIMITS = {
   maxImages: 4,
   maxImageBytes: 2 * 1024 * 1024,
@@ -343,13 +353,13 @@ function beginRun(fixture: FixtureConversation, promptText: string): void {
 }
 
 const registry: ProtocolRegistry = {
-  async create(workspaceId, cwd) {
+  async create(workspace) {
     conversationSequence += 1;
     const id = `browser-created-${String(conversationSequence)}`;
-    addFixture(emptyState(id, "Untitled conversation", cwd));
+    addFixture(emptyState(id, "Untitled conversation", workspace.path));
     return { id };
   },
-  async open(_workspaceId, sessionFile) {
+  async open(_workspace, sessionFile) {
     const fixture = [...conversations.values()].find(
       (candidate) => candidate.state.sessionFile === sessionFile,
     );
@@ -461,6 +471,17 @@ const history: ProtocolHistory = {
   },
 };
 
+const workspaces: ProtocolWorkspaceRepository = {
+  list: () => [WORKSPACE],
+  requireAvailable: (workspaceId) => {
+    if (workspaceId !== WORKSPACE_ID) throw new Error("Unknown fixture workspace");
+    return WORKSPACE;
+  },
+  create: () => WORKSPACE,
+  update: () => WORKSPACE,
+  delete: () => undefined,
+};
+
 const config = loadConfig(
   {
     CHATWCA_HOST: HOST,
@@ -476,6 +497,7 @@ const config = loadConfig(
 server = createChatWcaServer(config, "browser-fixture", {
   registry,
   history,
+  workspaces,
   onInternalError(error) {
     if (error !== null && error !== undefined) {
       console.error("Browser fixture protocol error", error);

@@ -154,7 +154,7 @@ describe("server WebSocket protocol", () => {
       response: { type: "state", requestId: "create", conversation: state },
       affectedWorkspaceId: workspace.id,
     });
-    expect(calls.create).toHaveBeenCalledWith(workspace.id, workspace.path);
+    expect(calls.create).toHaveBeenCalledWith(workspace);
 
     await dispatchClientCommand(command({
       type: "conversation.open",
@@ -163,7 +163,7 @@ describe("server WebSocket protocol", () => {
       conversationId: state.id,
     }), registry, history, workspaces);
     expect(history.resolve).toHaveBeenCalledWith(workspace, state.id);
-    expect(calls.open).toHaveBeenCalledWith(workspace.id, state.sessionFile);
+    expect(calls.open).toHaveBeenCalledWith(workspace, state.sessionFile);
 
     await expect(dispatchClientCommand(command({
       type: "conversation.delete",

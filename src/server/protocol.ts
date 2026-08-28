@@ -27,8 +27,11 @@ import type { UpdateWorkspaceInput } from "./workspace-repository.js";
 export const DEFAULT_MAX_INBOUND_MESSAGE_BYTES = 40 * 1024 * 1024;
 
 export interface ProtocolRegistry {
-  create(workspaceId: string, cwd: string): Promise<{ readonly id: string }>;
-  open(workspaceId: string, sessionFile: string): Promise<{ readonly id: string }>;
+  create(workspace: SessionHistoryWorkspace): Promise<{ readonly id: string }>;
+  open(
+    workspace: SessionHistoryWorkspace,
+    sessionFile: string,
+  ): Promise<{ readonly id: string }>;
   getState(conversationId: string): Promise<ConversationState>;
   close(conversationId: string): Promise<void>;
   fork(conversationId: string, entryId: string): Promise<{
@@ -209,7 +212,7 @@ export async function dispatchClientCommand(
     }
     case "conversation.create": {
       const workspace = workspaces.requireAvailable(command.workspaceId);
-      const record = await registry.create(workspace.id, workspace.path);
+      const record = await registry.create(workspace);
       return {
         response: {
           type: "state",
@@ -222,7 +225,7 @@ export async function dispatchClientCommand(
     case "conversation.open": {
       const workspace = workspaces.requireAvailable(command.workspaceId);
       const listed = await history.resolve(workspace, command.conversationId);
-      const record = await registry.open(workspace.id, listed.summary.sessionFile);
+      const record = await registry.open(workspace, listed.summary.sessionFile);
       return {
         response: {
           type: "state",

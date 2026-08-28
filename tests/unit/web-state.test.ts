@@ -188,6 +188,93 @@ describe("web chat state", () => {
     ]);
   });
 
+  it("materializes streamed thinking and keeps active tool output and status current", () => {
+    let state = reduceChatClientState(createInitialChatClientState(), {
+      type: "snapshot",
+      conversation: {
+        ...conversation(),
+        messages: [{
+          entryId: "stream:one:1",
+          role: "assistant",
+          blocks: [],
+        }],
+      },
+    });
+    const events: ConversationEvent[] = [
+      {
+        type: "message.delta",
+        conversationId: "conversation-1",
+        revision: 1,
+        payload: {
+          entryId: "stream:one:1",
+          blockIndex: 0,
+          blockType: "thinking",
+          delta: "Inspecting",
+        },
+      },
+      {
+        type: "tool.started",
+        conversationId: "conversation-1",
+        revision: 2,
+        payload: {
+          entryId: "stream:one:1",
+          tool: {
+            type: "tool-call",
+            toolCallId: "call-live",
+            toolName: "bash",
+            arguments: { command: "pwd" },
+            status: "running",
+          },
+        },
+      },
+      {
+        type: "tool.updated",
+        conversationId: "conversation-1",
+        revision: 3,
+        payload: {
+          toolCallId: "call-live",
+          content: "partial output",
+          truncated: true,
+        },
+      },
+      {
+        type: "tool.completed",
+        conversationId: "conversation-1",
+        revision: 4,
+        payload: {
+          result: {
+            type: "tool-result",
+            toolCallId: "call-live",
+            toolName: "bash",
+            content: "exit 1",
+            isError: true,
+            truncated: false,
+          },
+        },
+      },
+    ];
+
+    for (const item of events.slice(0, 3)) {
+      state = reduceChatClientState(state, { type: "event", event: item });
+    }
+    expect(state.conversations["conversation-1"]?.conversation.messages[0]).toMatchObject({
+      blocks: [
+        { type: "thinking", text: "Inspecting" },
+        { type: "tool-call", status: "running" },
+        { type: "tool-result", content: "partial output", truncated: true },
+      ],
+    });
+
+    state = reduceChatClientState(state, { type: "event", event: events[3]! });
+    expect(state.conversations["conversation-1"]?.conversation.messages[0]).toMatchObject({
+      blocks: [
+        { type: "thinking" },
+        { type: "tool-call", status: "failed" },
+        { type: "tool-result", content: "exit 1", isError: true },
+      ],
+    });
+  });
+
   it("keeps selection and drafts local and replaces them independently", () => {
     let state = createInitialChatClientState();
     state = reduceChatClientState(state, {

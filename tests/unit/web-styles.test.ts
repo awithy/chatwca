@@ -62,6 +62,9 @@ describe("dark-only web design system", () => {
     expectContrast("diff-remove-text", "diff-remove-bg", 4.5);
     expect(css).toContain("pre {");
     expect(css).toContain("overflow: auto;");
+    expect(css).toMatch(
+      /\.tool-output\s*\{[^}]*max-height:[^;}]+;[^}]*overflow: auto;/s,
+    );
   });
 
   it("uses one palette, visible focus, and reduced motion without theme detection", () => {

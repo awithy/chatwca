@@ -366,6 +366,8 @@ In `src/web/styles/app.css`:
 
 ### T7.2 Render thinking and tools
 
+**Status:** Complete — collapsed reasoning, linked live tool cards, incremental reducer updates, explicit outcomes, and bounded/truncation-labelled output are implemented in [`src/web/src/components/`](src/web/src/components/).
+
 - Add collapsed-by-default `ThinkingBlock` components.
 - Add `ToolCallCard` components linked to matching results.
 - Update active tools incrementally and distinguish success, failure, and running states.

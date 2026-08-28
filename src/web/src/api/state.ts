@@ -181,6 +181,15 @@ function applyConversationEvent(
         }
         const blocks = [...message.blocks];
         const block = blocks[event.payload.blockIndex];
+        if (block === undefined && event.payload.blockIndex === blocks.length) {
+          // Pi can emit the first text/thinking delta after message_start sent
+          // an empty content array. Materialize that normalized block here.
+          blocks.push({
+            type: event.payload.blockType,
+            text: event.payload.delta,
+          });
+          return { ...message, blocks };
+        }
         if (block?.type !== event.payload.blockType) return message;
         blocks[event.payload.blockIndex] = {
           ...block,
@@ -216,7 +225,12 @@ function applyConversationEvent(
             block.type === "tool-result" &&
             block.toolCallId === event.payload.toolCallId,
         );
-        const blocks = [...message.blocks];
+        let blocks = updateToolCallStatus(
+          message.blocks,
+          event.payload.toolCallId,
+          "running",
+        );
+        blocks = [...blocks];
         if (existing < 0) blocks.push(partial);
         else blocks[existing] = partial;
         return { ...message, blocks };

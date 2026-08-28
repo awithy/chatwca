@@ -743,6 +743,153 @@ pre {
   min-width: 0;
 }
 
+.thinking-block,
+.tool-call-card {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: var(--panel);
+}
+
+.thinking-block > summary,
+.tool-call-card > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-height: 2.45rem;
+  padding: 0.5rem 0.7rem;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 680;
+  list-style: none;
+  user-select: none;
+}
+
+.thinking-block > summary::-webkit-details-marker,
+.tool-call-card > summary::-webkit-details-marker {
+  display: none;
+}
+
+.thinking-block > summary::after,
+.tool-call-card > summary::after {
+  content: "›";
+  margin-left: auto;
+  color: var(--subtle);
+  font-size: 1rem;
+  transform: rotate(0deg);
+  transition: transform 120ms ease-out;
+}
+
+.thinking-block[open] > summary::after,
+.tool-call-card[open] > summary::after {
+  transform: rotate(90deg);
+}
+
+.thinking-block > summary:hover,
+.tool-call-card > summary:hover {
+  color: var(--text);
+  background: var(--panel-hover);
+}
+
+.thinking-mark {
+  color: var(--accent);
+}
+
+.thinking-content {
+  padding: 0.75rem;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.tool-call-card > summary {
+  justify-content: space-between;
+}
+
+.tool-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.38rem;
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.tool-state i {
+  width: 0.48rem;
+  height: 0.48rem;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.tool-status-running .tool-state {
+  color: var(--warning);
+}
+
+.tool-status-running .tool-state i {
+  animation: tool-pulse 1.2s ease-in-out infinite;
+}
+
+.tool-status-succeeded .tool-state {
+  color: var(--success);
+}
+
+.tool-status-failed .tool-state {
+  color: var(--danger);
+}
+
+.tool-card-body {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.tool-section {
+  min-width: 0;
+}
+
+.tool-section h4 {
+  margin: 0 0 0.35rem;
+  color: var(--subtle);
+  font-size: 0.65rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.tool-arguments {
+  max-height: 14rem;
+}
+
+.tool-output {
+  max-height: min(24rem, 45vh);
+  overflow: auto;
+  white-space: pre;
+}
+
+.tool-truncation {
+  margin: 0.45rem 0 0;
+  color: var(--warning-text);
+  font-size: 0.7rem;
+}
+
 .message-text,
 .message-markdown {
   min-width: 0;
@@ -1012,6 +1159,10 @@ pre {
 
 @keyframes pulse-cursor {
   50% { opacity: 0.2; }
+}
+
+@keyframes tool-pulse {
+  50% { opacity: 0.3; }
 }
 
 .content-empty,

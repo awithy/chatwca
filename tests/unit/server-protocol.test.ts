@@ -144,6 +144,7 @@ describe("server WebSocket protocol", () => {
         conversations: [summary],
       },
     });
+    expect(history.list).toHaveBeenCalledWith(workspace);
 
     await expect(dispatchClientCommand(command({
       type: "conversation.create",
@@ -161,7 +162,7 @@ describe("server WebSocket protocol", () => {
       workspaceId: workspace.id,
       conversationId: state.id,
     }), registry, history, workspaces);
-    expect(history.resolve).toHaveBeenCalledWith(workspace.id, state.id);
+    expect(history.resolve).toHaveBeenCalledWith(workspace, state.id);
     expect(calls.open).toHaveBeenCalledWith(workspace.id, state.sessionFile);
 
     await expect(dispatchClientCommand(command({
@@ -174,7 +175,7 @@ describe("server WebSocket protocol", () => {
       affectedWorkspaceId: workspace.id,
       history: [summary],
     });
-    expect(calls.delete).toHaveBeenCalledWith(workspace.id, state.id);
+    expect(calls.delete).toHaveBeenCalledWith(workspace, state.id);
   });
 
   it("dispatches workspace CRUD, permits live rename, and guards path/delete while live", async () => {

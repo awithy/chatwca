@@ -21,6 +21,7 @@ import {
   WEBSOCKET_RESTART_CLOSE_CODE,
   WEBSOCKET_RESTART_CLOSE_REASON,
 } from "./shutdown.js";
+import type { SessionHistoryWorkspace } from "./session-history.js";
 import type { UpdateWorkspaceInput } from "./workspace-repository.js";
 
 export const DEFAULT_MAX_INBOUND_MESSAGE_BYTES = 40 * 1024 * 1024;
@@ -45,14 +46,15 @@ export interface ProtocolRegistry {
   subscribe(listener: ConversationRegistryListener): () => void;
 }
 
-/** Phase 3's scoped interface; SessionHistory's full authorization refactor lands in Phase 4. */
 export interface ProtocolHistory {
-  list(workspaceId: string): Promise<readonly ConversationSummary[]>;
-  resolve(workspaceId: string, conversationId: string): Promise<{
+  list(
+    workspace: SessionHistoryWorkspace,
+  ): Promise<readonly ConversationSummary[]>;
+  resolve(workspace: SessionHistoryWorkspace, conversationId: string): Promise<{
     readonly summary: { readonly sessionFile: string };
   }>;
   delete(
-    workspaceId: string,
+    workspace: SessionHistoryWorkspace,
     conversationId: string,
   ): Promise<readonly ConversationSummary[]>;
 }
@@ -195,13 +197,13 @@ export async function dispatchClientCommand(
       };
     }
     case "history.list": {
-      workspaces.requireAvailable(command.workspaceId);
+      const workspace = workspaces.requireAvailable(command.workspaceId);
       return {
         response: {
           type: "history",
           requestId: command.requestId,
-          workspaceId: command.workspaceId,
-          conversations: [...(await history.list(command.workspaceId))],
+          workspaceId: workspace.id,
+          conversations: [...(await history.list(workspace))],
         },
       };
     }
@@ -218,9 +220,9 @@ export async function dispatchClientCommand(
       };
     }
     case "conversation.open": {
-      workspaces.requireAvailable(command.workspaceId);
-      const listed = await history.resolve(command.workspaceId, command.conversationId);
-      const record = await registry.open(command.workspaceId, listed.summary.sessionFile);
+      const workspace = workspaces.requireAvailable(command.workspaceId);
+      const listed = await history.resolve(workspace, command.conversationId);
+      const record = await registry.open(workspace.id, listed.summary.sessionFile);
       return {
         response: {
           type: "state",
@@ -247,8 +249,8 @@ export async function dispatchClientCommand(
       };
     }
     case "conversation.delete": {
-      workspaces.requireAvailable(command.workspaceId);
-      const conversations = await history.delete(command.workspaceId, command.conversationId);
+      const workspace = workspaces.requireAvailable(command.workspaceId);
+      const conversations = await history.delete(workspace, command.conversationId);
       return {
         response: { type: "ack", requestId: command.requestId, command: command.type },
         affectedWorkspaceId: command.workspaceId,
@@ -446,8 +448,9 @@ export class WebSocketProtocol {
       try {
         while (current.requested && !this.#disposed) {
           current.requested = false;
-          const conversations = await this.#history.list(workspaceId);
-          this.#broadcastHistory(workspaceId, conversations);
+          const workspace = this.#workspaces.requireAvailable(workspaceId);
+          const conversations = await this.#history.list(workspace);
+          this.#broadcastHistory(workspace.id, conversations);
         }
       } catch (error) {
         this.#onInternalError(error);

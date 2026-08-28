@@ -249,10 +249,10 @@ describe("WebSocket command server", () => {
       releaseBroadcastHistory = resolve;
     });
     const history: ProtocolHistory = {
-      list: vi.fn(async (workspaceId) => {
+      list: vi.fn(async (workspace) => {
         listCount += 1;
         if (listCount > 2) await broadcastHistoryGate;
-        return workspaceId === WORKSPACE_ID ? [summary] : [];
+        return workspace.id === WORKSPACE_ID ? [summary] : [];
       }),
       resolve: vi.fn(async () => ({ summary })),
       delete: vi.fn(async () => [summary]),
@@ -352,8 +352,8 @@ describe("WebSocket command server", () => {
       record: { id: "other", workspaceId: "workspace-2" } as never,
     });
     await vi.waitFor(() => {
-      expect(history.list).toHaveBeenCalledWith(WORKSPACE_ID);
-      expect(history.list).toHaveBeenCalledWith("workspace-2");
+      expect(history.list).toHaveBeenCalledWith({ id: WORKSPACE_ID, path: WORKSPACE_ID });
+      expect(history.list).toHaveBeenCalledWith({ id: "workspace-2", path: "workspace-2" });
     });
     releaseBroadcastHistory?.();
     await expect(Promise.all([firstHistory, secondHistory])).resolves.toEqual([
@@ -371,6 +371,104 @@ describe("WebSocket command server", () => {
 
     first.close();
     second.close();
+  });
+
+  it("replaces a socket's workspace subscription without scanning the deselected workspace on events", async () => {
+    let registryListener: ConversationRegistryListener | undefined;
+    const registry: ProtocolRegistry = {
+      create: vi.fn(async () => ({ id: state.id })),
+      open: vi.fn(async () => ({ id: state.id })),
+      getState: vi.fn(async () => state),
+      close: vi.fn(async () => undefined),
+      fork: vi.fn(async () => ({ conversation: state, editorText: "" })),
+      prompt: vi.fn(async () => undefined),
+      abort: vi.fn(async () => undefined),
+      hasLiveWorkspace: () => false,
+      subscribe: (listener) => {
+        registryListener = listener;
+        return () => { registryListener = undefined; };
+      },
+    };
+    const history: ProtocolHistory = {
+      list: vi.fn(async () => []),
+      resolve: vi.fn(async () => ({ summary })),
+      delete: vi.fn(async () => []),
+    };
+    const workspaceA: WorkspaceSummary = {
+      id: "workspace-a",
+      name: "A",
+      path: "/canonical/a",
+      createdAt: 1,
+      updatedAt: 1,
+      available: true,
+    };
+    const workspaceB: WorkspaceSummary = {
+      id: "workspace-b",
+      name: "B",
+      path: "/canonical/b",
+      createdAt: 2,
+      updatedAt: 2,
+      available: true,
+    };
+    const rows = [workspaceA, workspaceB];
+    const workspaces = {
+      list: () => rows,
+      requireAvailable: (workspaceId: string) => rows.find(({ id }) => id === workspaceId)!,
+      create: () => workspaceA,
+      update: () => workspaceA,
+      delete: () => undefined,
+    };
+    const config = loadConfig({ CHATWCA_DATA_DIR: "/tmp" }, "/tmp");
+    const server = createChatWcaServer(config, "subscription-test", {
+      registry,
+      history,
+      workspaces,
+    });
+    servers.push(server);
+    expect(history.list).not.toHaveBeenCalled();
+    await new Promise<void>((resolve) =>
+      server.httpServer.listen(0, "127.0.0.1", resolve),
+    );
+    const { port } = server.httpServer.address() as AddressInfo;
+    const socket = new WebSocket(`ws://127.0.0.1:${String(port)}/ws`);
+    await expect(nextMessage(socket)).resolves.toMatchObject({ type: "ready" });
+    expect(history.list).not.toHaveBeenCalled();
+
+    for (const workspace of rows) {
+      const response = nextMessage(socket);
+      socket.send(JSON.stringify({
+        type: "history.list",
+        requestId: `select-${workspace.id}`,
+        workspaceId: workspace.id,
+      }));
+      await expect(response).resolves.toMatchObject({
+        type: "history",
+        workspaceId: workspace.id,
+      });
+    }
+    expect(history.list).toHaveBeenNthCalledWith(1, workspaceA);
+    expect(history.list).toHaveBeenNthCalledWith(2, workspaceB);
+    vi.mocked(history.list).mockClear();
+
+    registryListener?.({
+      type: "conversation.state-changed",
+      record: { id: "conversation-a", workspaceId: workspaceA.id } as never,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(history.list).not.toHaveBeenCalled();
+
+    const scopedRefresh = nextMessage(socket);
+    registryListener?.({
+      type: "conversation.state-changed",
+      record: { id: "conversation-b", workspaceId: workspaceB.id } as never,
+    });
+    await vi.waitFor(() => expect(history.list).toHaveBeenCalledExactlyOnceWith(workspaceB));
+    await expect(scopedRefresh).resolves.toEqual({
+      type: "history",
+      workspaceId: workspaceB.id,
+      conversations: [],
+    });
+    socket.close();
   });
 
   it("correlates workspace mutations and sends exact authoritative broadcasts", async () => {
@@ -423,6 +521,19 @@ describe("WebSocket command server", () => {
     const first = new WebSocket(`ws://127.0.0.1:${String(port)}/ws`);
     const second = new WebSocket(`ws://127.0.0.1:${String(port)}/ws`);
     await Promise.all([nextMessage(first), nextMessage(second)]);
+    expect(history.list).not.toHaveBeenCalled();
+
+    const listedWorkspaces = nextMessage(first);
+    first.send(JSON.stringify({
+      type: "workspace.list",
+      requestId: "list-workspaces",
+    }));
+    await expect(listedWorkspaces).resolves.toEqual({
+      type: "workspaces",
+      requestId: "list-workspaces",
+      workspaces: [],
+    });
+    expect(history.list).not.toHaveBeenCalled();
 
     const correlatedCreate = nextMessage(first);
     const createBroadcast = nextMessage(second);
@@ -434,6 +545,19 @@ describe("WebSocket command server", () => {
     }));
     await expect(Promise.all([correlatedCreate, createBroadcast])).resolves.toEqual([
       { type: "workspaces", requestId: "create-workspace", workspaces: [created] },
+      { type: "workspaces", workspaces: [created] },
+    ]);
+
+    const correlatedUpdate = nextMessage(first);
+    const updateBroadcast = nextMessage(second);
+    first.send(JSON.stringify({
+      type: "workspace.update",
+      requestId: "update-workspace",
+      workspaceId: WORKSPACE_ID,
+      name: "Renamed workspace",
+    }));
+    await expect(Promise.all([correlatedUpdate, updateBroadcast])).resolves.toEqual([
+      { type: "workspaces", requestId: "update-workspace", workspaces: [created] },
       { type: "workspaces", workspaces: [created] },
     ]);
 
@@ -456,6 +580,9 @@ describe("WebSocket command server", () => {
       { type: "workspaces", workspaces: [] },
     ]);
     await expect(deleteBroadcast).resolves.toEqual({ type: "workspaces", workspaces: [] });
+    expect(history.list).not.toHaveBeenCalled();
+    expect(history.resolve).not.toHaveBeenCalled();
+    expect(history.delete).not.toHaveBeenCalled();
 
     first.close();
     second.close();

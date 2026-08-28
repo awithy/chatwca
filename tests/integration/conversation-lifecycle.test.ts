@@ -52,6 +52,10 @@ interface RuntimeServices {
   readonly history: SessionHistory;
 }
 
+function historyWorkspace(cwd: string) {
+  return { id: cwd, path: cwd } as const;
+}
+
 const temporaryRoots: string[] = [];
 const registries: ConversationRegistry[] = [];
 const servers: ChatWcaServer[] = [];
@@ -107,9 +111,14 @@ function createServices(
   let registry: ConversationRegistry;
   const history = new SessionHistory({
     sessionDir,
-    getLiveStatus: (identity) =>
-      registry?.get(identity.id)?.status ??
-      registry?.getBySessionFile(identity.sessionFile)?.status,
+    getLiveStatus: (identity) => {
+      const record =
+        registry?.get(identity.id) ??
+        registry?.getBySessionFile(identity.sessionFile);
+      return record === undefined
+        ? undefined
+        : { workspaceId: record.workspaceId, status: record.status };
+    },
   });
   registry = new ConversationRegistry({
     runtimeFactory: factory,
@@ -117,7 +126,8 @@ function createServices(
       ? {}
       : { maxLiveConversations: options.maxLiveConversations }),
     ...(options.now === undefined ? {} : { now: options.now }),
-    refreshHistory: () => history.refresh().then(() => undefined),
+    refreshHistory: (workspaceId) =>
+      history.refresh(historyWorkspace(workspaceId)).then(() => undefined),
   });
   registries.push(registry);
   return { registry, history };
@@ -185,16 +195,16 @@ describe("complete conversation lifecycle integration", () => {
     ]);
     expect(existsSync(persisted.sessionFile)).toBe(true);
 
-    await expect(firstServices.history.delete(created.id)).rejects.toMatchObject({
-      code: ERROR_CODES.LIVE_SESSION_DELETE,
-    });
+    await expect(
+      firstServices.history.delete(historyWorkspace(cwd), created.id),
+    ).rejects.toMatchObject({ code: ERROR_CODES.LIVE_SESSION_DELETE });
 
     const entryIds = persisted.messages.map(({ entryId }) => entryId);
     await firstServices.registry.dispose();
     expect(created.runtime.disposed).toBe(true);
 
     const secondServices = createServices(factory, sessionDir);
-    const listed = await secondServices.history.list();
+    const listed = await secondServices.history.list(historyWorkspace(cwd));
     expect(listed).toContainEqual(
       expect.objectContaining({
         id: created.id,
@@ -211,12 +221,53 @@ describe("complete conversation lifecycle integration", () => {
     expect(recovered.messages.map(({ entryId }) => entryId)).toEqual(entryIds);
     expect(recovered.messages.map(textOf)).toEqual(persisted.messages.map(textOf));
 
-    await expect(secondServices.history.delete(reopened.id)).rejects.toMatchObject({
-      code: ERROR_CODES.LIVE_SESSION_DELETE,
-    });
+    await expect(
+      secondServices.history.delete(historyWorkspace(cwd), reopened.id),
+    ).rejects.toMatchObject({ code: ERROR_CODES.LIVE_SESSION_DELETE });
     await secondServices.registry.close(reopened.id);
-    await expect(secondServices.history.delete(reopened.id)).resolves.toEqual([]);
+    await expect(
+      secondServices.history.delete(historyWorkspace(cwd), reopened.id),
+    ).resolves.toEqual([]);
     expect(existsSync(persisted.sessionFile)).toBe(false);
+  });
+
+  it("isolates real Pi listing, fresh resolution, and deletion across workspaces", async () => {
+    const { cwd, secondCwd, sessionDir, factory, faux } = await isolatedPi();
+    faux.setResponses([
+      fauxAssistantMessage("Workspace A response"),
+      fauxAssistantMessage("Workspace B response"),
+    ]);
+    const { registry, history } = createServices(factory, sessionDir);
+
+    const first = await registry.create(cwd);
+    await registry.prompt(first.id, "Workspace A prompt", []);
+    await waitForIdle(first);
+    const firstFile = first.sessionFile;
+    await registry.close(first.id);
+
+    const second = await registry.create(secondCwd);
+    await registry.prompt(second.id, "Workspace B prompt", []);
+    await waitForIdle(second);
+    const secondFile = second.sessionFile;
+    await registry.close(second.id);
+
+    await expect(history.list(historyWorkspace(cwd))).resolves.toMatchObject([
+      { id: first.id, workspaceId: cwd, cwd },
+    ]);
+    await expect(history.list(historyWorkspace(secondCwd))).resolves.toMatchObject([
+      { id: second.id, workspaceId: secondCwd, cwd: secondCwd },
+    ]);
+    await expect(
+      history.resolve(historyWorkspace(cwd), second.id),
+    ).rejects.toMatchObject({ code: ERROR_CODES.SESSION_NOT_LISTED });
+    await expect(
+      history.resolve(historyWorkspace(secondCwd), first.id),
+    ).rejects.toMatchObject({ code: ERROR_CODES.SESSION_NOT_LISTED });
+    await expect(
+      history.delete(historyWorkspace(cwd), second.id),
+    ).rejects.toMatchObject({ code: ERROR_CODES.SESSION_NOT_LISTED });
+    expect(existsSync(firstFile)).toBe(true);
+    expect(existsSync(secondFile)).toBe(true);
   });
 
   it("runs independent conversations concurrently while switching away from a background stream", async () => {
@@ -571,23 +622,27 @@ describe("complete conversation lifecycle integration", () => {
     await registry.close(missingSession.id);
 
     await rm(cwd, { recursive: true });
-    const listed = await history.list();
-    expect(listed.find(({ id }) => id === missingWorkspace.id)).toMatchObject({
-      sessionFile: missingWorkspaceFile,
-      status: "closed",
-      runnable: false,
+    await expect(history.list(historyWorkspace(cwd))).rejects.toMatchObject({
+      code: ERROR_CODES.WORKSPACE_UNAVAILABLE,
     });
     await expect(registry.open(missingWorkspaceFile)).rejects.toMatchObject({
       code: ERROR_CODES.CWD_NOT_FOUND,
     });
 
+    const beforeExternalRemoval = await history.list(historyWorkspace(secondCwd));
+    expect(beforeExternalRemoval).toContainEqual(
+      expect.objectContaining({
+        id: missingSession.id,
+        sessionFile: missingSessionFile,
+      }),
+    );
     await unlink(missingSessionFile);
     await expect(registry.open(missingSessionFile)).rejects.toMatchObject({
       code: ERROR_CODES.SESSION_FILE_MISSING,
     });
-    await expect(history.resolve(missingSession.id)).rejects.toMatchObject({
-      code: ERROR_CODES.SESSION_NOT_LISTED,
-    });
+    await expect(
+      history.resolve(historyWorkspace(secondCwd), missingSession.id),
+    ).rejects.toMatchObject({ code: ERROR_CODES.SESSION_NOT_LISTED });
     expect(existsSync(missingWorkspaceFile)).toBe(true);
   });
 });

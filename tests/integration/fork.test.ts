@@ -239,14 +239,20 @@ describe("conversation fork integration", () => {
     let registry: ConversationRegistry;
     const history = new SessionHistory({
       sessionDir,
-      getLiveStatus: (identity) =>
-        registry?.get(identity.id)?.status ??
-        registry?.getBySessionFile(identity.sessionFile)?.status,
+      getLiveStatus: (identity) => {
+        const record =
+          registry?.get(identity.id) ??
+          registry?.getBySessionFile(identity.sessionFile);
+        return record === undefined
+          ? undefined
+          : { workspaceId: record.workspaceId, status: record.status };
+      },
     });
     registry = new ConversationRegistry({
       runtimeFactory: factory,
       maxLiveConversations: 2,
-      refreshHistory: () => history.refresh().then(() => undefined),
+      refreshHistory: (workspaceId) =>
+        history.refresh({ id: workspaceId, path: workspaceId }).then(() => undefined),
     });
     registries.push(registry);
 
@@ -348,7 +354,7 @@ describe("conversation fork integration", () => {
     expect(await readFile(source.sessionFile)).toEqual(sourceBytes);
     expect((await stat(source.sessionFile)).mtimeMs).toBe(sourceModifiedAt);
 
-    const listed = await history.list();
+    const listed = await history.list({ id: cwd, path: cwd });
     expect(listed.map(({ id }) => id).sort()).toEqual(
       [source.id, fork.id].sort(),
     );

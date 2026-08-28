@@ -297,12 +297,14 @@ async function main(): Promise<void> {
     let registry: ConversationRegistry | undefined;
     const history = new SessionHistory({
       getLiveStatus: (identity) => {
+        const byFile = registry?.getBySessionFile(identity.sessionFile);
+        const byId = registry?.get(identity.id);
         const record =
-          registry?.get(identity.id) ??
-          registry?.getBySessionFile(identity.sessionFile);
-        return record?.workspaceId === identity.workspaceId
-          ? record.status
-          : undefined;
+          byFile ??
+          (byId?.sessionFile === identity.sessionFile ? byId : undefined);
+        return record === undefined
+          ? undefined
+          : { workspaceId: record.workspaceId, status: record.status };
       },
     });
     registry = new ConversationRegistry({

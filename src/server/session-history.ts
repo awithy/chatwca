@@ -1,5 +1,6 @@
 import { unlink } from "node:fs/promises";
 import { realpath } from "node:fs/promises";
+import path from "node:path";
 
 import {
   SessionManager,
@@ -15,10 +16,15 @@ import type {
   ConversationSummary,
   LiveConversationStatus,
 } from "../shared/protocol.js";
-import { inspectStoredCwd } from "./cwd.js";
+import { inspectStoredCwd, resolveConversationCwd } from "./cwd.js";
 
 const UNTITLED_CONVERSATION = "Untitled conversation";
-const UNKNOWN_CWD = "(unknown working directory)";
+
+/** A repository-resolved workspace whose path was canonical and available. */
+export interface SessionHistoryWorkspace {
+  readonly id: string;
+  readonly path: string;
+}
 
 export interface SessionHistoryIdentity {
   readonly id: string;
@@ -28,16 +34,21 @@ export interface SessionHistoryIdentity {
 
 /** Registry state needed to decorate history without coupling history to the registry. */
 export type SessionHistoryLiveStatus = LiveConversationStatus;
+export interface SessionHistoryLiveRecord {
+  readonly workspaceId: string;
+  readonly status: SessionHistoryLiveStatus;
+}
+/** Return only a live record matching the supplied session ID or canonical file. */
 export type SessionHistoryLiveStatusLookup = (
   identity: SessionHistoryIdentity,
-) => SessionHistoryLiveStatus | undefined;
+) => SessionHistoryLiveRecord | undefined;
 
 export interface SessionHistoryOptions {
-  /** Omit to scan Pi's normal per-workspace session root. */
+  /** Optional Pi session root, primarily used by isolated integration tests. */
   readonly sessionDir?: string;
-  /** Injectable listing boundary for focused tests. */
-  readonly listSessions?: (workspaceId: string) => Promise<readonly SessionInfo[]>;
-  /** A defined result means that the session currently owns a live runtime. */
+  /** Injectable workspace-scoped Pi listing boundary for focused tests. */
+  readonly listSessions?: (cwd: string) => Promise<readonly SessionInfo[]>;
+  /** A defined result means that this workspace owns the matching live runtime. */
   readonly getLiveStatus?: SessionHistoryLiveStatusLookup;
 }
 
@@ -48,13 +59,20 @@ export interface ListedConversation {
 
 export interface SessionHistorySnapshot {
   readonly conversations: readonly ConversationSummary[];
-  /** Canonical paths from this exact Pi listing, used as the open/delete allow-set. */
+  /** Canonical paths from this exact scoped listing, used as the open/delete allow-set. */
   readonly allowedSessionFiles: ReadonlySet<string>;
 }
 
 interface HistoryIndex {
   readonly snapshot: SessionHistorySnapshot;
   readonly byId: ReadonlyMap<string, ListedConversation>;
+}
+
+function emptyIndex(): HistoryIndex {
+  return {
+    snapshot: { conversations: [], allowedSessionFiles: new Set() },
+    byId: new Map(),
+  };
 }
 
 function timestamp(date: Date): number | undefined {
@@ -83,85 +101,63 @@ function summaryStatus(
   return liveStatus === "aborting" ? "streaming" : liveStatus;
 }
 
+function compareListed(
+  left: ListedConversation,
+  right: ListedConversation,
+): number {
+  const modified = right.summary.modifiedAt - left.summary.modifiedAt;
+  if (modified !== 0) return modified;
+  const id = left.summary.id.localeCompare(right.summary.id);
+  if (id !== 0) return id;
+  return left.summary.sessionFile.localeCompare(right.summary.sessionFile);
+}
+
 /**
- * Pi-native session discovery and guarded deletion.
+ * Pi-native, strictly workspace-scoped session discovery and guarded deletion.
  *
- * This service only discovers sessions through SessionManager listing APIs. It
- * canonicalizes the files returned by that listing and never scans or parses
- * JSONL itself. Every open/delete resolution performs a fresh listing so an old
- * browser-provided path can never expand the allow-set.
+ * Every operation requires an available canonical workspace. Every open/delete
+ * authorization performs a fresh SessionManager.list(workspace.path), verifies
+ * each listed session's canonical stored CWD, and admits only canonical files
+ * from that exact result. No global Pi history listing is used.
  */
 export class SessionHistory {
-  readonly #listSessions: (workspaceId: string) => Promise<readonly SessionInfo[]>;
+  readonly #listSessions: (cwd: string) => Promise<readonly SessionInfo[]>;
   readonly #getLiveStatus: SessionHistoryLiveStatusLookup;
-  #latest: HistoryIndex = {
-    snapshot: { conversations: [], allowedSessionFiles: new Set() },
-    byId: new Map(),
-  };
+  readonly #latestByWorkspace = new Map<string, HistoryIndex>();
 
   constructor(options: SessionHistoryOptions = {}) {
     this.#listSessions =
       options.listSessions ??
-      (options.sessionDir === undefined
-        ? () => SessionManager.listAll()
-        : () => SessionManager.listAll(options.sessionDir));
+      ((cwd) => SessionManager.list(cwd, options.sessionDir));
     this.#getLiveStatus = options.getLiveStatus ?? (() => undefined);
   }
 
-  /** Return summaries from a fresh Pi listing, newest first. */
-  async list(workspaceId = "legacy-workspace"): Promise<readonly ConversationSummary[]> {
-    return (await this.refresh(workspaceId)).conversations;
+  /** Return summaries from a fresh workspace-scoped Pi listing, newest first. */
+  async list(
+    workspace: SessionHistoryWorkspace,
+  ): Promise<readonly ConversationSummary[]> {
+    return (await this.#refreshIndex(workspace)).snapshot.conversations;
   }
 
-  /** Refresh summaries and the canonical file allow-set as one snapshot. */
-  async refresh(workspaceId = "legacy-workspace"): Promise<SessionHistorySnapshot> {
-    let sessions: readonly SessionInfo[];
-    try {
-      sessions = await this.#listSessions(workspaceId);
-    } catch (error) {
-      throw toAppError(error, { source: "filesystem", target: "session" });
-    }
-
-    const listed = await Promise.all(
-      sessions.map((info) => this.#normalizeListedSession(workspaceId, info)),
-    );
-    const available = listed.filter(
-      (item): item is ListedConversation => item !== undefined,
-    );
-    available.sort(
-      (left, right) => right.summary.modifiedAt - left.summary.modifiedAt,
-    );
-
-    const byId = new Map<string, ListedConversation>();
-    const allowedSessionFiles = new Set<string>();
-    for (const item of available) {
-      // Session IDs are UUIDs in Pi. If corrupt history repeats an ID, retain
-      // the newest item deterministically rather than changing selection order.
-      if (!byId.has(item.summary.id)) byId.set(item.summary.id, item);
-      allowedSessionFiles.add(item.summary.sessionFile);
-    }
-
-    const snapshot: SessionHistorySnapshot = {
-      conversations: available.map(({ summary }) => summary),
-      allowedSessionFiles,
-    };
-    this.#latest = { snapshot, byId };
-    return snapshot;
+  /** Refresh one workspace's summaries and canonical file allow-set atomically. */
+  async refresh(
+    workspace: SessionHistoryWorkspace,
+  ): Promise<SessionHistorySnapshot> {
+    return (await this.#refreshIndex(workspace)).snapshot;
   }
 
-  /** Last completed snapshot; callers that need authorization must use resolve(). */
-  get latest(): SessionHistorySnapshot {
-    return this.#latest.snapshot;
+  /** Last completed snapshot for one workspace; never use this for authorization. */
+  latest(workspaceId: string): SessionHistorySnapshot {
+    return (this.#latestByWorkspace.get(workspaceId) ?? emptyIndex()).snapshot;
   }
 
-  /** Resolve a conversation through a fresh canonical Pi-listing allow-set. */
-  async resolve(conversationId: string): Promise<ListedConversation>;
-  async resolve(workspaceId: string, conversationId: string): Promise<ListedConversation>;
-  async resolve(first: string, second?: string): Promise<ListedConversation> {
-    const workspaceId = second === undefined ? "legacy-workspace" : first;
-    const conversationId = second ?? first;
-    await this.refresh(workspaceId);
-    const listed = this.#latest.byId.get(conversationId);
+  /** Resolve a conversation through a fresh scoped canonical Pi-listing allow-set. */
+  async resolve(
+    workspace: SessionHistoryWorkspace,
+    conversationId: string,
+  ): Promise<ListedConversation> {
+    const index = await this.#refreshIndex(workspace);
+    const listed = index.byId.get(conversationId);
     if (listed === undefined) {
       throw new AppError(ERROR_CODES.SESSION_NOT_LISTED);
     }
@@ -169,20 +165,21 @@ export class SessionHistory {
   }
 
   /**
-   * Delete a currently listed, non-live Pi session and return refreshed history.
-   * The path passed to unlink is the canonical path admitted by the fresh list.
+   * Delete a freshly listed, non-live Pi session and return refreshed scoped history.
+   * The path passed to unlink is the canonical path admitted by that fresh list.
    */
-  async delete(conversationId: string): Promise<readonly ConversationSummary[]>;
-  async delete(workspaceId: string, conversationId: string): Promise<readonly ConversationSummary[]>;
-  async delete(first: string, second?: string): Promise<readonly ConversationSummary[]> {
-    const workspaceId = second === undefined ? "legacy-workspace" : first;
-    const conversationId = second ?? first;
-    const listed = await this.resolve(workspaceId, conversationId);
+  async delete(
+    workspace: SessionHistoryWorkspace,
+    conversationId: string,
+  ): Promise<readonly ConversationSummary[]> {
+    const listed = await this.resolve(workspace, conversationId);
     const identity = {
       id: listed.summary.id,
-      workspaceId: listed.summary.workspaceId,
+      workspaceId: workspace.id,
       sessionFile: listed.summary.sessionFile,
     };
+    // Block deletion of a matching live writer even if inconsistent registry
+    // ownership is detected; decoration below is stricter and requires agreement.
     if (this.#getLiveStatus(identity) !== undefined) {
       throw new AppError(ERROR_CODES.LIVE_SESSION_DELETE);
     }
@@ -193,11 +190,66 @@ export class SessionHistory {
       throw toAppError(error, { source: "filesystem", target: "session" });
     }
 
-    return this.list(workspaceId);
+    return this.list(workspace);
+  }
+
+  async #refreshIndex(
+    workspace: SessionHistoryWorkspace,
+  ): Promise<HistoryIndex> {
+    const canonicalWorkspace = await this.#requireCanonicalWorkspace(workspace);
+    let sessions: readonly SessionInfo[];
+    try {
+      sessions = await this.#listSessions(canonicalWorkspace.path);
+    } catch (error) {
+      throw toAppError(error, { source: "filesystem", target: "session" });
+    }
+
+    const listed = await Promise.all(
+      sessions.map((info) =>
+        this.#normalizeListedSession(canonicalWorkspace, info)
+      ),
+    );
+    const available = listed.filter(
+      (item): item is ListedConversation => item !== undefined,
+    );
+    available.sort(compareListed);
+
+    const byId = new Map<string, ListedConversation>();
+    const allowedSessionFiles = new Set<string>();
+    const conversations: ConversationSummary[] = [];
+    for (const item of available) {
+      // Session IDs are UUIDs in Pi. If corrupt history repeats an ID, retain
+      // only the deterministic newest item in both the projection and allow-map.
+      if (byId.has(item.summary.id)) continue;
+      byId.set(item.summary.id, item);
+      allowedSessionFiles.add(item.summary.sessionFile);
+      conversations.push(item.summary);
+    }
+
+    const index: HistoryIndex = {
+      snapshot: { conversations, allowedSessionFiles },
+      byId,
+    };
+    this.#latestByWorkspace.set(workspace.id, index);
+    return index;
+  }
+
+  async #requireCanonicalWorkspace(
+    workspace: SessionHistoryWorkspace,
+  ): Promise<SessionHistoryWorkspace> {
+    try {
+      const canonicalPath = await resolveConversationCwd(workspace.path);
+      if (path.resolve(canonicalPath) !== path.resolve(workspace.path)) {
+        throw new Error("Workspace path was not canonical");
+      }
+      return { id: workspace.id, path: canonicalPath };
+    } catch (error) {
+      throw new AppError(ERROR_CODES.WORKSPACE_UNAVAILABLE, { cause: error });
+    }
   }
 
   async #normalizeListedSession(
-    workspaceId: string,
+    workspace: SessionHistoryWorkspace,
     info: SessionInfo,
   ): Promise<ListedConversation | undefined> {
     let canonicalFile: string;
@@ -210,24 +262,37 @@ export class SessionHistory {
     }
 
     const cwdInspection = await inspectStoredCwd(info.cwd);
-    const liveStatus = this.#getLiveStatus({
+    if (
+      !cwdInspection.runnable ||
+      path.resolve(cwdInspection.canonicalCwd) !== path.resolve(workspace.path)
+    ) {
+      // SessionManager.list() is treated as discovery, not authority. A corrupt
+      // or injected cross-workspace result cannot enter this workspace's cache.
+      return undefined;
+    }
+
+    const liveRecord = this.#getLiveStatus({
       id: info.id,
-      workspaceId,
+      workspaceId: workspace.id,
       sessionFile: canonicalFile,
     });
+    const liveStatus =
+      liveRecord?.workspaceId === workspace.id
+        ? liveRecord.status
+        : undefined;
     const createdAt = timestamp(info.created);
     const modifiedAt = timestamp(info.modified) ?? createdAt ?? 0;
     const summary: ConversationSummary = {
       id: info.id,
-      workspaceId,
+      workspaceId: workspace.id,
       sessionFile: canonicalFile,
       title: titleOf(info),
-      cwd: info.cwd.trim() ? info.cwd : UNKNOWN_CWD,
+      cwd: info.cwd,
       ...(createdAt === undefined ? {} : { createdAt }),
       modifiedAt,
       messageCount: Math.max(0, Math.trunc(info.messageCount)),
       status: summaryStatus(liveStatus),
-      runnable: cwdInspection.runnable,
+      runnable: true,
     };
     return { info, summary };
   }

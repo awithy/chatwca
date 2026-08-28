@@ -2,8 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 
 import type { ConversationSummary } from "../../shared/protocol.js";
 import { useChatSocket } from "./api/index.js";
+import { Composer } from "./components/Composer.js";
 import { ConversationHeader } from "./components/ConversationHeader.js";
 import { ConversationSidebar } from "./components/ConversationSidebar.js";
+import { MessageTimeline } from "./components/MessageTimeline.js";
+import type { PromptAction } from "./components/chat-interactions.js";
 
 interface HealthResponse {
   readonly ready: boolean;
@@ -29,6 +32,7 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [loadingConversationId, setLoadingConversationId] = useState<string | null>(null);
   const [conversationError, setConversationError] = useState<string | null>(null);
+  const [lifecycleAction, setLifecycleAction] = useState<"close" | "delete" | null>(null);
   const { client, state: chat } = useChatSocket();
 
   useEffect(() => {
@@ -114,6 +118,79 @@ export function App() {
       });
   }
 
+  async function prompt(action: PromptAction, text: string): Promise<void> {
+    const conversationId = selectedConversation?.id;
+    if (conversationId === undefined) throw new Error("The conversation is not open.");
+    setConversationError(null);
+    const input = { conversationId, text, images: [] };
+    switch (action) {
+      case "prompt.submit":
+        await client.send({ type: action, ...input });
+        break;
+      case "prompt.steer":
+        await client.send({ type: action, ...input });
+        break;
+      case "prompt.followUp":
+        await client.send({ type: action, ...input });
+        break;
+    }
+  }
+
+  async function abortConversation(): Promise<void> {
+    if (selectedConversation === undefined) return;
+    setConversationError(null);
+    await client.send({
+      type: "conversation.abort",
+      conversationId: selectedConversation.id,
+    });
+  }
+
+  async function closeConversation(): Promise<void> {
+    if (selectedConversation === undefined || lifecycleAction !== null) return;
+    setLifecycleAction("close");
+    setConversationError(null);
+    try {
+      await client.send({
+        type: "conversation.close",
+        conversationId: selectedConversation.id,
+      });
+      client.selectConversation(null);
+    } catch (error) {
+      setConversationError(errorMessage(error, "Unable to close the conversation."));
+    } finally {
+      setLifecycleAction(null);
+    }
+  }
+
+  async function deleteConversation(): Promise<void> {
+    if (selectedSummary === undefined || lifecycleAction !== null) return;
+    const confirmed = window.confirm(
+      `Delete “${selectedSummary.title.trim() || "Untitled conversation"}”? This cannot be undone.`,
+    );
+    if (!confirmed) return;
+
+    setLifecycleAction("delete");
+    setConversationError(null);
+    try {
+      if (selectedConversation !== undefined) {
+        await client.send({
+          type: "conversation.close",
+          conversationId: selectedConversation.id,
+        });
+      }
+      await client.send({
+        type: "conversation.delete",
+        conversationId: selectedSummary.id,
+      });
+      client.setDraft(selectedSummary.id, "");
+      client.selectConversation(null);
+    } catch (error) {
+      setConversationError(errorMessage(error, "Unable to delete the conversation."));
+    } finally {
+      setLifecycleAction(null);
+    }
+  }
+
   const visibleError = conversationError ?? server.error ?? chat.lastError?.message;
 
   return (
@@ -185,8 +262,12 @@ export function App() {
               conversation={selectedConversation}
               summary={selectedSummary}
               loading={loadingConversationId === selectedSummary.id}
+              connected={connected}
+              actionPending={lifecycleAction}
+              onClose={() => void closeConversation()}
+              onDelete={() => void deleteConversation()}
             />
-            <section className="conversation-content" aria-live="polite">
+            <section className="conversation-content">
               {visibleError !== undefined && visibleError !== null && (
                 <div className="page-error conversation-alert" role="alert">{visibleError}</div>
               )}
@@ -204,17 +285,24 @@ export function App() {
                       : `Restore ${selectedSummary.cwd} before reopening this session.`}
                   </p>
                 </div>
-              ) : selectedConversation.messages.length === 0 ? (
-                <div className="content-empty">
-                  <h2>Ready for a new prompt</h2>
-                  <p>This session is open in {selectedConversation.cwd}.</p>
-                </div>
               ) : (
-                <div className="content-empty">
-                  <h2>Conversation loaded</h2>
-                  <p>
-                    {selectedConversation.messages.length} {selectedConversation.messages.length === 1 ? "message" : "messages"} in this session.
-                  </p>
+                <div className="conversation-workspace">
+                  <MessageTimeline
+                    messages={selectedConversation.messages}
+                    streaming={selectedConversation.status === "streaming"}
+                    cwd={selectedConversation.cwd}
+                  />
+                  <Composer
+                    key={selectedConversation.id}
+                    status={selectedConversation.status}
+                    draft={chat.drafts[selectedConversation.id] ?? ""}
+                    queue={selectedConversation.queue}
+                    connected={connected}
+                    onDraftChange={(text) => client.setDraft(selectedConversation.id, text)}
+                    onPrompt={prompt}
+                    onAbort={abortConversation}
+                    onError={(error) => setConversationError(errorMessage(error, "Unable to send the command."))}
+                  />
                 </div>
               )}
             </section>

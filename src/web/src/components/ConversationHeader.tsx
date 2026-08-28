@@ -2,12 +2,20 @@ import type {
   ConversationState,
   ConversationSummary,
 } from "../../../shared/protocol.js";
+import {
+  canCloseConversation,
+  canDeleteConversation,
+} from "./chat-interactions.js";
 import { conversationTitle } from "./conversation-list.js";
 
 export interface ConversationHeaderProps {
   readonly conversation: ConversationState | undefined;
   readonly summary: ConversationSummary;
   readonly loading: boolean;
+  readonly connected: boolean;
+  readonly actionPending: "close" | "delete" | null;
+  readonly onClose: () => void;
+  readonly onDelete: () => void;
 }
 
 function headerStatus(
@@ -33,6 +41,10 @@ export function ConversationHeader({
   conversation,
   summary,
   loading,
+  connected,
+  actionPending,
+  onClose,
+  onDelete,
 }: ConversationHeaderProps) {
   const model = conversation?.model;
   const modelLabel = model === undefined
@@ -42,6 +54,9 @@ export function ConversationHeader({
       : model.name ?? model.id;
   const status = loading ? "Opening" : headerStatus(conversation, summary);
   const statusClass = loading ? "opening" : (conversation?.status ?? summary.status);
+  const actualStatus = conversation?.status ?? summary.status;
+  const closeEnabled = conversation !== undefined && canCloseConversation(conversation.status);
+  const deleteEnabled = canDeleteConversation(actualStatus);
 
   return (
     <header className="conversation-header">
@@ -52,20 +67,42 @@ export function ConversationHeader({
           {conversation?.cwd ?? summary.cwd}
         </p>
       </div>
-      <dl className="conversation-facts">
-        <div>
-          <dt>Model</dt>
-          <dd title={model === null || model === undefined ? undefined : `${model.provider}/${model.id}`}>
-            {modelLabel}
-          </dd>
+      <div className="conversation-header-end">
+        <dl className="conversation-facts">
+          <div>
+            <dt>Model</dt>
+            <dd title={model === null || model === undefined ? undefined : `${model.provider}/${model.id}`}>
+              {modelLabel}
+            </dd>
+          </div>
+          <div>
+            <dt>Status</dt>
+            <dd className={`header-status status-${statusClass}`}>
+              <i aria-hidden="true" />{status}
+            </dd>
+          </div>
+        </dl>
+        <div className="conversation-header-actions">
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={!connected || loading || actionPending !== null || !closeEnabled}
+            title={closeEnabled ? "Close this live session" : "Active runs must finish or be aborted before closing"}
+            onClick={onClose}
+          >
+            {actionPending === "close" ? "Closing…" : "Close"}
+          </button>
+          <button
+            className="danger-button"
+            type="button"
+            disabled={!connected || loading || actionPending !== null || !deleteEnabled}
+            title={deleteEnabled ? "Delete this conversation permanently" : "Active runs cannot be deleted"}
+            onClick={onDelete}
+          >
+            {actionPending === "delete" ? "Deleting…" : "Delete"}
+          </button>
         </div>
-        <div>
-          <dt>Status</dt>
-          <dd className={`header-status status-${statusClass}`}>
-            <i aria-hidden="true" />{status}
-          </dd>
-        </div>
-      </dl>
+      </div>
     </header>
   );
 }

@@ -332,6 +332,8 @@ Implement:
 
 ### T6.3 Build text chat interactions
 
+**Status:** Complete — incremental text messages, per-conversation multiline drafts, explicit streaming delivery/abort controls, and guarded close/delete actions are implemented in [`src/web/src/components/`](src/web/src/components/).
+
 - Render user and assistant text incrementally.
 - Add a multiline composer with keyboard-accessible submit behavior.
 - Show submit while idle and explicit steer/follow-up/abort controls while streaming.

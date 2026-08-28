@@ -444,6 +444,57 @@ describe("ChatSocketClient", () => {
     client.disconnect();
   });
 
+  it("reconnects without a selection by listing workspaces only", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    let request = 0;
+    const client = new ChatSocketClient({
+      url: "ws://test/ws",
+      webSocketFactory: () => {
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        return socket as unknown as WebSocket;
+      },
+      requestId: () => `unselected-${++request}`,
+      initialReconnectDelayMs: 10,
+      maxReconnectDelayMs: 10,
+    });
+
+    client.connect();
+    sockets[0]?.server({ type: "ready", serverVersion: "1" });
+    sockets[0]?.server({
+      type: "workspaces",
+      requestId: "unselected-1",
+      workspaces: [workspace],
+    });
+    await flush();
+    expect(sockets[0]?.commands()).toEqual([
+      { type: "workspace.list", requestId: "unselected-1" },
+    ]);
+    expect(client.getState().selectedWorkspaceId).toBeNull();
+
+    sockets[0]?.remoteClose();
+    await vi.advanceTimersByTimeAsync(10);
+    sockets[1]?.server({ type: "ready", serverVersion: "1" });
+    sockets[1]?.server({
+      type: "workspaces",
+      requestId: "unselected-2",
+      workspaces: [workspace],
+    });
+    await flush();
+
+    expect(sockets[1]?.commands()).toEqual([
+      { type: "workspace.list", requestId: "unselected-2" },
+    ]);
+    expect(client.getState()).toMatchObject({
+      connection: "connected",
+      selectedWorkspaceId: null,
+      history: [],
+      historyWorkspaceId: null,
+    });
+    client.disconnect();
+  });
+
   it("reconnects with bounded backoff and reloads only selected history and state", async () => {
     vi.useFakeTimers();
     const sockets: FakeSocket[] = [];

@@ -621,6 +621,91 @@ describe("WebSocket command server", () => {
     second.close();
   });
 
+  it("rejects workspace path changes and deletion while a live runtime owns it", async () => {
+    const update = vi.fn();
+    const remove = vi.fn();
+    let row = defaultWorkspace;
+    const registry: ProtocolRegistry = {
+      create: vi.fn(async () => ({ id: state.id })),
+      open: vi.fn(async () => ({ id: state.id })),
+      getState: vi.fn(async () => state),
+      close: vi.fn(async () => undefined),
+      fork: vi.fn(async () => ({ conversation: state, editorText: "" })),
+      prompt: vi.fn(async () => undefined),
+      abort: vi.fn(async () => undefined),
+      hasLiveWorkspace: (workspaceId) => workspaceId === WORKSPACE_ID,
+      subscribe: () => () => undefined,
+    };
+    const history: ProtocolHistory = {
+      list: vi.fn(async () => []),
+      resolve: vi.fn(async () => ({ summary })),
+      delete: vi.fn(async () => []),
+    };
+    const workspaces: ProtocolWorkspaceRepository = {
+      list: () => [row],
+      requireAvailable: () => row,
+      create: () => row,
+      update: (workspaceId, changes) => {
+        update(workspaceId, changes);
+        row = { ...row, ...changes };
+        return row;
+      },
+      delete: remove,
+    };
+    const server = createChatWcaServer(
+      loadConfig({ CHATWCA_DATA_DIR: "/tmp" }, "/tmp"),
+      "workspace-busy-integration",
+      { registry, history, workspaces },
+    );
+    servers.push(server);
+    await new Promise<void>((resolve) =>
+      server.httpServer.listen(0, "127.0.0.1", resolve),
+    );
+    const { port } = server.httpServer.address() as AddressInfo;
+    const socket = new WebSocket(`ws://127.0.0.1:${String(port)}/ws`);
+    await expect(nextMessage(socket)).resolves.toMatchObject({ type: "ready" });
+
+    const rename = nextMessage(socket);
+    socket.send(JSON.stringify({
+      type: "workspace.update",
+      requestId: "rename-live",
+      workspaceId: WORKSPACE_ID,
+      name: "Renamed while live",
+    }));
+    await expect(rename).resolves.toMatchObject({
+      type: "workspaces",
+      requestId: "rename-live",
+      workspaces: [{ name: "Renamed while live", path: defaultWorkspace.path }],
+    });
+
+    for (const command of [
+      {
+        type: "workspace.update",
+        requestId: "repath-live",
+        workspaceId: WORKSPACE_ID,
+        path: "/replacement",
+      },
+      {
+        type: "workspace.delete",
+        requestId: "delete-live",
+        workspaceId: WORKSPACE_ID,
+      },
+    ]) {
+      const response = nextMessage(socket);
+      socket.send(JSON.stringify(command));
+      await expect(response).resolves.toMatchObject({
+        type: "error",
+        requestId: command.requestId,
+        code: "workspace_busy",
+      });
+    }
+
+    expect(update).toHaveBeenCalledOnce();
+    expect(remove).not.toHaveBeenCalled();
+    expect(history.list).not.toHaveBeenCalled();
+    socket.close();
+  });
+
   it("rejects oversized fragmented payloads inside ws before command dispatch", async () => {
     const prompt = vi.fn(async () => undefined);
     const registry: ProtocolRegistry = {

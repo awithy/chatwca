@@ -159,11 +159,14 @@ function fixtureById(conversationId: string): FixtureConversation {
   return fixture;
 }
 
-function summary(fixture: FixtureConversation): ConversationSummary {
+function summary(
+  fixture: FixtureConversation,
+  workspace: Pick<WorkspaceSummary, "id" | "path">,
+): ConversationSummary {
   const { state } = fixture;
   return {
     id: state.id,
-    workspaceId: state.workspaceId,
+    workspaceId: workspace.id,
     sessionFile: state.sessionFile,
     title: state.title,
     cwd: state.cwd,
@@ -179,11 +182,31 @@ function summary(fixture: FixtureConversation): ConversationSummary {
   };
 }
 
-function listedHistory(workspaceId: string): ConversationSummary[] {
+function listedHistory(
+  workspace: Pick<WorkspaceSummary, "id" | "path">,
+): ConversationSummary[] {
   return [...conversations.values()]
-    .filter((fixture) => fixture.state.workspaceId === workspaceId)
-    .map(summary)
+    .filter((fixture) => fixture.state.cwd === workspace.path)
+    .map((fixture) => summary(fixture, workspace))
     .sort((left, right) => right.modifiedAt - left.modifiedAt);
+}
+
+function scheduleOutOfOrderHistory(workspace: Pick<WorkspaceSummary, "id" | "path">): void {
+  if (!workspace.path.includes("out-of-order-target")) return;
+  const staleWorkspace = workspaceRows.find((candidate) =>
+    candidate.path.includes("out-of-order-source"),
+  );
+  if (staleWorkspace === undefined) return;
+  setTimeout(() => {
+    const message = JSON.stringify({
+      type: "history",
+      workspaceId: staleWorkspace.id,
+      conversations: listedHistory(staleWorkspace),
+    });
+    for (const client of server.webSocketServer.clients) {
+      if (client.readyState === client.OPEN) client.send(message);
+    }
+  }, 150);
 }
 
 function emit(fixture: FixtureConversation, event: ConversationEvent): void {
@@ -369,13 +392,20 @@ const registry: ProtocolRegistry = {
     addFixture(emptyState(id, "Untitled conversation", workspace));
     return { id };
   },
-  async open(_workspace, sessionFile) {
+  async open(workspace, sessionFile) {
     const fixture = [...conversations.values()].find(
       (candidate) => candidate.state.sessionFile === sessionFile,
     );
-    if (fixture === undefined) throw new Error("Unknown fixture session file");
+    if (fixture === undefined || fixture.state.cwd !== workspace.path) {
+      throw new Error("Unknown fixture session file");
+    }
     fixture.closed = false;
-    fixture.state = { ...fixture.state, status: "idle", lastActiveAt: nextTime() };
+    fixture.state = {
+      ...fixture.state,
+      workspaceId: workspace.id,
+      status: "idle",
+      lastActiveAt: nextTime(),
+    };
     return { id: fixture.state.id };
   },
   async getState(conversationId) {
@@ -469,20 +499,21 @@ const registry: ProtocolRegistry = {
 
 const history: ProtocolHistory = {
   async list(workspace) {
-    return listedHistory(workspace.id);
+    scheduleOutOfOrderHistory(workspace);
+    return listedHistory(workspace);
   },
   async resolve(workspace, conversationId) {
     const fixture = fixtureById(conversationId);
-    if (fixture.state.workspaceId !== workspace.id) throw new Error("Wrong fixture workspace");
+    if (fixture.state.cwd !== workspace.path) throw new Error("Wrong fixture workspace");
     return { summary: { sessionFile: fixture.state.sessionFile } };
   },
   async delete(workspace, conversationId) {
     const fixture = fixtureById(conversationId);
-    if (fixture.state.workspaceId !== workspace.id) throw new Error("Wrong fixture workspace");
+    if (fixture.state.cwd !== workspace.path) throw new Error("Wrong fixture workspace");
     if (!fixture.closed) throw new Error("Close the fixture conversation before deleting it");
     for (const timer of fixture.timers) clearTimeout(timer);
     conversations.delete(conversationId);
-    return listedHistory(workspace.id);
+    return listedHistory(workspace);
   },
 };
 
@@ -501,7 +532,7 @@ const workspaces: ProtocolWorkspaceRepository = {
       path: input.path.trim(),
       createdAt: nextTime(),
       updatedAt: nextTime(),
-      available: true,
+      available: !input.path.includes("fixture-unavailable"),
     };
     workspaceRows = [...workspaceRows, workspace];
     return workspace;
@@ -513,6 +544,9 @@ const workspaces: ProtocolWorkspaceRepository = {
       ...current,
       ...(changes.name === undefined ? {} : { name: changes.name.trim() }),
       ...(changes.path === undefined ? {} : { path: changes.path.trim() }),
+      available: changes.path === undefined
+        ? current.available
+        : !changes.path.includes("fixture-unavailable"),
       updatedAt: nextTime(),
     };
     workspaceRows = workspaceRows.map((item) => item.id === workspaceId ? updated : item);

@@ -34,7 +34,23 @@ test("fork selects a new conversation and prefills an editable unsent prompt", a
   await deleteSelectedConversation(page);
 });
 
-test("recovers the selected streaming conversation after a socket interruption", async ({ page }) => {
+test("recovers only the in-memory selected workspace and conversation after a socket interruption", async ({ page }) => {
+  const sent: Array<{
+    socket: number;
+    type?: string;
+    workspaceId?: string;
+    conversationId?: string;
+  }> = [];
+  let socketSequence = 0;
+  page.on("websocket", (socket) => {
+    socketSequence += 1;
+    const socketId = socketSequence;
+    socket.on("framesent", ({ payload }) => {
+      if (typeof payload !== "string") return;
+      sent.push({ socket: socketId, ...(JSON.parse(payload) as object) });
+    });
+  });
+
   await page.addInitScript(() => {
     const NativeWebSocket = window.WebSocket;
     class CountingWebSocket extends NativeWebSocket {
@@ -73,6 +89,19 @@ test("recovers the selected streaming conversation after a socket interruption",
   );
   await expect(page.locator(".header-status")).toContainText("Idle");
   await expect(page.getByRole("textbox", { name: "Message" })).toHaveValue("");
+
+  const initiallySelectedWorkspace = sent.find(
+    ({ socket, type }) => socket === 1 && type === "history.list",
+  )?.workspaceId;
+  const reconnectSocket = Math.max(...sent.map(({ socket }) => socket));
+  const reconnectCommands = sent.filter(({ socket }) => socket === reconnectSocket);
+  expect(reconnectCommands[0]?.type).toBe("workspace.list");
+  expect(reconnectCommands.filter(({ type }) => type === "history.list")).toEqual([
+    expect.objectContaining({ workspaceId: initiallySelectedWorkspace }),
+  ]);
+  expect(reconnectCommands.filter(({ type }) => type === "conversation.state")).toEqual([
+    expect.objectContaining({ conversationId: expect.stringMatching(/^browser-created-/) }),
+  ]);
 
   await deleteSelectedConversation(page);
 });

@@ -454,6 +454,8 @@ In `src/server/images.ts`:
 
 ### T9.4 Add fork integration tests
 
+**Status:** Complete — isolated deterministic Pi/provider and full WebSocket client integration coverage verifies source preservation, target/run guards, failure cleanup, fork identity/history, and editable editor prefill.
+
 Verify:
 
 - source history/file/runtime do not change;

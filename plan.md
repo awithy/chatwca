@@ -183,6 +183,8 @@ In `src/server/session-history.ts`:
 
 ### T3.4 Implement message serialization
 
+**Status:** Complete — active-branch projection, defensive normalized message conversion, linked tools, UTF-8-safe output bounds, and fixture-driven coverage are implemented in [`src/server/serialize.ts`](src/server/serialize.ts).
+
 In `src/server/serialize.ts`:
 
 - Convert Pi session entries into the normalized UI model.

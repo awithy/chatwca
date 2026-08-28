@@ -1,0 +1,163 @@
+{
+  "activeBranch": [
+    {
+      "type": "message",
+      "id": "user-1",
+      "parentId": null,
+      "timestamp": "2025-01-01T00:00:00.000Z",
+      "message": {
+        "role": "user",
+        "content": [
+          { "type": "text", "text": "Describe <script>alert('untrusted')</script>" },
+          { "type": "image", "mimeType": "image/jpeg", "data": "/9j/fixture" }
+        ],
+        "timestamp": 1000
+      }
+    },
+    {
+      "type": "thinking_level_change",
+      "id": "thinking-level-1",
+      "parentId": "user-1",
+      "timestamp": "2025-01-01T00:00:01.000Z",
+      "thinkingLevel": "high"
+    },
+    {
+      "type": "message",
+      "id": "assistant-1",
+      "parentId": "thinking-level-1",
+      "timestamp": "2025-01-01T00:00:02.000Z",
+      "message": {
+        "role": "assistant",
+        "content": [
+          { "type": "thinking", "thinking": "Inspect the fixture." },
+          { "type": "text", "text": "Calling <b>read</b>." },
+          { "type": "toolCall", "id": "call-ok", "name": "read", "arguments": { "path": "README.md" } }
+        ],
+        "usage": {
+          "input": 12,
+          "output": 7,
+          "cacheRead": 3,
+          "cacheWrite": 2,
+          "totalTokens": 24,
+          "cost": { "input": 0.01, "output": 0.02, "cacheRead": 0, "cacheWrite": 0, "total": 0.03 }
+        },
+        "stopReason": "toolUse",
+        "timestamp": 2000
+      }
+    },
+    {
+      "type": "message",
+      "id": "tool-result-ok",
+      "parentId": "assistant-1",
+      "timestamp": "2025-01-01T00:00:03.000Z",
+      "message": {
+        "role": "toolResult",
+        "toolCallId": "call-ok",
+        "toolName": "read",
+        "content": [
+          { "type": "text", "text": "<b>raw tool output</b>" },
+          { "type": "text", "text": "π🙂tail" },
+          { "type": "image", "mimeType": "image/png", "data": "iVBORfixture" }
+        ],
+        "isError": false,
+        "timestamp": 3000
+      }
+    },
+    {
+      "type": "compaction",
+      "id": "compaction-1",
+      "parentId": "tool-result-ok",
+      "timestamp": "2025-01-01T00:00:04.000Z",
+      "summary": "Older context summary",
+      "firstKeptEntryId": "user-1",
+      "tokensBefore": 1000
+    },
+    {
+      "type": "branch_summary",
+      "id": "branch-summary-1",
+      "parentId": "compaction-1",
+      "timestamp": "2025-01-01T00:00:05.000Z",
+      "fromId": "abandoned-1",
+      "summary": "Abandoned branch summary"
+    },
+    {
+      "type": "message",
+      "id": "assistant-failed-call",
+      "parentId": "branch-summary-1",
+      "timestamp": "2025-01-01T00:00:06.000Z",
+      "message": {
+        "role": "assistant",
+        "content": [
+          { "type": "toolCall", "id": "call-failed", "name": "bash", "arguments": { "command": "false" } }
+        ],
+        "usage": { "input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "cost": { "total": 0 } },
+        "stopReason": "toolUse",
+        "timestamp": 4000
+      }
+    },
+    {
+      "type": "message",
+      "id": "tool-result-failed",
+      "parentId": "assistant-failed-call",
+      "timestamp": "2025-01-01T00:00:07.000Z",
+      "message": {
+        "role": "toolResult",
+        "toolCallId": "call-failed",
+        "toolName": "bash",
+        "content": [{ "type": "text", "text": "exit status 1" }],
+        "isError": true,
+        "timestamp": 5000
+      }
+    },
+    {
+      "type": "message",
+      "id": "assistant-model-error",
+      "parentId": "tool-result-failed",
+      "timestamp": "2025-01-01T00:00:08.000Z",
+      "message": {
+        "role": "assistant",
+        "content": [{ "type": "text", "text": "Partial answer" }],
+        "usage": { "input": -1, "output": "bad" },
+        "stopReason": "error",
+        "errorMessage": "Provider leaked /home/operator/private and secret-key",
+        "timestamp": "malformed"
+      }
+    },
+    {
+      "type": "message",
+      "id": "malformed-user",
+      "parentId": "assistant-model-error",
+      "timestamp": "not-a-date",
+      "message": {
+        "role": "user",
+        "content": [
+          { "type": "image", "mimeType": "image/gif", "data": "ignored" },
+          { "type": "text", "text": 42 }
+        ],
+        "timestamp": null
+      }
+    },
+    {
+      "type": "message",
+      "id": "custom-message",
+      "parentId": "malformed-user",
+      "timestamp": "2025-01-01T00:00:09.000Z",
+      "message": {
+        "role": "custom",
+        "customType": "fixture",
+        "content": "Extension-owned content",
+        "display": true,
+        "timestamp": 6000
+      }
+    }
+  ],
+  "offBranch": [
+    {
+      "type": "message",
+      "id": "off-branch-user",
+      "parentId": "user-1",
+      "timestamp": "2025-01-01T01:00:00.000Z",
+      "message": { "role": "user", "content": "Do not serialize me", "timestamp": 7000 }
+    }
+  ]
+}

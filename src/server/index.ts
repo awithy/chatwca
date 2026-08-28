@@ -11,6 +11,7 @@ import {
   type ServerConfig,
 } from "./config.js";
 import { serveWebApp } from "./static.js";
+import { hasAllowedWebSocketOrigin } from "./websocket-boundary.js";
 
 interface PackageMetadata {
   readonly version?: unknown;
@@ -73,9 +74,22 @@ export function createChatWcaServer(
   serveWebApp(app);
 
   const httpServer = createHttpServer(app);
-  const webSocketServer = new WebSocketServer({
-    server: httpServer,
-    path: "/ws",
+  const webSocketServer = new WebSocketServer({ noServer: true });
+
+  httpServer.on("upgrade", (request, socket, head) => {
+    if (request.url !== "/ws") {
+      socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
+      return;
+    }
+
+    if (!hasAllowedWebSocketOrigin(request)) {
+      socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+      return;
+    }
+
+    webSocketServer.handleUpgrade(request, socket, head, (client) => {
+      webSocketServer.emit("connection", client, request);
+    });
   });
 
   webSocketServer.on("connection", (socket) => {

@@ -40,6 +40,25 @@ async function startServer(): Promise<{
   return { server, baseUrl: `http://127.0.0.1:${String(address.port)}` };
 }
 
+async function rejectedUpgradeStatus(socket: WebSocket): Promise<number> {
+  return await new Promise<number>((resolve, reject) => {
+    socket.once("unexpected-response", (_request, response) => {
+      const { statusCode } = response;
+      response.resume();
+      if (statusCode === undefined) {
+        reject(new Error("Upgrade rejection omitted an HTTP status"));
+      } else {
+        resolve(statusCode);
+      }
+    });
+    socket.once("open", () => {
+      socket.terminate();
+      reject(new Error("Expected the WebSocket upgrade to be rejected"));
+    });
+    socket.once("error", reject);
+  });
+}
+
 async function closeServer(server: ChatWcaServer): Promise<void> {
   for (const client of server.webSocketServer.clients) {
     client.terminate();
@@ -87,22 +106,54 @@ describe("server shell", () => {
     expect(JSON.stringify(body)).not.toContain("/private/pi-data");
   });
 
-  it("accepts a WebSocket connection and announces readiness", async () => {
+  it("accepts direct and same-authority browser WebSocket clients", async () => {
     const { baseUrl } = await startServer();
-    const socket = new WebSocket(baseUrl.replace(/^http/, "ws") + "/ws");
+    const socketUrl = baseUrl.replace(/^http/, "ws") + "/ws";
+    const directSocket = new WebSocket(socketUrl);
+    const browserSocket = new WebSocket(socketUrl, { origin: baseUrl });
 
-    const message = await new Promise<unknown>((resolve, reject) => {
-      socket.once("message", (data) => {
-        try {
-          resolve(JSON.parse(data.toString()));
-        } catch (error: unknown) {
-          reject(error);
-        }
-      });
-      socket.once("error", reject);
-    });
+    const messages = await Promise.all(
+      [directSocket, browserSocket].map(
+        async (socket) =>
+          await new Promise<unknown>((resolve, reject) => {
+            socket.once("message", (data) => {
+              try {
+                resolve(JSON.parse(data.toString()));
+              } catch (error: unknown) {
+                reject(error);
+              }
+            });
+            socket.once("error", reject);
+          }),
+      ),
+    );
 
-    expect(message).toEqual({ type: "ready", serverVersion: "test-version" });
-    socket.close();
+    expect(messages).toEqual([
+      { type: "ready", serverVersion: "test-version" },
+      { type: "ready", serverVersion: "test-version" },
+    ]);
+    directSocket.close();
+    browserSocket.close();
+  });
+
+  it("rejects cross-origin, malformed-origin, and unrelated upgrades", async () => {
+    const { baseUrl } = await startServer();
+    const socketBase = baseUrl.replace(/^http/, "ws");
+
+    expect(
+      await rejectedUpgradeStatus(
+        new WebSocket(`${socketBase}/ws`, {
+          origin: "http://unrelated.example:8787",
+        }),
+      ),
+    ).toBe(403);
+    expect(
+      await rejectedUpgradeStatus(
+        new WebSocket(`${socketBase}/ws`, { origin: "not-an-origin" }),
+      ),
+    ).toBe(403);
+    expect(
+      await rejectedUpgradeStatus(new WebSocket(`${socketBase}/elsewhere`)),
+    ).toBe(404);
   });
 });

@@ -260,6 +260,8 @@ Cover:
 
 ### T5.1 Secure the WebSocket upgrade boundary
 
+**Status:** Complete — `/ws` uses an explicit no-server upgrade boundary with same-authority browser Origin enforcement, origin-free direct-client support, and rejection coverage.
+
 - Attach `ws` to `/ws` only.
 - Accept browser upgrades only when `Origin` authority matches `Host`.
 - Accept direct clients that omit `Origin` as designed.

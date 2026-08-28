@@ -89,15 +89,6 @@ export interface DispatchResult {
   readonly workspaceBroadcastIncludesSender?: boolean;
 }
 
-const SHUTDOWN_REJECTED_COMMANDS: ReadonlySet<ClientCommand["type"]> = new Set([
-  "conversation.create",
-  "conversation.open",
-  "conversation.fork",
-  "prompt.submit",
-  "prompt.steer",
-  "prompt.followUp",
-]);
-
 class CommandDecodeError extends AppError {
   readonly requestId: string | undefined;
   constructor(
@@ -155,9 +146,7 @@ export async function dispatchClientCommand(
   workspaces: ProtocolWorkspaceRepository,
   shuttingDown = false,
 ): Promise<DispatchResult> {
-  if (shuttingDown && SHUTDOWN_REJECTED_COMMANDS.has(command.type)) {
-    throw new AppError(ERROR_CODES.SHUTTING_DOWN);
-  }
+  if (shuttingDown) throw new AppError(ERROR_CODES.SHUTTING_DOWN);
 
   switch (command.type) {
     case "workspace.list": {
@@ -381,6 +370,10 @@ export class WebSocketProtocol {
   }
 
   async #handleMessage(socket: WebSocket, data: RawData, isBinary: boolean): Promise<void> {
+    // Shutdown owns aborting active runs. Once protocol admission closes, no
+    // queued socket command (including workspace CRUD) may reach SQLite.
+    if (this.#shuttingDown || this.#disposed) return;
+
     let command: ClientCommand;
     try {
       command = decodeClientCommand(data, isBinary, this.#maxInboundMessageBytes);

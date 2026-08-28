@@ -31,6 +31,7 @@ describe("GracefulShutdown", () => {
         calls.push("dispose-runtimes");
       },
       disposeListeners: () => calls.push("dispose-listeners"),
+      closeStorage: () => calls.push("close-storage"),
       forceClose: () => calls.push("force-close"),
       wait: () => new Promise(() => undefined),
     });
@@ -44,10 +45,11 @@ describe("GracefulShutdown", () => {
       "reject",
       "stop-accepting",
       "notify-clients",
+      "dispose-listeners",
       "close-transports",
       "abort-active",
       "dispose-runtimes",
-      "dispose-listeners",
+      "close-storage",
     ]);
   });
 
@@ -58,6 +60,7 @@ describe("GracefulShutdown", () => {
     const disposeRuntimes = vi.fn(() => new Promise<void>(() => undefined));
     const forceClose = vi.fn();
     const disposeListeners = vi.fn();
+    const closeStorage = vi.fn();
     const shutdown = new GracefulShutdown({
       gracePeriodMs: 25,
       beginShutdown: vi.fn(),
@@ -67,6 +70,7 @@ describe("GracefulShutdown", () => {
       abortActive: () => abort.promise,
       disposeRuntimes,
       disposeListeners,
+      closeStorage,
       forceClose,
       wait: (milliseconds) => {
         expect(milliseconds).toBe(25);
@@ -82,5 +86,34 @@ describe("GracefulShutdown", () => {
     expect(disposeRuntimes).toHaveBeenCalledOnce();
     expect(forceClose).toHaveBeenCalledOnce();
     expect(disposeListeners).toHaveBeenCalledOnce();
+    expect(closeStorage).toHaveBeenCalledOnce();
+    expect(disposeRuntimes.mock.invocationCallOrder[0]).toBeLessThan(
+      closeStorage.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("reports a storage close failure once across repeated shutdown", async () => {
+    const closeFailure = new Error("close failed");
+    const onError = vi.fn();
+    const closeStorage = vi.fn(() => { throw closeFailure; });
+    const shutdown = new GracefulShutdown({
+      gracePeriodMs: 100,
+      beginShutdown: vi.fn(),
+      stopAccepting: vi.fn(),
+      notifyAndCloseClients: vi.fn(),
+      closeTransports: async () => undefined,
+      abortActive: async () => undefined,
+      disposeRuntimes: async () => undefined,
+      disposeListeners: vi.fn(),
+      closeStorage,
+      forceClose: vi.fn(),
+      wait: () => new Promise(() => undefined),
+      onError,
+    });
+
+    await Promise.all([shutdown.shutdown(), shutdown.shutdown()]);
+
+    expect(closeStorage).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledExactlyOnceWith(closeFailure);
   });
 });

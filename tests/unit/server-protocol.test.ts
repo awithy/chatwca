@@ -211,24 +211,37 @@ describe("server WebSocket protocol", () => {
     }), registry, history, workspaces)).rejects.toMatchObject({ code: ERROR_CODES.WORKSPACE_BUSY });
   });
 
-  it("rejects new runtime work during shutdown while permitting abort", async () => {
+  it("rejects all protocol admission during shutdown, including workspace writes and abort", async () => {
     const { registry, history, workspaces, calls } = services();
-    await expect(dispatchClientCommand(command({
-      type: "conversation.create",
-      requestId: "create",
-      workspaceId: workspace.id,
-    }), registry, history, workspaces, true)).rejects.toMatchObject({
-      code: ERROR_CODES.SHUTTING_DOWN,
-    });
-    await expect(dispatchClientCommand(command({
-      type: "conversation.abort",
-      requestId: "abort",
-      conversationId: state.id,
-    }), registry, history, workspaces, true)).resolves.toMatchObject({
-      response: { type: "ack", command: "conversation.abort" },
-    });
+    for (const shuttingDownCommand of [
+      {
+        type: "conversation.create",
+        requestId: "create",
+        workspaceId: workspace.id,
+      },
+      {
+        type: "workspace.create",
+        requestId: "workspace-create",
+        name: "Blocked",
+        path: "/blocked",
+      },
+      {
+        type: "conversation.abort",
+        requestId: "abort",
+        conversationId: state.id,
+      },
+    ]) {
+      await expect(dispatchClientCommand(
+        command(shuttingDownCommand),
+        registry,
+        history,
+        workspaces,
+        true,
+      )).rejects.toMatchObject({ code: ERROR_CODES.SHUTTING_DOWN });
+    }
     expect(calls.create).not.toHaveBeenCalled();
-    expect(calls.abort).toHaveBeenCalledWith(state.id);
+    expect(calls.abort).not.toHaveBeenCalled();
+    expect(workspaces.create).not.toHaveBeenCalled();
   });
 
   it("routes prompt behaviors and source-preserving fork", async () => {

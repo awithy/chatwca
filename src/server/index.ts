@@ -11,8 +11,14 @@ import {
   type ServerConfig,
 } from "./config.js";
 import { ConversationRegistry } from "./conversation-registry.js";
-import { openDatabase } from "./database.js";
-import { PiRuntimeFactory } from "./pi-runtime.js";
+import {
+  openDatabase,
+  type ChatWcaDatabase,
+} from "./database.js";
+import {
+  PiRuntimeFactory,
+  type PiRuntimeFactoryPort,
+} from "./pi-runtime.js";
 import type { OutboundFlowOptions } from "./outbound-flow.js";
 import {
   DEFAULT_MAX_INBOUND_MESSAGE_BYTES,
@@ -21,7 +27,10 @@ import {
   type ProtocolRegistry,
   type ProtocolWorkspaceRepository,
 } from "./protocol.js";
-import { SessionHistory } from "./session-history.js";
+import {
+  SessionHistory,
+  type SessionHistoryOptions,
+} from "./session-history.js";
 import {
   GracefulShutdown,
   WEBSOCKET_RESTART_CLOSE_CODE,
@@ -53,6 +62,8 @@ export interface ChatWcaProtocolServices {
   readonly outboundFlow?: OutboundFlowOptions;
   /** Production supplies the registry here so transport and Pi teardown share one bound. */
   readonly shutdown?: ShutdownRuntimeOwner;
+  /** Production supplies the process-wide SQLite owner. */
+  readonly closeStorage?: () => void;
   readonly onInternalError?: (error: unknown) => void;
 }
 
@@ -145,7 +156,10 @@ export function createChatWcaServer(
   services?: ChatWcaProtocolServices,
 ): ChatWcaServer {
   const app = express();
-  let accepting = true;
+  // Readiness is distinct from construction: production constructs this shell
+  // only after SQLite and shared Pi services initialize, then becomes ready
+  // when its network listener is actually bound.
+  let accepting = false;
 
   app.get("/api/health", (_request, response) => {
     response.json({ ready: accepting, version: serverVersion });
@@ -171,6 +185,9 @@ export function createChatWcaServer(
     maxPayload: maxInboundMessageBytes,
   });
 
+  httpServer.on("listening", () => {
+    if (!gracefulShutdown.started) accepting = true;
+  });
   httpServer.on("upgrade", (request, socket, head) => {
     if (!accepting) {
       socket.end("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n");
@@ -257,6 +274,7 @@ export function createChatWcaServer(
     abortActive: () => shutdownOwner?.abortActive() ?? Promise.resolve(),
     disposeRuntimes: () => shutdownOwner?.dispose() ?? Promise.resolve(),
     disposeListeners: () => protocol?.dispose(),
+    closeStorage: () => services?.closeStorage?.(),
     forceClose: () => {
       protocol?.terminateClients();
       if (protocol === undefined) {
@@ -278,19 +296,82 @@ export function createChatWcaServer(
   };
 }
 
-async function main(): Promise<void> {
-  try {
-    const config = loadConfig();
-    const database = openDatabase(config.dataDir);
-    const workspaces = new WorkspaceRepository(database.connection);
-    const runtimeFactory = await PiRuntimeFactory.create({
-      ...(config.piCodingAgentDir === undefined
-        ? {}
-        : { agentDir: config.piCodingAgentDir }),
-    });
+export interface ChatWcaStartupOptions {
+  readonly loadConfiguration?: () => Readonly<ServerConfig>;
+  readonly openDatabase?: (dataDir: string) => ChatWcaDatabase;
+  readonly createWorkspaceRepository?: (
+    connection: ChatWcaDatabase["connection"],
+  ) => ProtocolWorkspaceRepository;
+  readonly createRuntimeFactory?: (
+    config: Readonly<ServerConfig>,
+  ) => Promise<PiRuntimeFactoryPort>;
+  /** Injectable only to assert that startup performs no Pi history listing. */
+  readonly listSessions?: SessionHistoryOptions["listSessions"];
+  readonly serverVersion?: string;
+  readonly listen?: (
+    server: ChatWcaServer,
+    config: Readonly<ServerConfig>,
+  ) => Promise<void>;
+  readonly onInternalError?: (error: unknown) => void;
+}
 
-    let registry: ConversationRegistry | undefined;
+function listen(
+  server: ChatWcaServer,
+  config: Readonly<ServerConfig>,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onError = (error: Error) => {
+      server.httpServer.off("listening", onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.httpServer.off("error", onError);
+      resolve();
+    };
+    server.httpServer.once("error", onError);
+    server.httpServer.once("listening", onListening);
+    try {
+      server.httpServer.listen(config.port, config.host);
+    } catch (error) {
+      server.httpServer.off("error", onError);
+      server.httpServer.off("listening", onListening);
+      reject(error);
+    }
+  });
+}
+
+/**
+ * Initialize process-owned services in dependency order and bind listeners last.
+ * Any failure after SQLite opens unwinds all ownership before rejecting.
+ */
+export async function startChatWcaServer(
+  options: ChatWcaStartupOptions = {},
+): Promise<ChatWcaServer> {
+  const reportError = options.onInternalError ?? (() => undefined);
+  let database: ChatWcaDatabase | undefined;
+  let registry: ConversationRegistry | undefined;
+  let server: ChatWcaServer | undefined;
+
+  try {
+    const config = (options.loadConfiguration ?? loadConfig)();
+    database = (options.openDatabase ?? openDatabase)(config.dataDir);
+    const workspaces = (
+      options.createWorkspaceRepository ??
+      ((connection) => new WorkspaceRepository(connection))
+    )(database.connection);
+    const runtimeFactory = await (
+      options.createRuntimeFactory ??
+      ((loadedConfig) => PiRuntimeFactory.create({
+        ...(loadedConfig.piCodingAgentDir === undefined
+          ? {}
+          : { agentDir: loadedConfig.piCodingAgentDir }),
+      }))
+    )(config);
+
     const history = new SessionHistory({
+      ...(options.listSessions === undefined
+        ? {}
+        : { listSessions: options.listSessions }),
       getLiveStatus: (identity) => {
         const byFile = registry?.getBySessionFile(identity.sessionFile);
         const byId = registry?.get(identity.id);
@@ -310,30 +391,60 @@ async function main(): Promise<void> {
         maxImageBytes: config.maxImageBytes,
         maxTotalImageBytes: config.maxTotalImageBytes,
       },
-      onListenerError: (error) => console.error("ChatWCA runtime error", error),
+      onListenerError: reportError,
     });
 
-    const server = createChatWcaServer(config, readServerVersion(), {
-      registry,
-      history,
-      workspaces,
-      shutdown: registry,
-      onInternalError: (error) =>
-        console.error("ChatWCA protocol error", error),
+    server = createChatWcaServer(
+      config,
+      options.serverVersion ?? readServerVersion(),
+      {
+        registry,
+        history,
+        workspaces,
+        shutdown: registry,
+        closeStorage: () => database?.close(),
+        onInternalError: reportError,
+      },
+    );
+    await (options.listen ?? listen)(server, config);
+    return server;
+  } catch (error) {
+    if (server !== undefined) {
+      // The normal shutdown coordinator owns registry/protocol/database order.
+      await server.shutdown().catch(reportError);
+    } else {
+      // Construction failed before a coordinator existed. There can be no
+      // listener, but registry and SQLite ownership may already exist.
+      registry?.beginShutdown();
+      await registry?.dispose().catch(reportError);
+      try {
+        database?.close();
+      } catch (cleanupError) {
+        reportError(cleanupError);
+      }
+    }
+    throw error;
+  }
+}
+
+async function main(): Promise<void> {
+  try {
+    const server = await startChatWcaServer({
+      onInternalError: (error) => console.error("ChatWCA internal error", error),
     });
     installShutdownSignalHandlers(server);
-
-    server.httpServer.listen(config.port, config.host, () => {
-      console.log(
-        `ChatWCA listening on http://${config.host}:${String(config.port)}`,
-      );
-    });
+    const address = server.httpServer.address();
+    const display =
+      typeof address === "object" && address !== null
+        ? `${address.address}:${String(address.port)}`
+        : String(address);
+    console.log(`ChatWCA listening on http://${display}`);
   } catch (error: unknown) {
-    const message =
-      error instanceof ConfigurationError
-        ? error.message
-        : "Unexpected error while starting ChatWCA";
-    console.error(`ChatWCA startup error: ${message}`);
+    if (error instanceof ConfigurationError) {
+      console.error(`ChatWCA startup error: ${error.message}`);
+    } else {
+      console.error("ChatWCA startup error: Unexpected error while starting ChatWCA", error);
+    }
     process.exitCode = 1;
   }
 }

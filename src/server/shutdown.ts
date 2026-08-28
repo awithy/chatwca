@@ -18,7 +18,10 @@ export interface GracefulShutdownOptions {
   readonly closeTransports: () => Promise<void>;
   readonly abortActive: () => Promise<void>;
   readonly disposeRuntimes: () => Promise<void>;
+  /** Detaches protocol subscriptions after admission closes and before Pi teardown. */
   readonly disposeListeners: () => void;
+  /** Closes process storage after protocol and Pi teardown have both started. */
+  readonly closeStorage: () => void;
   readonly forceClose: () => void;
   /** Injectable deadline for deterministic tests. */
   readonly wait?: (milliseconds: number) => Promise<void>;
@@ -95,6 +98,13 @@ export class GracefulShutdown {
     } catch (error) {
       this.#onError(error);
     }
+    // No registry event or queued history refresh may retain access to the
+    // workspace repository once SQLite teardown becomes possible.
+    try {
+      this.#options.disposeListeners();
+    } catch (error) {
+      this.#onError(error);
+    }
 
     let transportClose: Promise<void>;
     try {
@@ -143,8 +153,11 @@ export class GracefulShutdown {
       }
     }
 
+    // On the deadline path #disposeRuntimes() is invoked (and synchronously
+    // detaches each runtime subscription) before storage is closed. Storage
+    // closure is deliberately outside stalled SDK/network promises.
     try {
-      this.#options.disposeListeners();
+      this.#options.closeStorage();
     } catch (error) {
       this.#onError(error);
     }

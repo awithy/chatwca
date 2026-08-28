@@ -24,6 +24,7 @@ import type { ConversationState } from "../../src/shared/protocol.js";
 
 const state: ConversationState = {
   id: "shutdown-conversation",
+  workspaceId: "shutdown-workspace",
   sessionFile: "/sessions/shutdown.jsonl",
   title: "Shutdown test",
   cwd: "/workspace",
@@ -90,7 +91,7 @@ describe("server graceful shutdown", () => {
 
   it("notifies and closes clients, aborts active work, disposes, and stops HTTP idempotently", async () => {
     const calls: string[] = [];
-    const unsubscribe = vi.fn();
+    const unsubscribe = vi.fn(() => calls.push("unsubscribe"));
     const registry: ProtocolRegistry = {
       create: vi.fn(async () => ({ id: state.id })),
       open: vi.fn(async () => ({ id: state.id })),
@@ -99,6 +100,7 @@ describe("server graceful shutdown", () => {
       fork: vi.fn(async () => ({ conversation: state, editorText: "" })),
       prompt: vi.fn(async () => undefined),
       abort: vi.fn(async () => undefined),
+      hasLiveWorkspace: vi.fn(() => false),
       subscribe: (_listener: ConversationRegistryListener) => unsubscribe,
     };
     const history: ProtocolHistory = {
@@ -115,6 +117,7 @@ describe("server graceful shutdown", () => {
         calls.push("dispose");
       },
     };
+    const closeStorage = vi.fn(() => calls.push("close-storage"));
     const config = loadConfig(
       {
         CHATWCA_DATA_DIR: "/tmp",
@@ -133,6 +136,7 @@ describe("server graceful shutdown", () => {
         delete: () => { throw new Error("Unexpected workspace delete"); },
       },
       shutdown: owner,
+      closeStorage,
     });
     const port = await listen(server);
     const socket = new WebSocket(`ws://127.0.0.1:${String(port)}/ws`);
@@ -160,8 +164,15 @@ describe("server graceful shutdown", () => {
     });
     await first;
 
-    expect(calls).toEqual(["begin", "abort", "dispose"]);
+    expect(calls).toEqual([
+      "begin",
+      "unsubscribe",
+      "abort",
+      "dispose",
+      "close-storage",
+    ]);
     expect(unsubscribe).toHaveBeenCalledOnce();
+    expect(closeStorage).toHaveBeenCalledOnce();
     expect(server.httpServer.listening).toBe(false);
     expect(server.webSocketServer.clients.size).toBe(0);
   });

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import Database from "better-sqlite3";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   DATABASE_BUSY_TIMEOUT_MS,
@@ -125,5 +125,21 @@ describe("openDatabase", () => {
 
     expect(database.closed).toBe(true);
     expect(database.connection.open).toBe(false);
+  });
+
+  it("does not retry the native close boundary after a close failure", () => {
+    const database = openDatabase(temporaryDirectory(), ":memory:");
+    const failure = new Error("native close failed");
+    const close = vi.spyOn(database.connection, "close").mockImplementation(() => {
+      throw failure;
+    });
+
+    expect(() => database.close()).toThrow(failure);
+    expect(() => database.close()).not.toThrow();
+    expect(close).toHaveBeenCalledOnce();
+    expect(database.closed).toBe(true);
+
+    close.mockRestore();
+    database.connection.close();
   });
 });

@@ -46,8 +46,11 @@ export class ChatWcaDatabase {
 
   close(): void {
     if (this.#closed) return;
-    if (this.connection.open) this.connection.close();
+    // Claim closure before entering the native boundary. A failed close is
+    // reported by the caller, but repeated shutdown must never invoke SQLite
+    // close more than once.
     this.#closed = true;
+    if (this.connection.open) this.connection.close();
   }
 }
 

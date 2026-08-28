@@ -64,8 +64,12 @@ export interface ProtocolHistory {
 
 export interface ProtocolWorkspaceRepository {
   list(): WorkspaceSummary[];
-  requireAvailable(workspaceId: string): { readonly id: string; readonly path: string };
-  create(input: { readonly name: string; readonly path: string }): WorkspaceSummary;
+  requireAvailable(workspaceId: string): SessionHistoryWorkspace;
+  create(input: {
+    readonly name: string;
+    readonly path: string;
+    readonly sessionStorage: WorkspaceSummary["sessionStorage"];
+  }): WorkspaceSummary;
   update(workspaceId: string, changes: UpdateWorkspaceInput): WorkspaceSummary;
   delete(workspaceId: string): void;
 }
@@ -156,7 +160,11 @@ export async function dispatchClientCommand(
       };
     }
     case "workspace.create": {
-      workspaces.create({ name: command.name, path: command.path });
+      workspaces.create({
+        name: command.name,
+        path: command.path,
+        sessionStorage: command.sessionStorage,
+      });
       const authoritative = workspaces.list();
       return {
         response: { type: "workspaces", requestId: command.requestId, workspaces: authoritative },

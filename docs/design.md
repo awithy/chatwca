@@ -12,7 +12,7 @@ ChatWCA is a single-user, dark-only web interface for the Pi coding agent. A Nod
 
 The server intentionally binds to `0.0.0.0` and has no authentication or authorization. It is intended to run inside a trusted, segmented LAN. Network access control is an infrastructure concern and is outside the application.
 
-A workspace is a user-named, canonical path to a directory. ChatWCA stores workspace definitions in its own SQLite database. The server does not scan Pi's global session history during startup or browser connection; it lists Pi sessions only for a workspace selected by the browser.
+A workspace is a user-named, canonical path to a directory with an immutable session-storage policy. ChatWCA stores workspace definitions in its own SQLite database. The server does not scan Pi's global session history during startup or browser connection; it lists Pi sessions only for a workspace selected by the browser.
 
 Each conversation:
 
@@ -29,6 +29,7 @@ Each conversation:
 - Provide a responsive browser-based Pi chat interface.
 - Preserve compatibility with sessions created by the Pi CLI.
 - Create, rename, update, list, and remove named workspaces.
+- Optionally store a workspace's Pi sessions under `<workspace>/.chatwca/sessions`.
 - List, open, switch, create, and delete persisted conversations within a selected workspace.
 - Avoid scanning sessions belonging to unselected workspaces.
 - Keep multiple conversations alive concurrently.
@@ -66,7 +67,7 @@ Pi resources already configured on the host—models, credentials, context files
 - Browsers may run on another machine in the same segmented LAN.
 - The LAN controls which devices can reach the configured port.
 - The Node.js process has the same filesystem permissions as the operator.
-- The process can create and write the configured ChatWCA data directory (`./data` by default) containing the SQLite database.
+- The process can create and write the configured ChatWCA data directory (`./data` by default) containing the SQLite database, plus any workspace configured for local session storage.
 - There is one ChatWCA server process. A restart interrupts active model requests, but completed session history remains persisted by Pi.
 - The application is not a sandbox. Pi tools can read, write, edit, and execute commands in the selected workspace with the server process's permissions.
 
@@ -151,6 +152,8 @@ interface Workspace {
   id: string;                    // ChatWCA UUID
   name: string;
   path: string;                  // Canonical absolute directory path
+  sessionStorage: "pi-default" | "workspace";
+  sessionDirectory: string | null; // Derived local path; null for Pi default
   createdAt: number;
   updatedAt: number;
 }
@@ -162,25 +165,27 @@ interface WorkspaceSummary extends Workspace {
 
 The workspace repository stores metadata in `./data/chatwca.sqlite`, resolved relative to the server process's current working directory. The entire `/data/` directory is gitignored, including SQLite journal, WAL, and shared-memory files. `CHATWCA_DATA_DIR` may override the directory for deployments and tests.
 
-The server creates the data directory and initializes the database during startup. `better-sqlite3` is used because workspace operations are small and serialized, and it avoids relying on Node's experimental `node:sqlite` API. The connection enables foreign keys, a bounded busy timeout, and WAL mode, and is closed during graceful shutdown. Operational backups should stop ChatWCA before a plain file copy so `chatwca.sqlite` and any WAL/shared-memory sidecars are captured consistently; Pi's agent/session directory must be backed up separately.
+The server creates the data directory and initializes the database during startup. `better-sqlite3` is used because workspace operations are small and serialized, and it avoids relying on Node's experimental `node:sqlite` API. The connection enables foreign keys, a bounded busy timeout, and WAL mode, and is closed during graceful shutdown. Operational backups should stop ChatWCA before a plain file copy so `chatwca.sqlite` and any WAL/shared-memory sidecars are captured consistently; Pi's agent/session directory and every workspace-local `.chatwca/sessions` directory must be backed up separately.
 
-Initial schema:
+Current schema:
 
 ```sql
 CREATE TABLE IF NOT EXISTS workspaces (
   id         TEXT PRIMARY KEY,
   name       TEXT NOT NULL,
   path       TEXT NOT NULL UNIQUE,
+  session_storage TEXT NOT NULL DEFAULT 'pi-default'
+    CHECK (session_storage IN ('pi-default', 'workspace')),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
 
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 ```
 
-Workspace names must be non-empty. A path is resolved, verified as a directory, and canonicalized before insertion or update; canonical paths are unique. A registered workspace remains visible if its directory later disappears, but it is marked unavailable and cannot list, create, or open conversations until the path is restored.
+Workspace names must be non-empty. A path is resolved, verified as a directory, and canonicalized before insertion or update; canonical paths are unique. Creation selects an immutable `pi-default` or `workspace` session-storage policy, with `pi-default` used when migrating version-one rows. Workspace-local storage resolves to `<workspace>/.chatwca/sessions`; registering the workspace does not create that directory. The Pi SDK creates it when the first local runtime is created. A registered workspace remains visible if its directory later disappears, but it is marked unavailable and cannot list, create, or open conversations until the path is restored.
 
-Removing a workspace deletes only its database row. It never deletes the directory or any Pi session. Removal and path changes are rejected while that workspace owns a live runtime; renaming remains allowed. Because ChatWCA has not been released, the initial workspace design does not import or migrate state from the earlier global-history design. Future schema evolution can use `PRAGMA user_version`.
+Removing a workspace deletes only its database row. It never deletes the directory or any Pi session. Removal and path changes are rejected while that workspace owns a live runtime; renaming remains allowed. The session-storage policy is not accepted by workspace updates and cannot change after creation. Database version two migrates existing rows to `pi-default`; it does not move Pi sessions.
 
 ### 6.3 Conversation registry
 
@@ -228,10 +233,10 @@ createConversation(workspaceId, workspacePath, sessionManager)
   register by Pi session ID
 ```
 
-New conversations use:
+New conversations use Pi's default session location or the workspace-local directory selected at workspace creation:
 
 ```ts
-SessionManager.create(cwd)
+SessionManager.create(cwd, workspace.sessionDirectory ?? undefined)
 ```
 
 Existing conversations use:
@@ -240,7 +245,7 @@ Existing conversations use:
 SessionManager.open(sessionFile)
 ```
 
-History for a selected workspace is discovered with `SessionManager.list(workspace.path)`. Normal startup, browser connection, workspace listing, and history refresh paths must never call `SessionManager.listAll()`. The application does not parse or rewrite Pi JSONL directly.
+History for a selected workspace is discovered with `SessionManager.list(workspace.path, workspace.sessionDirectory ?? undefined)`. Normal startup, browser connection, workspace listing, and history refresh paths must never call `SessionManager.listAll()`. The application does not parse or rewrite Pi JSONL directly.
 
 ### 7.2 Runtime replacement
 
@@ -254,24 +259,24 @@ Pi runtime operations such as `switchSession()` and `fork()` replace `runtime.se
 
 ### 7.3 Workspaces and working directories
 
-A new conversation request contains a `workspaceId`, not an arbitrary working-directory path. The server:
+A new conversation request contains a `workspaceId`, not an arbitrary working-directory or session-directory path. The server:
 
 1. resolves the workspace through SQLite;
 2. verifies that its stored canonical path still exists and is a directory;
-3. uses that path with `SessionManager.create()`; and
+3. derives the immutable session directory from the stored policy and uses it with `SessionManager.create()`; and
 4. records the workspace ID on the live conversation record.
 
 The workspace registry is the working-directory allowlist for browser commands. The selected workspace name and path are shown prominently in the UI.
 
-A reopened session is resolved from a fresh `SessionManager.list(workspace.path)` result before its file is opened. Its Pi session header must identify the same canonical CWD as the workspace. A session ID or path discovered in one workspace cannot be used to open or delete a session through another workspace. If the workspace directory no longer exists, the workspace remains visible but its conversations cannot be listed or run until the same path is restored.
+A reopened session is resolved from a fresh listing for the workspace's configured session directory before its file is opened. Its Pi session header must identify the same canonical CWD as the workspace. A session ID or path discovered in one workspace cannot be used to open or delete a session through another workspace. If the workspace directory no longer exists, the workspace remains visible but its conversations cannot be listed or run until the same path is restored.
 
 ## 8. Session persistence and history
 
 Pi's session store is canonical for conversations. It already contains messages, images, tool calls, usage, compactions, tree relationships, model changes, the session name, and the working directory.
 
-ChatWCA's SQLite database is canonical only for workspace definitions. It does not contain messages, conversation summaries, session-file copies, or the browser's selected workspace. This separation avoids synchronization bugs and keeps sessions interoperable with the Pi CLI.
+ChatWCA's SQLite database is canonical only for workspace definitions and their storage policies. It does not contain messages, conversation summaries, session-file copies, or the browser's selected workspace. This separation avoids synchronization bugs and keeps sessions interoperable with the Pi CLI.
 
-The server does not list Pi sessions at process startup or merely because a browser connects. After a browser selects a workspace, it requests that workspace's history, and the server calls `SessionManager.list(workspace.path)`. Selecting another workspace replaces the browser's history projection with a separately scoped result. No automatic global discovery or migration scan is performed.
+The server does not list Pi sessions at process startup or merely because a browser connects. After a browser selects a workspace, it requests that workspace's history, and the server calls `SessionManager.list()` with the workspace path and configured session directory. Selecting another workspace replaces the browser's history projection with a separately scoped result. No automatic global discovery or migration scan is performed.
 
 History summaries contain:
 
@@ -473,7 +478,7 @@ Representative client commands:
 ```ts
 type ClientCommand =
   | { type: "workspace.list" }
-  | { type: "workspace.create"; name: string; path: string }
+  | { type: "workspace.create"; name: string; path: string; sessionStorage: "pi-default" | "workspace" }
   | { type: "workspace.update"; workspaceId: string; name?: string; path?: string }
   | { type: "workspace.delete"; workspaceId: string }
   | { type: "history.list"; workspaceId: string }
@@ -546,7 +551,7 @@ Reverse proxies are optional. HTTP is sufficient for the intended segmented LAN 
 
 The sidebar initially renders workspace definitions without requesting Pi history. Selecting a workspace requests only that workspace's conversations and establishes the socket's workspace-history subscription. The conversation list distinguishes persisted closed sessions from live idle or streaming sessions, and switching to a closed session lazily opens its runtime. If no workspace is selected, no history request is made and conversation creation is disabled.
 
-Workspace management uses explicit forms for name and path. Removing a workspace requires confirmation and clearly states that files and Pi sessions are retained. The browser keeps workspace and conversation selection in memory; reconnecting re-lists workspaces and then re-requests history only for the workspace already selected in that browser instance.
+Workspace creation uses explicit fields for name and path plus a default-disabled **Store sessions in this workspace** checkbox. The selection is not shown as an editable field later. **Workspace Info** shows the authoritative storage policy and the resolved local session directory when applicable. Removing a workspace requires confirmation and clearly states that files and Pi sessions are retained. The browser keeps workspace and conversation selection in memory; reconnecting re-lists workspaces and then re-requests history only for the workspace already selected in that browser instance.
 
 ### 15.2 Dark-only styling
 
@@ -660,7 +665,7 @@ src/
 
 - protocol validation and unknown-message rejection;
 - SQLite schema initialization and workspace CRUD;
-- workspace name validation, path canonicalization, uniqueness, and availability;
+- workspace name validation, path canonicalization, uniqueness, availability, immutable storage policy, and version-one database migration;
 - message serialization for text, thinking, images, and tools;
 - conversation registry workspace ownership, indexing, and idle eviction;
 - image MIME and size limits;
@@ -685,7 +690,7 @@ Use temporary SQLite databases, temporary Pi sessions, and a fake model/provider
 
 ### Browser tests
 
-- create, rename, update, select, and remove workspaces;
+- create default and workspace-local workspaces, inspect storage policy, rename, update, select, and remove workspaces;
 - verify that no conversation history is requested before workspace selection;
 - create and switch conversations within selected workspaces;
 - LAN-style host access against a server bound to `0.0.0.0`;
@@ -715,8 +720,9 @@ The initial release is complete when:
 
 - the server listens on `0.0.0.0` by default and is usable from another LAN machine;
 - no authentication or authorization flow exists;
-- workspace definitions persist in `./data/chatwca.sqlite` and the data directory is gitignored;
-- a user can create, edit, select, and remove a named workspace for any valid local directory;
+- workspace definitions and immutable session-storage policies persist in `./data/chatwca.sqlite` and the data directory is gitignored;
+- a user can create, edit, inspect, select, and remove a named workspace for any valid local directory;
+- workspace creation can select default-disabled workspace-local session storage, and that selection cannot later be changed;
 - the server does not call `SessionManager.listAll()` during startup, browser connection, or normal history refresh;
 - no Pi conversations are listed until the browser selects a workspace;
 - selecting a workspace lists only sessions associated with that workspace path;

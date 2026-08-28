@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -59,7 +59,10 @@ async function closeSocket(socket: WebSocket): Promise<void> {
 
 async function start(
   root: string,
-  listSessions: (cwd: string) => Promise<readonly never[]>,
+  listSessions: (
+    cwd: string,
+    sessionDirectory?: string,
+  ) => Promise<readonly never[]>,
   databases: ChatWcaDatabase[],
 ): Promise<ChatWcaServer> {
   const config = loadConfig({
@@ -103,6 +106,68 @@ afterEach(async () => {
 });
 
 describe("workspace startup, persistence, and availability integration", () => {
+  it("persists workspace-local storage and scopes listing without creating it at registration", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "chatwca-workspace-local-"));
+    roots.push(root);
+    const workspacePath = path.join(root, "project");
+    const sessionDirectory = path.join(workspacePath, ".chatwca", "sessions");
+    mkdirSync(workspacePath);
+    const listSessions = vi.fn(async () => [] as const);
+    const databases: ChatWcaDatabase[] = [];
+    const first = await start(root, listSessions, databases);
+    const firstSocket = await connect(first);
+
+    const created = await command(firstSocket, {
+      type: "workspace.create",
+      requestId: "create-local",
+      name: "Local workspace",
+      path: workspacePath,
+      sessionStorage: "workspace",
+    });
+    expect(created).toMatchObject({
+      type: "workspaces",
+      workspaces: [{
+        name: "Local workspace",
+        sessionStorage: "workspace",
+        sessionDirectory,
+      }],
+    });
+    expect(existsSync(path.join(workspacePath, ".chatwca"))).toBe(false);
+    const workspaceId = created.type === "workspaces"
+      ? created.workspaces[0]?.id
+      : undefined;
+    expect(workspaceId).toBeDefined();
+
+    await command(firstSocket, {
+      type: "history.list",
+      requestId: "list-local",
+      workspaceId,
+    });
+    expect(listSessions).toHaveBeenCalledExactlyOnceWith(
+      workspacePath,
+      sessionDirectory,
+    );
+
+    await closeSocket(firstSocket);
+    await first.shutdown();
+    servers.splice(servers.indexOf(first), 1);
+
+    const second = await start(root, listSessions, databases);
+    const secondSocket = await connect(second);
+    await expect(command(secondSocket, {
+      type: "workspace.list",
+      requestId: "persisted-local",
+    })).resolves.toMatchObject({
+      type: "workspaces",
+      workspaces: [{
+        id: workspaceId,
+        sessionStorage: "workspace",
+        sessionDirectory,
+      }],
+    });
+    await closeSocket(secondSocket);
+  });
+
   it("never scans at startup/connection, persists rows across restart, restores paths, and closes SQLite", async () => {
     const root = mkdtempSync(path.join(tmpdir(), "chatwca-workspace-startup-"));
     roots.push(root);
@@ -134,6 +199,7 @@ describe("workspace startup, persistence, and availability integration", () => {
       requestId: "create",
       name: "Persistent workspace",
       path: workspacePath,
+      sessionStorage: "pi-default",
     });
     expect(created).toMatchObject({
       type: "workspaces",

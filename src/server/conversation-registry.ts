@@ -52,6 +52,7 @@ export type ConversationRegistrationSource = "create" | "open" | "fork";
 export interface ConversationWorkspace {
   readonly id: string;
   readonly path: string;
+  readonly sessionDirectory?: string | null;
 }
 
 /**
@@ -351,7 +352,12 @@ export class ConversationRegistry {
     const releaseCapacity = await this.#reserveCapacity();
     let runtime: PiConversationRuntimePort | undefined;
     try {
-      runtime = await this.#runtimeFactory.createPersistent(ownership.path);
+      runtime = ownership.sessionDirectory == null
+        ? await this.#runtimeFactory.createPersistent(ownership.path)
+        : await this.#runtimeFactory.createPersistent(
+            ownership.path,
+            ownership.sessionDirectory,
+          );
       this.#assertAcceptingWork();
       const record = await this.#register(runtime, ownership, "create");
       await this.#refreshHistory(record.workspaceId);
@@ -1050,7 +1056,26 @@ export class ConversationRegistry {
     if (!workspace.id || !workspace.path || !path.isAbsolute(workspace.path)) {
       throw new AppError(ERROR_CODES.WORKSPACE_UNAVAILABLE);
     }
-    return { id: workspace.id, path: path.resolve(workspace.path) };
+    const workspacePath = path.resolve(workspace.path);
+    if (
+      workspace.sessionDirectory !== undefined &&
+      workspace.sessionDirectory !== null &&
+      !path.isAbsolute(workspace.sessionDirectory)
+    ) {
+      throw new AppError(ERROR_CODES.WORKSPACE_UNAVAILABLE);
+    }
+    return {
+      id: workspace.id,
+      path: workspacePath,
+      ...(workspace.sessionDirectory === undefined
+        ? {}
+        : {
+            sessionDirectory:
+              workspace.sessionDirectory === null
+                ? null
+                : path.resolve(workspace.sessionDirectory),
+          }),
+    };
   }
 
   #assertWorkspaceOwner(

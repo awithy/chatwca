@@ -19,6 +19,7 @@ const commands = [
     requestId,
     name: "Example",
     path: "/workspace",
+    sessionStorage: "pi-default",
   },
   {
     type: "workspace.update",
@@ -177,6 +178,26 @@ describe("ClientCommandSchema", () => {
     })).toBe(false);
   });
 
+  it("requires storage policy at creation and keeps it out of updates", () => {
+    expect(
+      Value.Check(ClientCommandSchema, {
+        type: "workspace.create",
+        requestId,
+        name: "Missing policy",
+        path: "/workspace",
+      }),
+    ).toBe(false);
+    expect(
+      Value.Check(ClientCommandSchema, {
+        type: "workspace.update",
+        requestId,
+        workspaceId: "workspace-1",
+        name: "Renamed",
+        sessionStorage: "workspace",
+      }),
+    ).toBe(false);
+  });
+
   it("requires at least one workspace update field", () => {
     expect(
       Value.Check(ClientCommandSchema, {
@@ -248,6 +269,8 @@ describe("workspace schemas", () => {
     id: "workspace-1",
     name: "Example",
     path: "/workspace",
+    sessionStorage: "pi-default",
+    sessionDirectory: null,
     createdAt: 10,
     updatedAt: 20,
   } as const;
@@ -330,6 +353,8 @@ describe("ServerMessageSchema", () => {
             id: "workspace-1",
             name: "Example",
             path: "/workspace",
+            sessionStorage: "workspace",
+            sessionDirectory: "/workspace/.chatwca/sessions",
             createdAt: 1,
             updatedAt: 2,
             available: true,

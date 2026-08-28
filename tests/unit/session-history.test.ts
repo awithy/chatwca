@@ -41,10 +41,12 @@ async function temporaryHistoryRoot() {
     workspaceA: {
       id: "workspace-a",
       path: cwdA,
+      sessionDirectory: null,
     } satisfies SessionHistoryWorkspace,
     workspaceB: {
       id: "workspace-b",
       path: cwdB,
+      sessionDirectory: null,
     } satisfies SessionHistoryWorkspace,
   };
 }
@@ -143,6 +145,20 @@ describe("SessionHistory", () => {
     });
     expect(snapshot.allowedSessionFiles).toEqual(
       new Set([olderFile, firstTieFile, secondTieFile]),
+    );
+  });
+
+  it("passes a workspace-local session directory only for local storage", async () => {
+    const { workspaceA } = await temporaryHistoryRoot();
+    const localDirectory = path.join(workspaceA.path, ".chatwca", "sessions");
+    const listSessions = vi.fn(async () => []);
+    const history = new SessionHistory({ listSessions });
+
+    await history.list({ ...workspaceA, sessionDirectory: localDirectory });
+
+    expect(listSessions).toHaveBeenCalledExactlyOnceWith(
+      workspaceA.path,
+      localDirectory,
     );
   });
 

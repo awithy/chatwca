@@ -88,7 +88,10 @@ export interface PiConversationRuntimePort {
 export interface PiRuntimeFactoryPort {
   readonly modelRuntime: ModelRuntime;
   listAvailableModels(): Promise<readonly PiModelCapability[]>;
-  createPersistent(cwd: string): Promise<PiConversationRuntimePort>;
+  createPersistent(
+    cwd: string,
+    sessionDirectory?: string,
+  ): Promise<PiConversationRuntimePort>;
   openPersistent(sessionFile: string): Promise<PiConversationRuntimePort>;
 }
 
@@ -382,11 +385,14 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
     }
   }
 
-  async createPersistent(cwd: string): Promise<PiConversationRuntime> {
+  async createPersistent(
+    cwd: string,
+    sessionDirectory?: string,
+  ): Promise<PiConversationRuntime> {
     const canonicalCwd = await resolveConversationCwd(cwd);
     const sessionManager = SessionManager.create(
       canonicalCwd,
-      this.#sessionDir,
+      sessionDirectory ?? this.#sessionDir,
     );
     return this.#createRuntime(canonicalCwd, sessionManager);
   }

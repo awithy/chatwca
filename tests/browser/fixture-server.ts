@@ -32,7 +32,7 @@ import type {
  * WebSocket, validation, reducer, and rendering paths.
  */
 const HOST = "0.0.0.0";
-const PORT = 8787;
+const PORT = Number(process.env.CHATWCA_BROWSER_TEST_PORT ?? 28787);
 const CWD = "/tmp/chatwca-browser-workspace";
 const WORKSPACE_ID = "browser-workspace";
 const SESSION_ROOT = "/tmp/chatwca-browser-sessions";
@@ -40,6 +40,8 @@ const WORKSPACE: WorkspaceSummary = {
   id: WORKSPACE_ID,
   name: "Browser workspace",
   path: CWD,
+  sessionStorage: "pi-default",
+  sessionDirectory: null,
   createdAt: 1,
   updatedAt: 1,
   available: true,
@@ -534,6 +536,11 @@ const workspaces: ProtocolWorkspaceRepository = {
       id: `browser-workspace-${String(workspaceSequence)}`,
       name: input.name.trim(),
       path: input.path.trim(),
+      sessionStorage: input.sessionStorage,
+      sessionDirectory:
+        input.sessionStorage === "workspace"
+          ? `${input.path.trim()}/.chatwca/sessions`
+          : null,
       createdAt: nextTime(),
       updatedAt: nextTime(),
       available: !input.path.includes("fixture-unavailable"),
@@ -547,7 +554,15 @@ const workspaces: ProtocolWorkspaceRepository = {
     const updated: WorkspaceSummary = {
       ...current,
       ...(changes.name === undefined ? {} : { name: changes.name.trim() }),
-      ...(changes.path === undefined ? {} : { path: changes.path.trim() }),
+      ...(changes.path === undefined
+        ? {}
+        : {
+            path: changes.path.trim(),
+            sessionDirectory:
+              current.sessionStorage === "workspace"
+                ? `${changes.path.trim()}/.chatwca/sessions`
+                : null,
+          }),
       available: changes.path === undefined
         ? current.available
         : !changes.path.includes("fixture-unavailable"),

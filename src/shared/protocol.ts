@@ -178,10 +178,20 @@ export type LiveConversationStatus = Static<
   typeof LiveConversationStatusSchema
 >;
 
+export const WorkspaceSessionStorageSchema = Type.Union([
+  Type.Literal("pi-default"),
+  Type.Literal("workspace"),
+]);
+export type WorkspaceSessionStorage = Static<
+  typeof WorkspaceSessionStorageSchema
+>;
+
 export const WorkspaceSchema = strictObject({
   id: IdentifierSchema,
   name: NonEmptyStringSchema,
   path: NonEmptyStringSchema,
+  sessionStorage: WorkspaceSessionStorageSchema,
+  sessionDirectory: Type.Union([NonEmptyStringSchema, Type.Null()]),
   createdAt: Type.Number({ minimum: 0 }),
   updatedAt: Type.Number({ minimum: 0 }),
 });
@@ -191,6 +201,8 @@ export const WorkspaceSummarySchema = strictObject({
   id: IdentifierSchema,
   name: NonEmptyStringSchema,
   path: NonEmptyStringSchema,
+  sessionStorage: WorkspaceSessionStorageSchema,
+  sessionDirectory: Type.Union([NonEmptyStringSchema, Type.Null()]),
   createdAt: Type.Number({ minimum: 0 }),
   updatedAt: Type.Number({ minimum: 0 }),
   available: Type.Boolean(),
@@ -262,6 +274,7 @@ export const WorkspaceCreateCommandSchema = strictObject({
   requestId: RequestIdSchema,
   name: NonEmptyStringSchema,
   path: NonEmptyStringSchema,
+  sessionStorage: WorkspaceSessionStorageSchema,
 });
 const WorkspaceUpdateWithNameSchema = strictObject({
   type: Type.Literal("workspace.update"),

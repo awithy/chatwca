@@ -9,7 +9,7 @@ ChatWCA is a single-user, dark-only web interface for the [Pi coding agent](http
 
 - Node.js **22.19.0 or newer** and npm.
 - A host supported by Pi, with at least one model/provider configured and available to the server process.
-- Read/search access to every directory registered as a workspace, read/write access to Pi's agent/session directory, and read/write access to ChatWCA's data directory.
+- Read/search access to every directory registered as a workspace, read/write access to Pi's agent/session directory, and read/write access to ChatWCA's data directory. A workspace configured for workspace-local session storage must also be writable.
 - Network access to any remote model provider. `PI_OFFLINE` intentionally disables Pi model network access.
 
 `npm ci` installs the Pi SDK and its local `pi` executable; a separate global Pi installation is not required. ChatWCA uses Pi's existing settings, credentials, context files, skills, and extensions. Configure those through Pi rather than ChatWCA—the web UI has no model or credential settings. You can inspect the models visible to the same installation with:
@@ -89,12 +89,13 @@ ChatWCA starts with no selected workspace. Before creating or opening a conversa
 
 1. Open **Manage workspaces** and choose **Add**.
 2. Enter a name and a directory path on the **server** machine. An absolute path is recommended. The directory must already exist and be readable/searchable by the server process.
-3. Select the workspace. Only then does ChatWCA ask Pi for sessions whose exact working directory is that workspace path.
-4. Create a new conversation or open one from the selected workspace's history.
+3. Optionally enable **Store sessions in this workspace**. It is disabled by default and cannot be changed after creation. Enabled workspaces use `<workspace>/.chatwca/sessions`; otherwise they use Pi's default session store.
+4. Select the workspace. Only then does ChatWCA ask Pi for sessions whose exact working directory is that workspace path.
+5. Create a new conversation or open one from the selected workspace's history.
 
 Workspace definitions persist across browser and server restarts, but browser selection is intentionally in memory only and resets after a full page load. Starting ChatWCA or connecting a browser loads the small SQLite workspace list; it does **not** scan Pi session history. ChatWCA performs no automatic discovery or import of directories from existing global Pi history.
 
-You can rename a workspace at any time. Changing its path or removing it requires closing all live conversations in that workspace first. Removing a workspace unregisters only its ChatWCA metadata: the directory, its contents, and all Pi JSONL sessions are retained.
+You can use **Workspace Info** to inspect a workspace's path, availability, session-storage policy, and workspace-local session directory. You can rename a workspace at any time. Changing its path or removing it requires closing all live conversations in that workspace first. The session-storage policy cannot be edited. Removing a workspace unregisters only its ChatWCA metadata: the directory, its contents, and all Pi JSONL sessions are retained.
 
 ## Configuration
 
@@ -161,22 +162,23 @@ Use a single ChatWCA process. The process-wide registry prevents duplicate live 
 
 ChatWCA uses two independent stores:
 
-- `./data/chatwca.sqlite` contains only registered workspace IDs, names, canonical directory paths, and timestamps. `CHATWCA_DATA_DIR` changes its parent directory. The repository's `/data/` rule ignores the database and its `-wal`, `-shm`, and journal sidecars.
-- Pi's native append-only JSONL store remains canonical for messages, images, and conversation metadata. By default it is under `~/.pi/agent/sessions`; `PI_CODING_AGENT_DIR` changes that root. ChatWCA does not copy Pi sessions into SQLite or maintain a separate image store.
+- `./data/chatwca.sqlite` contains only registered workspace IDs, names, canonical directory paths, immutable session-storage policies, and timestamps. `CHATWCA_DATA_DIR` changes its parent directory. The repository's `/data/` rule ignores the database and its `-wal`, `-shm`, and journal sidecars.
+- Pi's native append-only JSONL store remains canonical for messages, images, and conversation metadata. A workspace uses either Pi's default session store under `~/.pi/agent/sessions` (affected by `PI_CODING_AGENT_DIR`) or its own `<workspace>/.chatwca/sessions` directory. ChatWCA does not copy Pi sessions into SQLite or maintain a separate image store.
 
-At startup and browser connection ChatWCA reads workspace rows only. Selecting a workspace invokes `SessionManager.list(workspace.path)` for that exact working directory. Open and delete operations are authorized by another fresh listing in the same workspace; normal application operation never performs a global `SessionManager.listAll()` scan and never parses JSONL to build history.
+At startup and browser connection ChatWCA reads workspace rows only. Selecting a workspace invokes `SessionManager.list()` for that exact working directory and its configured session location. Open and delete operations are authorized by another fresh listing in the same workspace; normal application operation never performs a global `SessionManager.listAll()` scan and never parses JSONL to build history.
 
-Sessions are created by the pinned Pi 0.84.3 SDK and remain usable by a matching Pi CLI. Avoid writing the same session concurrently from ChatWCA and another Pi process. Closing a conversation or idle LRU eviction disposes only its live runtime; persisted history remains and can be reopened. Conversation deletion removes the freshly listed Pi JSONL file and is allowed only after its live runtime is closed.
+Sessions are created by the pinned Pi 0.84.3 SDK and remain usable by a matching Pi CLI. For workspace-local history, run Pi from that workspace with `npx pi --session-dir .chatwca/sessions -r`, or open a JSONL file directly with `--session`. Avoid writing the same session concurrently from ChatWCA and another Pi process. Closing a conversation or idle LRU eviction disposes only its live runtime; persisted history remains and can be reopened. Conversation deletion removes the freshly listed Pi JSONL file and is allowed only after its live runtime is closed.
 
 A new persistent session has an ID and prospective path but no file yet. It becomes durable when its first assistant message finishes (including a terminal error/abort response). Empty and user-only conversations are therefore absent from history and do not survive a process restart.
 
 ### Backups
 
-Back up both the ChatWCA data directory and Pi's agent/session directory. SQLite runs in WAL mode, so copying only `chatwca.sqlite` while the server is running can omit committed workspace changes or produce an inconsistent backup. The safest file-copy procedure is:
+Back up the ChatWCA data directory, Pi's agent/session directory, and the `.chatwca/sessions` directory of every workspace using local storage. SQLite runs in WAL mode, so copying only `chatwca.sqlite` while the server is running can omit committed workspace changes or produce an inconsistent backup. The safest file-copy procedure is:
 
 1. shut down ChatWCA cleanly and wait for the process to exit;
-2. copy the entire configured `CHATWCA_DATA_DIR`; and
-3. copy the Pi directory selected by `PI_CODING_AGENT_DIR` (or Pi's default agent directory).
+2. copy the entire configured `CHATWCA_DATA_DIR`;
+3. copy the Pi directory selected by `PI_CODING_AGENT_DIR` (or Pi's default agent directory); and
+4. copy each workspace that uses workspace-local session storage, including its `.chatwca/sessions` directory.
 
 A SQLite-aware online backup tool may be used while running, but a plain file copy must account for the database, `-wal`, and `-shm` files as one consistent set. Restore backups while ChatWCA is stopped.
 
@@ -219,7 +221,7 @@ A rejected browser upgrade usually appears as HTTP `403` for `/ws` in browser de
 
 - `database_error`: verify that `CHATWCA_DATA_DIR` and `chatwca.sqlite` are writable by the server user, that the filesystem has free space, and that another ChatWCA process is not using the deployment. Inspect the server terminal for the private SQLite diagnostic.
 - `workspace_unavailable`: restore access at the registered path or close the workspace's live conversations and update the path.
-- `session_file_missing` / `session_not_listed`: the JSONL file was removed, is no longer returned for the selected workspace, or is outside the active Pi agent directory. Refresh scoped history; restore it from backup if it was removed externally.
+- `session_file_missing` / `session_not_listed`: the JSONL file was removed, is no longer returned from the selected workspace's configured session directory, or is outside that directory. Refresh scoped history; restore it from backup if it was removed externally.
 - `session_unavailable`: verify read/write permissions for the session file and its Pi directories.
 - `pi_runtime_create_failed`: verify the stored or new working directory, Pi settings, credentials, extensions, and filesystem permissions by running Pi in the same working directory and environment.
 - `pi_runtime_replace_failed`: a fork/runtime replacement failed. The source-preserving fork path leaves the original conversation unchanged; close/reopen an idle errored conversation and reproduce the operation in Pi's own interface before retrying.

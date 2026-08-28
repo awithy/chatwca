@@ -16,6 +16,7 @@ import {
 } from "../shared/errors.js";
 import type {
   Workspace,
+  WorkspaceSessionStorage,
   WorkspaceSummary,
 } from "../shared/protocol.js";
 
@@ -23,8 +24,20 @@ interface WorkspaceRow {
   readonly id: string;
   readonly name: string;
   readonly path: string;
+  readonly session_storage: WorkspaceSessionStorage;
   readonly created_at: number;
   readonly updated_at: number;
+}
+
+export const WORKSPACE_SESSION_DIRECTORY = path.join(".chatwca", "sessions");
+
+export function workspaceSessionDirectory(
+  workspacePath: string,
+  storage: WorkspaceSessionStorage,
+): string | null {
+  return storage === "workspace"
+    ? path.join(workspacePath, WORKSPACE_SESSION_DIRECTORY)
+    : null;
 }
 
 export interface WorkspaceFileSystem {
@@ -50,6 +63,7 @@ export interface WorkspaceRepositoryOptions {
 export interface CreateWorkspaceInput {
   readonly name: string;
   readonly path: string;
+  readonly sessionStorage?: WorkspaceSessionStorage;
 }
 
 export interface UpdateWorkspaceInput {
@@ -62,6 +76,8 @@ function workspaceFromRow(row: WorkspaceRow): Workspace {
     id: row.id,
     name: row.name,
     path: row.path,
+    sessionStorage: row.session_storage,
+    sessionDirectory: workspaceSessionDirectory(row.path, row.session_storage),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -105,7 +121,7 @@ export class WorkspaceRepository {
   readonly #listStatement: Database.Statement<[], WorkspaceRow>;
   readonly #getStatement: Database.Statement<[string], WorkspaceRow>;
   readonly #insertStatement: Database.Statement<
-    [string, string, string, number, number]
+    [string, string, string, WorkspaceSessionStorage, number, number]
   >;
   readonly #updateNameStatement: Database.Statement<[string, number, string]>;
   readonly #updatePathStatement: Database.Statement<[string, number, string]>;
@@ -125,15 +141,15 @@ export class WorkspaceRepository {
 
     try {
       this.#listStatement = connection.prepare<[], WorkspaceRow>(
-        "SELECT id, name, path, created_at, updated_at FROM workspaces",
+        "SELECT id, name, path, session_storage, created_at, updated_at FROM workspaces",
       );
       this.#getStatement = connection.prepare<[string], WorkspaceRow>(
-        "SELECT id, name, path, created_at, updated_at FROM workspaces WHERE id = ?",
+        "SELECT id, name, path, session_storage, created_at, updated_at FROM workspaces WHERE id = ?",
       );
       this.#insertStatement = connection.prepare<
-        [string, string, string, number, number]
+        [string, string, string, WorkspaceSessionStorage, number, number]
       >(
-        "INSERT INTO workspaces (id, name, path, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO workspaces (id, name, path, session_storage, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
       );
       this.#updateNameStatement = connection.prepare<[string, number, string]>(
         "UPDATE workspaces SET name = ?, updated_at = ? WHERE id = ?",
@@ -169,7 +185,7 @@ export class WorkspaceRepository {
   /** Resolve a row for an operation that requires its directory right now. */
   requireAvailable(workspaceId: string): Workspace {
     const workspace = this.#getStored(workspaceId);
-    if (!this.#isAvailable(workspace.path)) {
+    if (!this.#isAvailable(workspace)) {
       throw new AppError(ERROR_CODES.WORKSPACE_UNAVAILABLE);
     }
     return workspace;
@@ -177,13 +193,36 @@ export class WorkspaceRepository {
 
   create(input: CreateWorkspaceInput): WorkspaceSummary {
     const name = this.#validName(input.name);
-    const canonicalPath = this.#canonicalDirectory(input.path);
+    const sessionStorage = this.#validSessionStorage(
+      input.sessionStorage ?? "pi-default",
+    );
+    const canonicalPath = this.#canonicalDirectory(
+      input.path,
+      sessionStorage === "workspace",
+    );
+    const sessionDirectory = workspaceSessionDirectory(
+      canonicalPath,
+      sessionStorage,
+    );
+    if (
+      sessionDirectory !== null &&
+      !this.#isSessionDirectoryContained(canonicalPath, sessionDirectory)
+    ) {
+      throw new AppError(ERROR_CODES.INVALID_WORKSPACE_PATH);
+    }
     const id = this.#uuid();
     const now = this.#clock();
 
     this.#database(() => {
       try {
-        this.#insertStatement.run(id, name, canonicalPath, now, now);
+        this.#insertStatement.run(
+          id,
+          name,
+          canonicalPath,
+          sessionStorage,
+          now,
+          now,
+        );
       } catch (error) {
         if (isDuplicatePathConstraint(error)) {
           throw toAppError(error, {
@@ -199,6 +238,8 @@ export class WorkspaceRepository {
       id,
       name,
       path: canonicalPath,
+      sessionStorage,
+      sessionDirectory,
       createdAt: now,
       updatedAt: now,
     });
@@ -220,7 +261,21 @@ export class WorkspaceRepository {
     const canonicalPath =
       changes.path === undefined
         ? current.path
-        : this.#canonicalDirectory(changes.path);
+        : this.#canonicalDirectory(
+            changes.path,
+            current.sessionStorage === "workspace",
+          );
+    const sessionDirectory = workspaceSessionDirectory(
+      canonicalPath,
+      current.sessionStorage,
+    );
+    if (
+      changes.path !== undefined &&
+      sessionDirectory !== null &&
+      !this.#isSessionDirectoryContained(canonicalPath, sessionDirectory)
+    ) {
+      throw new AppError(ERROR_CODES.INVALID_WORKSPACE_PATH);
+    }
     const now = this.#clock();
 
     this.#database(() => {
@@ -254,6 +309,7 @@ export class WorkspaceRepository {
       ...current,
       name,
       path: canonicalPath,
+      sessionDirectory,
       updatedAt: now,
     });
   }
@@ -286,7 +342,14 @@ export class WorkspaceRepository {
     return name;
   }
 
-  #canonicalDirectory(input: string): string {
+  #validSessionStorage(input: unknown): WorkspaceSessionStorage {
+    if (input !== "pi-default" && input !== "workspace") {
+      throw new AppError(ERROR_CODES.INVALID_COMMAND);
+    }
+    return input;
+  }
+
+  #canonicalDirectory(input: string, requireWrite = false): string {
     if (typeof input !== "string" || input.length === 0) {
       throw new AppError(ERROR_CODES.INVALID_WORKSPACE_PATH);
     }
@@ -302,7 +365,9 @@ export class WorkspaceRepository {
       }
       this.#fileSystem.access(
         canonical,
-        fsConstants.R_OK | fsConstants.X_OK,
+        fsConstants.R_OK |
+          fsConstants.X_OK |
+          (requireWrite ? fsConstants.W_OK : 0),
       );
       return canonical;
     } catch (error) {
@@ -310,21 +375,63 @@ export class WorkspaceRepository {
     }
   }
 
-  #isAvailable(canonicalPath: string): boolean {
+  #isAvailable(workspace: Workspace): boolean {
     try {
-      if (!this.#fileSystem.stat(canonicalPath).isDirectory()) return false;
+      if (!this.#fileSystem.stat(workspace.path).isDirectory()) return false;
       this.#fileSystem.access(
-        canonicalPath,
-        fsConstants.R_OK | fsConstants.X_OK,
+        workspace.path,
+        fsConstants.R_OK |
+          fsConstants.X_OK |
+          (workspace.sessionStorage === "workspace" ? fsConstants.W_OK : 0),
       );
+      if (
+        workspace.sessionDirectory !== null &&
+        !this.#isSessionDirectoryContained(
+          workspace.path,
+          workspace.sessionDirectory,
+        )
+      ) {
+        return false;
+      }
       return true;
     } catch {
       return false;
     }
   }
 
+  #isSessionDirectoryContained(
+    workspacePath: string,
+    sessionDirectory: string,
+  ): boolean {
+    for (const candidate of [path.dirname(sessionDirectory), sessionDirectory]) {
+      try {
+        const canonical = this.#fileSystem.realpath(candidate);
+        if (!this.#fileSystem.stat(canonical).isDirectory()) return false;
+        this.#fileSystem.access(
+          canonical,
+          fsConstants.R_OK | fsConstants.W_OK | fsConstants.X_OK,
+        );
+        const relative = path.relative(workspacePath, canonical);
+        if (
+          relative === ".." ||
+          relative.startsWith(`..${path.sep}`) ||
+          path.isAbsolute(relative)
+        ) {
+          return false;
+        }
+      } catch (error) {
+        const code =
+          typeof error === "object" && error !== null && "code" in error
+            ? (error as { readonly code?: unknown }).code
+            : undefined;
+        if (code !== "ENOENT") return false;
+      }
+    }
+    return true;
+  }
+
   #summary(workspace: Workspace): WorkspaceSummary {
-    return { ...workspace, available: this.#isAvailable(workspace.path) };
+    return { ...workspace, available: this.#isAvailable(workspace) };
   }
 
   #database<T>(operation: () => T): T {

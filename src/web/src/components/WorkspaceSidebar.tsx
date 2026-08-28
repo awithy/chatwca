@@ -34,10 +34,16 @@ export interface WorkspaceSidebarProps {
   readonly onSelectConversation: (conversation: ConversationSummary) => void;
 }
 
-type FormMode = { readonly type: "create" } | {
-  readonly type: "edit";
-  readonly workspace: WorkspaceSummary;
-};
+type WorkspacePanelMode =
+  | { readonly type: "create" }
+  | { readonly type: "edit"; readonly workspace: WorkspaceSummary }
+  | { readonly type: "info"; readonly workspace: WorkspaceSummary };
+
+function storageLabel(workspace: WorkspaceSummary): string {
+  return workspace.sessionStorage === "workspace"
+    ? "Stored in workspace"
+    : "Pi default";
+}
 
 function messageOf(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
@@ -66,7 +72,7 @@ export function WorkspaceSidebar({
   onCreateConversation,
   onSelectConversation,
 }: WorkspaceSidebarProps) {
-  const [formMode, setFormMode] = useState<FormMode | null>(null);
+  const [formMode, setFormMode] = useState<WorkspacePanelMode | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [removingId, setRemovingId] = useState<string | null>(null);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
@@ -84,7 +90,8 @@ export function WorkspaceSidebar({
 
   useEffect(() => {
     if (
-      formMode?.type === "edit" &&
+      formMode !== null &&
+      formMode.type !== "create" &&
       !workspaces.some((item) => item.id === formMode.workspace.id)
     ) {
       setFormMode(null);
@@ -125,7 +132,7 @@ export function WorkspaceSidebar({
     try {
       if (formMode.type === "create") {
         await onCreateWorkspace(values);
-      } else {
+      } else if (formMode.type === "edit") {
         await onUpdateWorkspace(formMode.workspace.id, {
           name: values.name,
           ...(values.path === formMode.workspace.path ? {} : { path: values.path }),
@@ -200,12 +207,16 @@ export function WorkspaceSidebar({
           </button>
         </div>
 
-        {formMode !== null && (
+        {formMode !== null && formMode.type !== "info" && (
           <WorkspaceForm
             key={formMode.type === "create" ? "create" : formMode.workspace.id}
             mode={formMode.type}
             {...(formMode.type === "edit" ? {
-              initialValues: { name: formMode.workspace.name, path: formMode.workspace.path },
+              initialValues: {
+                name: formMode.workspace.name,
+                path: formMode.workspace.path,
+                sessionStorage: formMode.workspace.sessionStorage,
+              },
             } : {})}
             submitting={submitting}
             error={workspaceError}
@@ -215,6 +226,50 @@ export function WorkspaceSidebar({
               setWorkspaceError(null);
             }}
           />
+        )}
+
+        {formMode?.type === "info" && (
+          <section
+            className="workspace-info"
+            aria-label={`Workspace info for ${formMode.workspace.name}`}
+          >
+            <h3>Workspace info</h3>
+            <dl>
+              <div>
+                <dt>Name</dt>
+                <dd>{formMode.workspace.name}</dd>
+              </div>
+              <div>
+                <dt>Directory</dt>
+                <dd><code>{formMode.workspace.path}</code></dd>
+              </div>
+              <div>
+                <dt>Availability</dt>
+                <dd>{formMode.workspace.available ? "Available" : "Unavailable"}</dd>
+              </div>
+              <div>
+                <dt>Session storage</dt>
+                <dd>{storageLabel(formMode.workspace)}</dd>
+              </div>
+              {formMode.workspace.sessionDirectory !== null && (
+                <div>
+                  <dt>Session directory</dt>
+                  <dd><code>{formMode.workspace.sessionDirectory}</code></dd>
+                </div>
+              )}
+            </dl>
+            <div className="form-actions">
+              <button
+                type="button"
+                onClick={() => {
+                  setFormMode(null);
+                  setWorkspaceError(null);
+                }}
+              >
+                Close
+              </button>
+            </div>
+          </section>
         )}
 
         {workspaceError !== null && formMode === null && (
@@ -279,6 +334,19 @@ export function WorkspaceSidebar({
                       aria-label={`Actions for ${workspace.name}`}
                       hidden={!menuOpen}
                     >
+                      <button
+                        type="button"
+                        disabled={!connected || busy}
+                        aria-label={`Workspace info ${workspace.name}`}
+                        onClick={() => {
+                          formReturnFocus.current = openMenuTrigger.current;
+                          setOpenMenuId(null);
+                          setFormMode({ type: "info", workspace });
+                          setWorkspaceError(null);
+                        }}
+                      >
+                        Info
+                      </button>
                       <button
                         type="button"
                         disabled={!connected || busy}

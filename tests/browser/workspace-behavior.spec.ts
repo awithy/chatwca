@@ -25,10 +25,18 @@ function captureFrames(page: Page): {
   return { sent, received };
 }
 
-async function addWorkspace(page: Page, name: string, directoryPath: string): Promise<void> {
+async function addWorkspace(
+  page: Page,
+  name: string,
+  directoryPath: string,
+  storeSessionsInWorkspace = false,
+): Promise<void> {
   await page.getByRole("button", { name: "Add", exact: true }).click();
   await page.getByLabel("Name").fill(name);
   await page.getByLabel("Directory path").fill(directoryPath);
+  if (storeSessionsInWorkspace) {
+    await page.getByLabel("Store sessions in this workspace").check();
+  }
   await page.getByRole("button", { name: "Add workspace", exact: true }).click();
   await expect(page.locator("button.workspace-select-button").filter({ hasText: name })).toBeVisible();
 }
@@ -55,6 +63,24 @@ test("does not request Pi history before a workspace is selected", async ({ page
 
   await page.getByRole("button", { name: /Browser workspace/ }).first().click();
   await expect.poll(() => frames.sent.filter(({ type }) => type === "history.list")).toHaveLength(1);
+});
+
+test("creates immutable workspace-local storage and shows it in workspace info", async ({ page }) => {
+  const name = "Local session project";
+  const directoryPath = "/tmp/chatwca-local-session-project";
+  await waitForConnected(page);
+  await addWorkspace(page, name, directoryPath, true);
+
+  await page.getByRole("button", { name: `Workspace actions for ${name}` }).click();
+  await page.getByRole("button", { name: `Workspace info ${name}` }).click();
+  const info = page.getByRole("region", { name: `Workspace info for ${name}` });
+  await expect(info).toContainText("Stored in workspace");
+  await expect(info).toContainText(`${directoryPath}/.chatwca/sessions`);
+  await info.getByRole("button", { name: "Close" }).click();
+
+  await page.getByRole("button", { name: `Workspace actions for ${name}` }).click();
+  await page.getByRole("button", { name: `Edit workspace ${name}` }).click();
+  await expect(page.getByLabel("Store sessions in this workspace")).toHaveCount(0);
 });
 
 test("marks an unavailable workspace and disables path-dependent actions", async ({ page }) => {

@@ -8,6 +8,8 @@ import {
   waitForConnected,
 } from "./helpers.js";
 
+const port = Number(process.env.CHATWCA_BROWSER_TEST_PORT ?? 28787);
+
 function lanAddress(): string {
   for (const addresses of Object.values(networkInterfaces())) {
     for (const address of addresses ?? []) {
@@ -29,6 +31,8 @@ test("keyboard focus and primary chat controls remain operable", async ({ page }
   const path = page.getByLabel("Directory path");
   await expect(path).toBeFocused();
   await path.fill("/tmp/chatwca-browser-keyboard");
+  await page.keyboard.press("Tab");
+  await expect(page.getByLabel("Store sessions in this workspace")).toBeFocused();
   await page.keyboard.press("Tab");
   await expect(page.getByRole("button", { name: "Cancel" })).toBeFocused();
   await page.keyboard.press("Enter");
@@ -87,10 +91,12 @@ test("responsive layout stays dark-only and exposes mobile navigation", async ({
 test("serves HTTP and same-authority WebSockets through a non-loopback host", async ({ page }) => {
   const host = lanAddress();
   expect(host).not.toMatch(/^127\./);
-  await page.goto(`http://${host}:8787/`);
+  await page.goto(`http://${host}:${String(port)}/`);
   await expect(page.getByText("Connected", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Select a workspace" })).toBeVisible();
-  const health = await page.request.get(`http://${host}:8787/api/health`);
+  const health = await page.request.get(
+    `http://${host}:${String(port)}/api/health`,
+  );
   expect(health.ok()).toBe(true);
   await expect(health.json()).resolves.toMatchObject({ ready: true, version: "browser-fixture" });
 });

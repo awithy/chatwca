@@ -13,6 +13,8 @@ const workspace: WorkspaceSummary = {
   id: "workspace-1",
   name: "Deep Project",
   path: "/srv/projects/a/very/long/full/path/to/deep-project",
+  sessionStorage: "pi-default",
+  sessionDirectory: null,
   createdAt: 1,
   updatedAt: 2,
   available: true,
@@ -48,6 +50,7 @@ describe("workspace-first sidebar", () => {
     expect(html).toContain(workspace.path);
     expect(html).toContain('aria-label="Workspace actions for Deep Project"');
     expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain('aria-label="Workspace info Deep Project"');
     expect(html).toContain('aria-label="Edit workspace Deep Project"');
     expect(html).toContain('aria-label="Remove workspace Deep Project"');
     expect(html).toContain('aria-current="true"');
@@ -89,6 +92,8 @@ describe("workspace form", () => {
     expect(html).toContain('aria-label="Create workspace"');
     expect(html).toContain("Name");
     expect(html).toContain("Directory path");
+    expect(html).toContain("Store sessions in this workspace");
+    expect(html).toContain('type="checkbox"');
     expect(html).toContain("autofocus");
     expect(html).toContain('role="alert"');
     expect(html).toContain("That workspace path is already registered.");
@@ -97,7 +102,11 @@ describe("workspace form", () => {
   it("supports renaming and repointing with explicit edit labels", () => {
     const html = renderToStaticMarkup(createElement(WorkspaceForm, {
       mode: "edit",
-      initialValues: { name: workspace.name, path: workspace.path },
+      initialValues: {
+        name: workspace.name,
+        path: workspace.path,
+        sessionStorage: workspace.sessionStorage,
+      },
       submitting: true,
       error: null,
       onSubmit: async () => undefined,
@@ -108,5 +117,6 @@ describe("workspace form", () => {
     expect(html).toContain('value="Deep Project"');
     expect(html).toContain(workspace.path);
     expect(html).toContain("Saving…");
+    expect(html).not.toContain("Store sessions in this workspace");
   });
 });

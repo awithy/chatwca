@@ -526,17 +526,22 @@ describe("WebSocket command server", () => {
       id: WORKSPACE_ID,
       name: "Workspace",
       path: "/workspace",
+      sessionStorage: "pi-default",
+      sessionDirectory: null,
       createdAt: 1,
       updatedAt: 1,
       available: true,
     };
-    const workspaces = {
-      list: () => [...rows],
-      requireAvailable: () => created,
-      create: () => {
+    const createWorkspace = vi.fn(
+      (input: { readonly sessionStorage: "pi-default" | "workspace" }) => {
         rows = [created];
         return created;
       },
+    );
+    const workspaces = {
+      list: () => [...rows],
+      requireAvailable: () => created,
+      create: createWorkspace,
       update: () => created,
       delete: () => { rows = []; },
     };
@@ -575,11 +580,17 @@ describe("WebSocket command server", () => {
       requestId: "create-workspace",
       name: "Workspace",
       path: "/workspace",
+      sessionStorage: "pi-default",
     }));
     await expect(Promise.all([correlatedCreate, createBroadcast])).resolves.toEqual([
       { type: "workspaces", requestId: "create-workspace", workspaces: [created] },
       { type: "workspaces", workspaces: [created] },
     ]);
+    expect(createWorkspace).toHaveBeenCalledExactlyOnceWith({
+      name: "Workspace",
+      path: "/workspace",
+      sessionStorage: "pi-default",
+    });
 
     const correlatedUpdate = nextMessage(first);
     const updateBroadcast = nextMessage(second);

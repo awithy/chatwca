@@ -59,15 +59,15 @@ SessionManager.listAll(onProgress?)
 SessionManager.listAll(sessionDir?, onProgress?)
 ```
 
-`listAll()` does not take a CWD. It scans Pi's complete default session root, or the supplied session directory. It is an SDK capability, but ChatWCA normal operation does not call it. ChatWCA uses `SessionManager.list(workspace.path)` only after a browser selects a workspace, and repeats that same scoped listing to authorize open and delete operations. Startup, browser connection, and workspace listing do not list Pi sessions. `SessionInfo` includes `path`, `id`, `cwd`, optional `name`, optional `parentSessionPath`, `created`, `modified`, `messageCount`, `firstMessage`, and `allMessagesText`.
+`listAll()` does not take a CWD. It scans Pi's complete default session root, or the supplied session directory. It is an SDK capability, but ChatWCA normal operation does not call it. ChatWCA uses `SessionManager.list(workspace.path, workspace.sessionDirectory ?? undefined)` only after a browser selects a workspace, and repeats that same scoped listing to authorize open and delete operations. Startup, browser connection, and workspace listing do not list Pi sessions. `SessionInfo` includes `path`, `id`, `cwd`, optional `name`, optional `parentSessionPath`, `created`, `modified`, `messageCount`, `firstMessage`, and `allMessagesText`.
 
-There is no exported session-deletion API. Pi's own TUI tries the external `trash` command and falls back to `fs.unlink`. ChatWCA implements deletion at its filesystem boundary, but only after resolving the requested file through a fresh `SessionManager.list(workspace.path)` allow-set, verifying workspace ownership, and confirming that it is not live.
+There is no exported session-deletion API. Pi's own TUI tries the external `trash` command and falls back to `fs.unlink`. ChatWCA implements deletion at its filesystem boundary, but only after resolving the requested file through a fresh workspace-configured `SessionManager.list()` allow-set, verifying workspace ownership, and confirming that it is not live.
 
 ## Persistence and durability
 
 Pi persistence is synchronous and append-only once a session file exists, but a new persistent session intentionally delays file creation:
 
-1. `SessionManager.create(cwd)` allocates an ID and prospective file path without creating the file.
+1. `SessionManager.create(cwd, sessionDir?)` allocates an ID and prospective file path without creating the file. ChatWCA supplies `<workspace>/.chatwca/sessions` for a workspace whose immutable storage policy selects local sessions.
 2. User entries are appended on `message_end`, but a user-only session remains memory-only.
 3. On the first assistant `message_end` (including terminal error/abort responses), Pi writes the header and accumulated entries synchronously.
 4. Later entries are appended synchronously.

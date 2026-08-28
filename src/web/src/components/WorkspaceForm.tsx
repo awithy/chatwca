@@ -1,9 +1,12 @@
 import * as React from "react";
 import { useId, useState, type FormEvent } from "react";
 
+import type { WorkspaceSessionStorage } from "../../../shared/protocol.js";
+
 export interface WorkspaceFormValues {
   readonly name: string;
   readonly path: string;
+  readonly sessionStorage: WorkspaceSessionStorage;
 }
 
 export interface WorkspaceFormProps {
@@ -27,13 +30,20 @@ export function WorkspaceForm({
   const formId = useId().replaceAll(":", "");
   const [name, setName] = useState(initialValues?.name ?? "");
   const [path, setPath] = useState(initialValues?.path ?? "");
+  const [sessionStorage, setSessionStorage] = useState<WorkspaceSessionStorage>(
+    initialValues?.sessionStorage ?? "pi-default",
+  );
   const [validationError, setValidationError] = useState<string | null>(null);
   const visibleError = validationError ?? error;
   const editing = mode === "edit";
 
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
-    const values = { name: name.trim(), path: path.trim() };
+    const values = {
+      name: name.trim(),
+      path: path.trim(),
+      sessionStorage,
+    };
     if (values.name.length === 0) {
       setValidationError("Enter a workspace name.");
       return;
@@ -85,6 +95,22 @@ export function WorkspaceForm({
       <p className="workspace-form-help">
         The server must be able to read and search this directory.
       </p>
+      {!editing && (
+        <label className="workspace-storage-option" htmlFor={`${formId}-storage`}>
+          <input
+            id={`${formId}-storage`}
+            type="checkbox"
+            checked={sessionStorage === "workspace"}
+            disabled={submitting}
+            onChange={(event) => {
+              setSessionStorage(
+                event.target.checked ? "workspace" : "pi-default",
+              );
+            }}
+          />
+          <span>Store sessions in this workspace</span>
+        </label>
+      )}
       {visibleError !== null && (
         <p className="form-error" id={`${formId}-error`} role="alert">{visibleError}</p>
       )}

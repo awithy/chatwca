@@ -28,7 +28,7 @@ afterEach(() => {
 });
 
 describe("openDatabase", () => {
-  it("creates nested storage and initializes the version-one schema", () => {
+  it("creates nested storage and initializes the version-two schema", () => {
     const dataDir = path.join(temporaryDirectory(), "nested", "data");
     const database = openDatabase(dataDir);
 
@@ -53,6 +53,7 @@ describe("openDatabase", () => {
       expect.objectContaining({ name: "id", notnull: 0, pk: 1 }),
       expect.objectContaining({ name: "name", notnull: 1, pk: 0 }),
       expect.objectContaining({ name: "path", notnull: 1, pk: 0 }),
+      expect.objectContaining({ name: "session_storage", notnull: 1, pk: 0 }),
       expect.objectContaining({ name: "created_at", notnull: 1, pk: 0 }),
       expect.objectContaining({ name: "updated_at", notnull: 1, pk: 0 }),
     ]);
@@ -60,7 +61,7 @@ describe("openDatabase", () => {
     database.close();
   });
 
-  it("accepts and preserves an existing version-one database", () => {
+  it("accepts and preserves an existing version-two database", () => {
     const dataDir = temporaryDirectory();
     const first = openDatabase(dataDir);
     first.connection
@@ -77,6 +78,7 @@ describe("openDatabase", () => {
       id: "workspace-1",
       name: "Example",
       path: "/work/example",
+      session_storage: "pi-default",
       created_at: 10,
       updated_at: 20,
     });
@@ -84,6 +86,38 @@ describe("openDatabase", () => {
       reopened.connection.pragma("user_version", { simple: true }),
     ).toBe(DATABASE_SCHEMA_VERSION);
     reopened.close();
+  });
+
+  it("migrates version-one workspace rows to Pi-default storage", () => {
+    const dataDir = temporaryDirectory();
+    const filename = path.join(dataDir, DATABASE_FILENAME);
+    const legacy = new Database(filename);
+    legacy.exec(`
+      CREATE TABLE workspaces (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        path TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      INSERT INTO workspaces VALUES ('legacy', 'Legacy', '/work/legacy', 1, 2);
+      PRAGMA user_version = 1;
+    `);
+    legacy.close();
+
+    const migrated = openDatabase(dataDir);
+    expect(migrated.connection.prepare("SELECT * FROM workspaces").get()).toEqual({
+      id: "legacy",
+      name: "Legacy",
+      path: "/work/legacy",
+      created_at: 1,
+      updated_at: 2,
+      session_storage: "pi-default",
+    });
+    expect(
+      migrated.connection.pragma("user_version", { simple: true }),
+    ).toBe(DATABASE_SCHEMA_VERSION);
+    migrated.close();
   });
 
   it("supports an in-memory database for focused consumers", () => {
@@ -102,14 +136,14 @@ describe("openDatabase", () => {
     const dataDir = temporaryDirectory();
     const filename = path.join(dataDir, DATABASE_FILENAME);
     const unsupported = new Database(filename);
-    unsupported.pragma("user_version = 2");
+    unsupported.pragma("user_version = 3");
     unsupported.close();
 
     expect(() => openDatabase(dataDir)).toThrow(
       UnsupportedDatabaseVersionError,
     );
     expect(() => openDatabase(dataDir)).toThrow(
-      /schema version 2; expected 1/,
+      /schema version 3; expected 2/,
     );
 
     const afterFailure = new Database(filename);

@@ -108,6 +108,22 @@ describe("PiRuntimeFactory", () => {
     }
   });
 
+  it("uses a workspace-local session directory without creating ignore files", async () => {
+    const { cwd, factory } = await isolatedFactory();
+    const localSessionDirectory = path.join(cwd, ".chatwca", "sessions");
+    const runtime = await factory.createPersistent(cwd, localSessionDirectory);
+
+    try {
+      expect(path.dirname(runtime.identity.sessionFile)).toBe(localSessionDirectory);
+      expect(existsSync(localSessionDirectory)).toBe(true);
+      expect(existsSync(path.join(cwd, ".gitignore"))).toBe(false);
+      expect(existsSync(path.join(cwd, ".chatwca", ".gitignore"))).toBe(false);
+      expect(existsSync(path.join(localSessionDirectory, ".gitignore"))).toBe(false);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
   it("validates image prompts and persists Pi image content for reopening", async () => {
     const { cwd, factory, faux } = await isolatedFactory();
     faux.setResponses([fauxAssistantMessage("I received the image")]);

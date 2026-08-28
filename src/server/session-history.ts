@@ -24,6 +24,7 @@ const UNTITLED_CONVERSATION = "Untitled conversation";
 export interface SessionHistoryWorkspace {
   readonly id: string;
   readonly path: string;
+  readonly sessionDirectory: string | null;
 }
 
 export interface SessionHistoryIdentity {
@@ -47,7 +48,10 @@ export interface SessionHistoryOptions {
   /** Optional Pi session root, primarily used by isolated integration tests. */
   readonly sessionDir?: string;
   /** Injectable workspace-scoped Pi listing boundary for focused tests. */
-  readonly listSessions?: (cwd: string) => Promise<readonly SessionInfo[]>;
+  readonly listSessions?: (
+    cwd: string,
+    sessionDirectory?: string,
+  ) => Promise<readonly SessionInfo[]>;
   /** A defined result means that this workspace owns the matching live runtime. */
   readonly getLiveStatus?: SessionHistoryLiveStatusLookup;
 }
@@ -121,14 +125,21 @@ function compareListed(
  * from that exact result. No global Pi history listing is used.
  */
 export class SessionHistory {
-  readonly #listSessions: (cwd: string) => Promise<readonly SessionInfo[]>;
+  readonly #listSessions: (
+    cwd: string,
+    sessionDirectory?: string,
+  ) => Promise<readonly SessionInfo[]>;
   readonly #getLiveStatus: SessionHistoryLiveStatusLookup;
   readonly #latestByWorkspace = new Map<string, HistoryIndex>();
 
   constructor(options: SessionHistoryOptions = {}) {
     this.#listSessions =
       options.listSessions ??
-      ((cwd) => SessionManager.list(cwd, options.sessionDir));
+      ((cwd, sessionDirectory) =>
+        SessionManager.list(
+          cwd,
+          sessionDirectory ?? options.sessionDir,
+        ));
     this.#getLiveStatus = options.getLiveStatus ?? (() => undefined);
   }
 
@@ -199,7 +210,12 @@ export class SessionHistory {
     const canonicalWorkspace = await this.#requireCanonicalWorkspace(workspace);
     let sessions: readonly SessionInfo[];
     try {
-      sessions = await this.#listSessions(canonicalWorkspace.path);
+      sessions = canonicalWorkspace.sessionDirectory == null
+        ? await this.#listSessions(canonicalWorkspace.path)
+        : await this.#listSessions(
+            canonicalWorkspace.path,
+            canonicalWorkspace.sessionDirectory,
+          );
     } catch (error) {
       throw toAppError(error, { source: "filesystem", target: "session" });
     }
@@ -242,7 +258,11 @@ export class SessionHistory {
       if (path.resolve(canonicalPath) !== path.resolve(workspace.path)) {
         throw new Error("Workspace path was not canonical");
       }
-      return { id: workspace.id, path: canonicalPath };
+      return {
+        id: workspace.id,
+        path: canonicalPath,
+        sessionDirectory: workspace.sessionDirectory,
+      };
     } catch (error) {
       throw new AppError(ERROR_CODES.WORKSPACE_UNAVAILABLE, { cause: error });
     }

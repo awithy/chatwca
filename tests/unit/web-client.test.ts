@@ -54,6 +54,8 @@ const workspace = {
   id: "workspace-1",
   name: "Workspace",
   path: "/workspace",
+  sessionStorage: "pi-default",
+  sessionDirectory: null,
   createdAt: 1,
   updatedAt: 1,
   available: true,

@@ -74,6 +74,8 @@ describe("WorkspaceRepository CRUD", () => {
       id: "workspace-1",
       name: "Example",
       path: realpathSync(firstPath),
+      sessionStorage: "pi-default",
+      sessionDirectory: null,
       createdAt: 10,
       updatedAt: 10,
       available: true,
@@ -126,11 +128,40 @@ describe("WorkspaceRepository CRUD", () => {
         id: "workspace-persisted",
         name: "Persisted",
         path: realpathSync(workspacePath),
+        sessionStorage: "pi-default",
+        sessionDirectory: null,
         createdAt: 123,
         updatedAt: 123,
         available: true,
       },
     ]);
+  });
+
+  it("stores an immutable workspace-local session policy without creating files", () => {
+    const root = temporaryDirectory();
+    const workspacePath = directory(root, "local-project");
+    const opened = database();
+    const repository = new WorkspaceRepository(opened.connection, {
+      uuid: () => "workspace-local",
+      clock: () => 10,
+    });
+
+    const created = repository.create({
+      name: "Local sessions",
+      path: workspacePath,
+      sessionStorage: "workspace",
+    });
+
+    expect(created).toMatchObject({
+      sessionStorage: "workspace",
+      sessionDirectory: path.join(workspacePath, ".chatwca", "sessions"),
+      available: true,
+    });
+    expect(() => statSync(path.join(workspacePath, ".chatwca"))).toThrow();
+    expect(repository.update(created.id, { name: "Renamed" })).toMatchObject({
+      sessionStorage: "workspace",
+      sessionDirectory: path.join(workspacePath, ".chatwca", "sessions"),
+    });
   });
 
   it("rejects empty names and preserves the prior timestamp after failed updates", () => {
@@ -176,6 +207,27 @@ describe("workspace path canonicalization and availability", () => {
       expect.objectContaining({ code: ERROR_CODES.DUPLICATE_WORKSPACE_PATH }),
     );
     expect(repository.list()).toHaveLength(1);
+  });
+
+  it("rejects workspace-local session directories that escape through a symlink", () => {
+    const root = temporaryDirectory();
+    const workspacePath = directory(root, "project");
+    const outside = directory(root, "outside");
+    symlinkSync(outside, path.join(workspacePath, ".chatwca"), "dir");
+    const opened = database();
+    const repository = new WorkspaceRepository(opened.connection, {
+      uuid: () => "workspace-local",
+      clock: () => 10,
+    });
+
+    expect(() => repository.create({
+      name: "Escaped",
+      path: workspacePath,
+      sessionStorage: "workspace",
+    })).toThrow(
+      expect.objectContaining({ code: ERROR_CODES.INVALID_WORKSPACE_PATH }),
+    );
+    expect(repository.list()).toEqual([]);
   });
 
   it("enforces canonical path uniqueness on updates without changing the row", () => {

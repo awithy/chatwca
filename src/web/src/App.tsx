@@ -131,6 +131,7 @@ export function App() {
       type: "workspace.create",
       name: values.name,
       path: values.path,
+      sessionStorage: values.sessionStorage,
     }));
     const created = result.workspaces.find((workspace) => !knownIds.has(workspace.id));
     if (created !== undefined) {

@@ -22,6 +22,10 @@ import type {
   ConversationRegistryEvent,
   ConversationRegistryListener,
 } from "./conversation-registry.js";
+import {
+  OutboundFlowController,
+  type OutboundFlowOptions,
+} from "./outbound-flow.js";
 
 /**
  * Covers the default 24 MiB decoded-image aggregate after base64 expansion,
@@ -65,6 +69,7 @@ export interface WebSocketProtocolOptions {
   readonly registry: ProtocolRegistry;
   readonly history: ProtocolHistory;
   readonly maxInboundMessageBytes?: number;
+  readonly outboundFlow?: OutboundFlowOptions;
   readonly onInternalError?: (error: unknown) => void;
 }
 
@@ -280,7 +285,9 @@ export class WebSocketProtocol {
   readonly #registry: ProtocolRegistry;
   readonly #history: ProtocolHistory;
   readonly #maxInboundMessageBytes: number;
+  readonly #outboundFlowOptions: OutboundFlowOptions;
   readonly #onInternalError: (error: unknown) => void;
+  readonly #flows = new Map<WebSocket, OutboundFlowController>();
   readonly #unsubscribeRegistry: () => void;
   readonly #onConnection: (socket: WebSocket) => void;
   #historyBroadcastRunning = false;
@@ -300,6 +307,7 @@ export class WebSocketProtocol {
     ) {
       throw new RangeError("maxInboundMessageBytes must be a positive integer");
     }
+    this.#outboundFlowOptions = options.outboundFlow ?? {};
     this.#onInternalError = options.onInternalError ?? (() => undefined);
 
     this.#onConnection = (socket) => this.#handleConnection(socket);
@@ -314,9 +322,22 @@ export class WebSocketProtocol {
     this.#disposed = true;
     this.#webSocketServer.off("connection", this.#onConnection);
     this.#unsubscribeRegistry();
+    for (const flow of this.#flows.values()) flow.dispose();
+    this.#flows.clear();
   }
 
   #handleConnection(socket: WebSocket): void {
+    const flow = new OutboundFlowController(socket, {
+      ...this.#outboundFlowOptions,
+      onError: this.#onInternalError,
+    });
+    this.#flows.set(socket, flow);
+    socket.once("close", () => {
+      flow.dispose();
+      this.#flows.delete(socket);
+    });
+    socket.on("error", this.#onInternalError);
+
     this.#send(socket, {
       type: "ready",
       serverVersion: this.#serverVersion,
@@ -417,13 +438,6 @@ export class WebSocketProtocol {
   }
 
   #send(socket: WebSocket, message: ServerMessage): void {
-    if (socket.readyState !== WebSocket.OPEN) return;
-    try {
-      socket.send(JSON.stringify(message), (error) => {
-        if (error !== undefined) this.#onInternalError(error);
-      });
-    } catch (error) {
-      this.#onInternalError(error);
-    }
+    this.#flows.get(socket)?.send(message);
   }
 }

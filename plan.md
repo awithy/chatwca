@@ -471,6 +471,8 @@ Verify:
 
 ### T10.1 Add outbound flow control
 
+**Status:** Complete — per-client buffered-byte accounting, priority-aware bounded queues, safe cumulative tool-update coalescing, slow-client resynchronization/disconnect behavior, transport-level inbound bounds, and combined tool-output bounds are implemented in [`src/server/outbound-flow.ts`](src/server/outbound-flow.ts) and [`src/server/protocol.ts`](src/server/protocol.ts).
+
 - Track WebSocket buffered bytes.
 - Preserve high-priority text/status events.
 - Coalesce safe high-frequency tool updates where possible.

@@ -317,4 +317,54 @@ describe("WebSocket command server", () => {
     first.close();
     second.close();
   });
+
+  it("rejects oversized fragmented payloads inside ws before command dispatch", async () => {
+    const prompt = vi.fn(async () => undefined);
+    const registry: ProtocolRegistry = {
+      create: vi.fn(async () => ({ id: state.id })),
+      open: vi.fn(async () => ({ id: state.id })),
+      getState: vi.fn(async () => state),
+      close: vi.fn(async () => undefined),
+      fork: vi.fn(async () => ({ conversation: state, editorText: "" })),
+      prompt,
+      abort: vi.fn(async () => undefined),
+      subscribe: () => () => undefined,
+    };
+    const history: ProtocolHistory = {
+      list: vi.fn(async () => [summary]),
+      resolve: vi.fn(async () => ({ summary })),
+      delete: vi.fn(async () => []),
+    };
+    const config = loadConfig({ CHATWCA_DEFAULT_CWD: "/tmp" }, "/tmp");
+    const server = createChatWcaServer(config, "payload-limit-test", {
+      registry,
+      history,
+      maxInboundMessageBytes: 128,
+      onInternalError: () => undefined,
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) =>
+      server.httpServer.listen(0, "127.0.0.1", resolve),
+    );
+    const { port } = server.httpServer.address() as AddressInfo;
+    const socket = new WebSocket(`ws://127.0.0.1:${String(port)}/ws`);
+    await expect(nextMessage(socket)).resolves.toMatchObject({ type: "ready" });
+
+    const closed = new Promise<number>((resolve) => {
+      socket.once("close", (code) => resolve(code));
+    });
+    const oversized = JSON.stringify({
+      type: "prompt.submit",
+      requestId: "oversized",
+      conversationId: state.id,
+      text: "x".repeat(256),
+      images: [],
+    });
+    const midpoint = Math.floor(oversized.length / 2);
+    socket.send(oversized.slice(0, midpoint), { fin: false });
+    socket.send(oversized.slice(midpoint), { fin: true });
+
+    await expect(closed).resolves.toBe(1009);
+    expect(prompt).not.toHaveBeenCalled();
+  });
 });

@@ -193,8 +193,40 @@ describe("session serialization", () => {
       content: prefix,
       isError: false,
       truncated: true,
-      originalBytes: Buffer.byteLength("<b>raw tool output</b>\nπ🙂tail"),
+      originalBytes:
+        Buffer.byteLength("<b>raw tool output</b>\nπ🙂tail") +
+        Buffer.byteLength("iVBORfixture"),
     });
+  });
+
+  it("bounds combined tool text and image output", () => {
+    const messages = serializeSessionEntries(
+      [{
+        type: "message",
+        id: "tool-large-image",
+        message: {
+          role: "toolResult",
+          toolCallId: "call-image",
+          toolName: "capture",
+          content: [
+            { type: "text", text: "ok" },
+            { type: "image", mimeType: "image/png", data: "x".repeat(32) },
+          ],
+          isError: false,
+        },
+      }],
+      { maxToolOutputBytes: 16 },
+    );
+
+    expect(messages[0]?.blocks).toEqual([{
+      type: "tool-result",
+      toolCallId: "call-image",
+      toolName: "capture",
+      content: "ok",
+      isError: false,
+      truncated: true,
+      originalBytes: 34,
+    }]);
   });
 
   it("omits usage when the SDK does not provide reliable integer token counts", () => {

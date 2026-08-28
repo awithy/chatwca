@@ -251,6 +251,28 @@ function serializeToolResult(
     .map((item) => item.text as string)
     .join("\n");
   const bounded = truncateUtf8(text, maximumBytes);
+  const images = content.flatMap((item) => {
+    const part = record(item);
+    if (part?.type !== "image") return [];
+    const image = serializeImage(part);
+    return image === undefined ? [] : [image];
+  });
+  const originalImageBytes = images.reduce(
+    (total, image) => total + Buffer.byteLength(image.image.data, "utf8"),
+    0,
+  );
+  let remainingBytes =
+    maximumBytes - Buffer.byteLength(bounded.content, "utf8");
+  const retainedImages: ImageBlock[] = [];
+  for (const image of images) {
+    const imageBytes = Buffer.byteLength(image.image.data, "utf8");
+    if (imageBytes > remainingBytes) continue;
+    retainedImages.push(image);
+    remainingBytes -= imageBytes;
+  }
+
+  const originalBytes = bounded.originalBytes + originalImageBytes;
+  const truncated = bounded.truncated || retainedImages.length !== images.length;
   const toolName = nonEmptyString(message.toolName);
   const result: ToolResultBlock = {
     type: "tool-result",
@@ -258,18 +280,11 @@ function serializeToolResult(
     ...(toolName === undefined ? {} : { toolName }),
     content: bounded.content,
     isError: message.isError === true,
-    truncated: bounded.truncated,
-    ...(bounded.truncated ? { originalBytes: bounded.originalBytes } : {}),
+    truncated,
+    ...(truncated ? { originalBytes } : {}),
   };
 
-  const blocks: AssistantContentBlock[] = [result];
-  for (const item of content) {
-    const part = record(item);
-    if (part?.type !== "image") continue;
-    const image = serializeImage(part);
-    if (image !== undefined) blocks.push(image);
-  }
-  return blocks;
+  return [result, ...retainedImages];
 }
 
 function serializeEntry(

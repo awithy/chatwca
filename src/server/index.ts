@@ -12,7 +12,9 @@ import {
 } from "./config.js";
 import { ConversationRegistry } from "./conversation-registry.js";
 import { PiRuntimeFactory } from "./pi-runtime.js";
+import type { OutboundFlowOptions } from "./outbound-flow.js";
 import {
+  DEFAULT_MAX_INBOUND_MESSAGE_BYTES,
   WebSocketProtocol,
   type ProtocolHistory,
   type ProtocolRegistry,
@@ -34,6 +36,8 @@ export interface ChatWcaServer {
 export interface ChatWcaProtocolServices {
   readonly registry: ProtocolRegistry;
   readonly history: ProtocolHistory;
+  readonly maxInboundMessageBytes?: number;
+  readonly outboundFlow?: OutboundFlowOptions;
   readonly onInternalError?: (error: unknown) => void;
 }
 
@@ -90,7 +94,14 @@ export function createChatWcaServer(
   serveWebApp(app);
 
   const httpServer = createHttpServer(app);
-  const webSocketServer = new WebSocketServer({ noServer: true });
+  const maxInboundMessageBytes =
+    services?.maxInboundMessageBytes ?? DEFAULT_MAX_INBOUND_MESSAGE_BYTES;
+  const webSocketServer = new WebSocketServer({
+    noServer: true,
+    // Enforce the same aggregate frame/fragment bound inside ws, before the
+    // command decoder allocates or parses the payload.
+    maxPayload: maxInboundMessageBytes,
+  });
 
   httpServer.on("upgrade", (request, socket, head) => {
     if (request.url !== "/ws") {
@@ -116,6 +127,10 @@ export function createChatWcaServer(
           serverVersion,
           registry: services.registry,
           history: services.history,
+          maxInboundMessageBytes,
+          ...(services.outboundFlow === undefined
+            ? {}
+            : { outboundFlow: services.outboundFlow }),
           ...(services.onInternalError === undefined
             ? {}
             : { onInternalError: services.onInternalError }),

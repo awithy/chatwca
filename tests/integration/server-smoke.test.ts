@@ -1,0 +1,108 @@
+import type { AddressInfo } from "node:net";
+
+import { afterEach, describe, expect, it } from "vitest";
+import WebSocket from "ws";
+
+import { loadConfig } from "../../src/server/config.js";
+import {
+  createChatWcaServer,
+  type ChatWcaServer,
+} from "../../src/server/index.js";
+
+const openServers: ChatWcaServer[] = [];
+
+async function startServer(): Promise<{
+  readonly server: ChatWcaServer;
+  readonly baseUrl: string;
+}> {
+  const config = loadConfig(
+    {
+      CHATWCA_DEFAULT_CWD: "/tmp/chatwca-smoke-workspace",
+      CHATWCA_MAX_IMAGES: "3",
+      CHATWCA_MAX_IMAGE_BYTES: "1024",
+      CHATWCA_MAX_TOTAL_IMAGE_BYTES: "2048",
+      PI_CODING_AGENT_DIR: "/private/pi-data",
+    },
+    "/tmp",
+  );
+  const server = createChatWcaServer(config, "test-version");
+
+  await new Promise<void>((resolve, reject) => {
+    server.httpServer.once("error", reject);
+    server.httpServer.listen(0, "127.0.0.1", () => {
+      server.httpServer.off("error", reject);
+      resolve();
+    });
+  });
+
+  openServers.push(server);
+  const address = server.httpServer.address() as AddressInfo;
+  return { server, baseUrl: `http://127.0.0.1:${String(address.port)}` };
+}
+
+async function closeServer(server: ChatWcaServer): Promise<void> {
+  for (const client of server.webSocketServer.clients) {
+    client.terminate();
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    server.webSocketServer.close((error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.httpServer.close((error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
+afterEach(async () => {
+  await Promise.all(openServers.splice(0).map(closeServer));
+});
+
+describe("server shell", () => {
+  it("serves health and browser-safe configuration", async () => {
+    const { baseUrl } = await startServer();
+
+    const healthResponse = await fetch(`${baseUrl}/api/health`);
+    expect(healthResponse.status).toBe(200);
+    expect(await healthResponse.json()).toEqual({
+      ready: true,
+      version: "test-version",
+    });
+
+    const configResponse = await fetch(`${baseUrl}/api/config`);
+    expect(configResponse.status).toBe(200);
+    const body = await configResponse.json();
+    expect(body).toEqual({
+      defaultCwd: "/tmp/chatwca-smoke-workspace",
+      maxImages: 3,
+      maxImageBytes: 1024,
+      maxTotalImageBytes: 2048,
+    });
+    expect(JSON.stringify(body)).not.toContain("/private/pi-data");
+  });
+
+  it("accepts a WebSocket connection and announces readiness", async () => {
+    const { baseUrl } = await startServer();
+    const socket = new WebSocket(baseUrl.replace(/^http/, "ws") + "/ws");
+
+    const message = await new Promise<unknown>((resolve, reject) => {
+      socket.once("message", (data) => {
+        try {
+          resolve(JSON.parse(data.toString()));
+        } catch (error: unknown) {
+          reject(error);
+        }
+      });
+      socket.once("error", reject);
+    });
+
+    expect(message).toEqual({ type: "ready", serverVersion: "test-version" });
+    socket.close();
+  });
+});

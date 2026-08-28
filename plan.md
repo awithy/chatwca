@@ -94,6 +94,8 @@ In `src/server/index.ts`:
 
 ### T1.4 Establish baseline automation
 
+**Status:** Complete — configuration coverage, an HTTP/WebSocket server smoke test, and CI build/typecheck/test gates are in place.
+
 - Add unit tests for configuration defaults and invalid values.
 - Add a build/typecheck test in CI.
 - Add a server smoke test for health, config, and WebSocket readiness.

@@ -106,6 +106,8 @@ In `src/server/index.ts`:
 
 ### T2.1 Define protocol schemas
 
+**Status:** Complete — the closed-object TypeBox wire contract, inferred types, normalized content model, snapshots, acknowledgements, and event envelopes are implemented in [`src/shared/protocol.ts`](src/shared/protocol.ts).
+
 In `src/shared/protocol.ts`, create TypeBox schemas and inferred TypeScript types for:
 
 - every command listed in the design;

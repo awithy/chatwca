@@ -200,6 +200,8 @@ In `src/server/serialize.ts`:
 
 ### T4.1 Implement registry ownership and indexes
 
+**Status:** Complete — process-wide runtime ownership, canonical ID/file indexes, duplicate-writer suppression, record metadata, replacement refresh, and socket-independent registry events are implemented in [`src/server/conversation-registry.ts`](src/server/conversation-registry.ts).
+
 In `src/server/conversation-registry.ts`:
 
 - Store records by Pi session ID and canonical session-file path.

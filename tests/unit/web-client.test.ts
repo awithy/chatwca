@@ -77,6 +77,37 @@ afterEach(() => {
 });
 
 describe("ChatSocketClient", () => {
+  it("stops reconnecting and reports an announced server shutdown", async () => {
+    const sockets: FakeSocket[] = [];
+    const client = new ChatSocketClient({
+      url: "ws://test/ws",
+      webSocketFactory: () => {
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        return socket as unknown as WebSocket;
+      },
+      initialReconnectDelayMs: 0,
+      maxReconnectDelayMs: 0,
+    });
+    client.connect();
+    const socket = sockets[0];
+    socket?.server({ type: "ready", serverVersion: "1" });
+
+    socket?.server({ type: "server.shutdown", gracePeriodMs: 1000 });
+    socket?.remoteClose();
+    await flush();
+
+    expect(client.getState()).toMatchObject({
+      connection: "disconnected",
+      lastError: {
+        code: "shutting_down",
+        message: "The server is shutting down.",
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sockets).toHaveLength(1);
+  });
+
   it("correlates commands and surfaces stable server errors", async () => {
     let request = 0;
     const socket = new FakeSocket();

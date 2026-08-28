@@ -481,6 +481,8 @@ Verify:
 
 ### T10.2 Implement graceful shutdown
 
+**Status:** Complete — signal-driven admission control, client notification/closure, active-run abort, capped configurable grace, and idempotent forced transport/runtime cleanup are implemented in [`src/server/shutdown.ts`](src/server/shutdown.ts).
+
 - On `SIGINT`/`SIGTERM`, reject new prompt/create/open/fork commands.
 - Stop accepting HTTP/WebSocket connections and notify/close clients.
 - Ask active sessions to abort.

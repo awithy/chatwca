@@ -629,6 +629,44 @@ describe("ConversationRegistry", () => {
     expect(refreshHistory).toHaveBeenCalledTimes(2);
   });
 
+  it("closes admission and coalesces active aborts during shutdown", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessionFile = path.join(root, "shutdown.jsonl");
+    await mkdir(cwd);
+
+    const runtime = new FakeRuntime(identity("shutdown", sessionFile, cwd), {
+      prompt: "active prompt",
+    });
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(runtime);
+    const registry = new ConversationRegistry({ runtimeFactory: factory });
+    const record = await registry.create(cwd);
+    record.status = "streaming";
+
+    registry.beginShutdown();
+    const firstAbort = registry.abortActive();
+    const secondAbort = registry.abortActive();
+    expect(firstAbort).toBe(secondAbort);
+    await firstAbort;
+    expect(runtime.abortSpy).toHaveBeenCalledOnce();
+
+    for (const operation of [
+      () => registry.create(cwd),
+      () => registry.open(sessionFile),
+      () => registry.prompt(record.id, "new work", []),
+      () => registry.fork(record.id, "entry-1"),
+    ]) {
+      await expect(operation()).rejects.toMatchObject({
+        code: ERROR_CODES.SHUTTING_DOWN,
+      });
+    }
+    expect(factory.createPersistent).toHaveBeenCalledOnce();
+    expect(factory.openPersistent).not.toHaveBeenCalled();
+
+    await registry.dispose();
+  });
+
   it("disposes all records, including active ones, without leaked listeners", async () => {
     const root = await temporaryRoot();
     const cwd = path.join(root, "workspace");
@@ -839,6 +877,62 @@ describe("ConversationRegistry", () => {
       record: { id: "forked" },
     });
     expect(refreshHistory).toHaveBeenCalled();
+  });
+
+  it("owns and disposes an in-flight temporary fork during shutdown", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessions = path.join(root, "sessions");
+    const sourceFile = path.join(sessions, "source.jsonl");
+    const forkFile = path.join(sessions, "shutdown-fork.jsonl");
+    await Promise.all([mkdir(cwd), mkdir(sessions)]);
+    await writeFile(sourceFile, "source");
+
+    const branch = [{
+      type: "message",
+      id: "a1b2c3d4",
+      message: { role: "user", content: "fork this" },
+    }];
+    const sourceRuntime = new FakeRuntime(
+      identity("source", sourceFile, cwd),
+      { branch },
+    );
+    const temporary = new FakeRuntime(
+      identity("source", sourceFile, cwd),
+      { branch },
+    );
+    let releaseFork: (() => void) | undefined;
+    const forkGate = new Promise<void>((resolve) => {
+      releaseFork = resolve;
+    });
+    temporary.forkSpy.mockImplementation(async () => {
+      await forkGate;
+      await writeFile(forkFile, "fork");
+      temporary.replace(identity("shutdown-fork", forkFile, cwd));
+      return { cancelled: false, editorText: "fork this" };
+    });
+
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(sourceRuntime);
+    factory.openPersistent.mockResolvedValue(temporary);
+    const registry = new ConversationRegistry({
+      runtimeFactory: factory,
+      maxLiveConversations: 2,
+    });
+    const source = await registry.create(cwd);
+    const forking = registry.fork(source.id, "a1b2c3d4");
+    await vi.waitFor(() => expect(temporary.forkSpy).toHaveBeenCalledOnce());
+
+    registry.beginShutdown();
+    await registry.dispose();
+    expect(temporary.disposeSpy).toHaveBeenCalledOnce();
+    expect(sourceRuntime.disposeSpy).toHaveBeenCalledOnce();
+
+    releaseFork?.();
+    await expect(forking).rejects.toMatchObject({
+      code: ERROR_CODES.SHUTTING_DOWN,
+    });
+    expect(temporary.disposeSpy).toHaveBeenCalledOnce();
   });
 
   it("disposes and removes every failed temporary fork resource", async () => {

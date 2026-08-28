@@ -69,8 +69,13 @@ Pi provider credentials will use the standard Pi credential store or provider en
 | `CHATWCA_MAX_IMAGES` | `8` | Maximum images per prompt |
 | `CHATWCA_MAX_IMAGE_BYTES` | `8388608` | Maximum decoded bytes per image |
 | `CHATWCA_MAX_TOTAL_IMAGE_BYTES` | `25165824` | Maximum aggregate decoded image bytes per prompt |
+| `CHATWCA_SHUTDOWN_GRACE_MS` | `10000` | Graceful shutdown bound in milliseconds (maximum `300000`) |
 | `PI_CODING_AGENT_DIR` | Pi default | Pi configuration and session directory |
 | `PI_OFFLINE` | unset | Use Pi's standard offline mode |
+
+## Shutdown
+
+`SIGINT` and `SIGTERM` stop new conversations/prompts, close the listener, notify connected browsers, abort active runs, and dispose live Pi runtimes. Cleanup waits at most `CHATWCA_SHUTDOWN_GRACE_MS`; remaining network connections are then forced closed so process termination stays bounded. Completed Pi JSONL history remains persisted, while an in-progress response may be recorded as aborted.
 
 ## Scope
 

@@ -26,6 +26,10 @@ import {
   OutboundFlowController,
   type OutboundFlowOptions,
 } from "./outbound-flow.js";
+import {
+  WEBSOCKET_RESTART_CLOSE_CODE,
+  WEBSOCKET_RESTART_CLOSE_REASON,
+} from "./shutdown.js";
 
 /**
  * Covers the default 24 MiB decoded-image aggregate after base64 expansion,
@@ -78,6 +82,15 @@ export interface DispatchResult {
   readonly historyChanged?: boolean;
   readonly history?: readonly ConversationSummary[];
 }
+
+const SHUTDOWN_REJECTED_COMMANDS: ReadonlySet<ClientCommand["type"]> = new Set([
+  "conversation.create",
+  "conversation.open",
+  "conversation.fork",
+  "prompt.submit",
+  "prompt.steer",
+  "prompt.followUp",
+]);
 
 class CommandDecodeError extends AppError {
   readonly requestId: string | undefined;
@@ -148,7 +161,12 @@ export async function dispatchClientCommand(
   command: ClientCommand,
   registry: ProtocolRegistry,
   history: ProtocolHistory,
+  shuttingDown = false,
 ): Promise<DispatchResult> {
+  if (shuttingDown && SHUTDOWN_REJECTED_COMMANDS.has(command.type)) {
+    throw new AppError(ERROR_CODES.SHUTTING_DOWN);
+  }
+
   switch (command.type) {
     case "history.list":
       return {
@@ -292,6 +310,8 @@ export class WebSocketProtocol {
   readonly #onConnection: (socket: WebSocket) => void;
   #historyBroadcastRunning = false;
   #historyBroadcastRequested = false;
+  #shuttingDown = false;
+  #shutdownGraceMs = 1;
   #disposed = false;
 
   constructor(options: WebSocketProtocolOptions) {
@@ -317,6 +337,26 @@ export class WebSocketProtocol {
     });
   }
 
+  /** Reject new work, notify clients, and start a restart-style close handshake. */
+  beginShutdown(gracePeriodMs: number): void {
+    if (this.#shuttingDown) return;
+    this.#shuttingDown = true;
+    this.#shutdownGraceMs = gracePeriodMs;
+    for (const socket of this.#webSocketServer.clients) {
+      this.#closeForShutdown(socket, gracePeriodMs);
+    }
+  }
+
+  terminateClients(): void {
+    for (const socket of this.#webSocketServer.clients) {
+      try {
+        socket.terminate();
+      } catch (error) {
+        this.#onInternalError(error);
+      }
+    }
+  }
+
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
@@ -337,6 +377,11 @@ export class WebSocketProtocol {
       this.#flows.delete(socket);
     });
     socket.on("error", this.#onInternalError);
+
+    if (this.#shuttingDown) {
+      this.#closeForShutdown(socket, this.#shutdownGraceMs);
+      return;
+    }
 
     this.#send(socket, {
       type: "ready",
@@ -377,6 +422,7 @@ export class WebSocketProtocol {
         command,
         this.#registry,
         this.#history,
+        this.#shuttingDown,
       );
       this.#send(socket, result.response);
       if (result.history !== undefined) {
@@ -434,6 +480,30 @@ export class WebSocketProtocol {
   #broadcast(message: ServerMessage): void {
     for (const socket of this.#webSocketServer.clients) {
       this.#send(socket, message);
+    }
+  }
+
+  #closeForShutdown(socket: WebSocket, gracePeriodMs: number): void {
+    this.#flows.get(socket)?.dispose();
+    if (socket.readyState !== WebSocket.OPEN) return;
+    try {
+      // Bypass application queues so even a pressured client receives the
+      // process-level notice before the close frame queued immediately after.
+      socket.send(
+        JSON.stringify({
+          type: "server.shutdown",
+          gracePeriodMs,
+        } satisfies ServerMessage),
+        (error) => {
+          if (error !== undefined) this.#onInternalError(error);
+        },
+      );
+      socket.close(
+        WEBSOCKET_RESTART_CLOSE_CODE,
+        WEBSOCKET_RESTART_CLOSE_REASON,
+      );
+    } catch (error) {
+      this.#onInternalError(error);
     }
   }
 

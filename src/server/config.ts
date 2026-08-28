@@ -6,6 +6,9 @@ export const DEFAULT_MAX_LIVE_CONVERSATIONS = 8;
 export const DEFAULT_MAX_IMAGES = 8;
 export const DEFAULT_MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 export const DEFAULT_MAX_TOTAL_IMAGE_BYTES = 24 * 1024 * 1024;
+export const DEFAULT_SHUTDOWN_GRACE_MS = 10_000;
+/** Prevent configuration mistakes from delaying process termination indefinitely. */
+export const MAX_SHUTDOWN_GRACE_MS = 5 * 60 * 1_000;
 
 export interface ServerConfig {
   readonly host: string;
@@ -15,6 +18,7 @@ export interface ServerConfig {
   readonly maxImages: number;
   readonly maxImageBytes: number;
   readonly maxTotalImageBytes: number;
+  readonly shutdownGraceMs: number;
   /** Pi consumes this environment setting directly; it must never be sent to the browser. */
   readonly piCodingAgentDir: string | undefined;
   /** Pi 0.84.3 enables offline mode when PI_OFFLINE is present, regardless of its value. */
@@ -83,6 +87,17 @@ export function loadConfig(
     throw new ConfigurationError("CHATWCA_DEFAULT_CWD must not be empty");
   }
 
+  const shutdownGraceMs = positiveInteger(
+    environment,
+    "CHATWCA_SHUTDOWN_GRACE_MS",
+    DEFAULT_SHUTDOWN_GRACE_MS,
+  );
+  if (shutdownGraceMs > MAX_SHUTDOWN_GRACE_MS) {
+    throw new ConfigurationError(
+      `CHATWCA_SHUTDOWN_GRACE_MS must not exceed ${String(MAX_SHUTDOWN_GRACE_MS)}; received ${String(shutdownGraceMs)}`,
+    );
+  }
+
   return Object.freeze({
     host,
     port,
@@ -107,6 +122,7 @@ export function loadConfig(
       "CHATWCA_MAX_TOTAL_IMAGE_BYTES",
       DEFAULT_MAX_TOTAL_IMAGE_BYTES,
     ),
+    shutdownGraceMs,
     piCodingAgentDir: optionalNonEmpty(environment, "PI_CODING_AGENT_DIR"),
     piOffline: environment.PI_OFFLINE !== undefined,
   });

@@ -322,6 +322,15 @@ export const ReadyMessageSchema = strictObject({
 });
 export type ReadyMessage = Static<typeof ReadyMessageSchema>;
 
+/** Process-level notice sent immediately before sockets close for shutdown. */
+export const ServerShutdownMessageSchema = strictObject({
+  type: Type.Literal("server.shutdown"),
+  gracePeriodMs: Type.Integer({ minimum: 1 }),
+});
+export type ServerShutdownMessage = Static<
+  typeof ServerShutdownMessageSchema
+>;
+
 export const AcknowledgedCommandTypeSchema = Type.Union([
   Type.Literal("conversation.close"),
   Type.Literal("conversation.delete"),
@@ -568,6 +577,7 @@ export type ConversationEvent = Static<typeof ConversationEventSchema>;
 
 export const ServerMessageSchema = Type.Union([
   ReadyMessageSchema,
+  ServerShutdownMessageSchema,
   AcknowledgementMessageSchema,
   ErrorMessageSchema,
   HistoryMessageSchema,

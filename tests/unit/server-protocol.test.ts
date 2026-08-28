@@ -216,6 +216,58 @@ describe("server WebSocket protocol", () => {
     });
   });
 
+  it("rejects new runtime work while shutdown still permits cleanup/read commands", async () => {
+    const { registry, history, calls } = services();
+    const rejected = [
+      { type: "conversation.create", requestId: "create", cwd: "/workspace" },
+      {
+        type: "conversation.open",
+        requestId: "open",
+        conversationId: state.id,
+      },
+      {
+        type: "conversation.fork",
+        requestId: "fork",
+        conversationId: state.id,
+        entryId: "entry-1",
+      },
+      ...(["prompt.submit", "prompt.steer", "prompt.followUp"] as const).map(
+        (type) => ({
+          type,
+          requestId: type,
+          conversationId: state.id,
+          text: "new work",
+          images: [],
+        }),
+      ),
+    ];
+
+    for (const value of rejected) {
+      await expect(
+        dispatchClientCommand(command(value), registry, history, true),
+      ).rejects.toMatchObject({ code: ERROR_CODES.SHUTTING_DOWN });
+    }
+    expect(calls.create).not.toHaveBeenCalled();
+    expect(calls.open).not.toHaveBeenCalled();
+    expect(calls.fork).not.toHaveBeenCalled();
+    expect(calls.prompt).not.toHaveBeenCalled();
+
+    await expect(
+      dispatchClientCommand(
+        command({
+          type: "conversation.abort",
+          requestId: "abort",
+          conversationId: state.id,
+        }),
+        registry,
+        history,
+        true,
+      ),
+    ).resolves.toMatchObject({
+      response: { type: "ack", command: "conversation.abort" },
+    });
+  });
+
   it("routes submit, steer, follow-up, abort, and source-preserving fork", async () => {
     const { registry, history, calls } = services();
     const promptBase = {

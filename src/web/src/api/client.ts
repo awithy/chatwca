@@ -316,6 +316,22 @@ export class ChatSocketClient {
       return;
     }
 
+    if (message.type === "server.shutdown") {
+      this.#stopped = true;
+      this.#clearReconnectTimer();
+      this.#rejectPending(
+        new ChatTransportError("The server is shutting down."),
+      );
+      this.#dispatch({
+        type: "error",
+        error: {
+          code: "shutting_down",
+          message: "The server is shutting down.",
+        },
+      });
+      return;
+    }
+
     if (message.type === "history") {
       this.#dispatch({ type: "history", conversations: message.conversations });
     } else if (message.type === "state") {
@@ -362,7 +378,9 @@ export class ChatSocketClient {
         }
       }
     } catch (error) {
-      if (generation === this.#generation) this.#setTransportError(error);
+      if (generation === this.#generation && !this.#stopped) {
+        this.#setTransportError(error);
+      }
     }
   }
 

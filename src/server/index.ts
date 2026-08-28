@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { createServer as createHttpServer, type Server } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { WebSocketServer } from "ws";
+import WebSocket, { WebSocketServer } from "ws";
 
 import {
   ConfigurationError,
@@ -20,6 +20,12 @@ import {
   type ProtocolRegistry,
 } from "./protocol.js";
 import { SessionHistory } from "./session-history.js";
+import {
+  GracefulShutdown,
+  WEBSOCKET_RESTART_CLOSE_CODE,
+  WEBSOCKET_RESTART_CLOSE_REASON,
+  type ShutdownRuntimeOwner,
+} from "./shutdown.js";
 import { serveWebApp } from "./static.js";
 import { hasAllowedWebSocketOrigin } from "./websocket-boundary.js";
 
@@ -31,6 +37,8 @@ export interface ChatWcaServer {
   readonly httpServer: Server;
   readonly webSocketServer: WebSocketServer;
   readonly protocol: WebSocketProtocol | undefined;
+  readonly isShuttingDown: boolean;
+  shutdown(): Promise<void>;
 }
 
 export interface ChatWcaProtocolServices {
@@ -38,7 +46,43 @@ export interface ChatWcaProtocolServices {
   readonly history: ProtocolHistory;
   readonly maxInboundMessageBytes?: number;
   readonly outboundFlow?: OutboundFlowOptions;
+  /** Production supplies the registry here so transport and Pi teardown share one bound. */
+  readonly shutdown?: ShutdownRuntimeOwner;
   readonly onInternalError?: (error: unknown) => void;
+}
+
+export interface ShutdownSignalTarget {
+  on(signal: "SIGINT" | "SIGTERM", listener: () => void): unknown;
+  off(signal: "SIGINT" | "SIGTERM", listener: () => void): unknown;
+}
+
+/** Install coalesced process signal handlers; the returned function removes them. */
+export function installShutdownSignalHandlers(
+  server: Pick<ChatWcaServer, "shutdown">,
+  target: ShutdownSignalTarget = process,
+  exit: (code: number) => void = (code) => process.exit(code),
+  onError: (error: unknown) => void = (error) =>
+    console.error("ChatWCA shutdown error", error),
+): () => void {
+  let handled = false;
+  const handle = () => {
+    if (handled) return;
+    handled = true;
+    void server.shutdown().then(
+      () => exit(0),
+      (error: unknown) => {
+        onError(error);
+        exit(1);
+      },
+    );
+  };
+
+  target.on("SIGINT", handle);
+  target.on("SIGTERM", handle);
+  return () => {
+    target.off("SIGINT", handle);
+    target.off("SIGTERM", handle);
+  };
 }
 
 function readServerVersion(): string {
@@ -70,6 +114,25 @@ function readServerVersion(): string {
   }
 }
 
+function closeHttpServer(server: Server): Promise<void> {
+  if (!server.listening) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error !== undefined) reject(error);
+      else resolve();
+    });
+  });
+}
+
+function closeWebSocketServer(server: WebSocketServer): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error !== undefined) reject(error);
+      else resolve();
+    });
+  });
+}
+
 /** Build the shared HTTP/WebSocket server without binding a network port. */
 export function createChatWcaServer(
   config: Readonly<ServerConfig>,
@@ -77,9 +140,10 @@ export function createChatWcaServer(
   services?: ChatWcaProtocolServices,
 ): ChatWcaServer {
   const app = express();
+  let accepting = true;
 
   app.get("/api/health", (_request, response) => {
-    response.json({ ready: true, version: serverVersion });
+    response.json({ ready: accepting, version: serverVersion });
   });
 
   app.get("/api/config", (_request, response) => {
@@ -104,6 +168,10 @@ export function createChatWcaServer(
   });
 
   httpServer.on("upgrade", (request, socket, head) => {
+    if (!accepting) {
+      socket.end("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n");
+      return;
+    }
     if (request.url !== "/ws") {
       socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
       return;
@@ -145,7 +213,64 @@ export function createChatWcaServer(
   }
   webSocketServer.once("close", () => protocol?.dispose());
 
-  return { httpServer, webSocketServer, protocol };
+  const onInternalError = services?.onInternalError ?? (() => undefined);
+  const shutdownOwner = services?.shutdown;
+  const gracefulShutdown = new GracefulShutdown({
+    gracePeriodMs: config.shutdownGraceMs,
+    beginShutdown: () => shutdownOwner?.beginShutdown(),
+    stopAccepting: () => {
+      accepting = false;
+    },
+    notifyAndCloseClients: () => {
+      if (protocol !== undefined) {
+        protocol.beginShutdown(config.shutdownGraceMs);
+        return;
+      }
+      const notice = JSON.stringify({
+        type: "server.shutdown",
+        gracePeriodMs: config.shutdownGraceMs,
+      });
+      for (const client of webSocketServer.clients) {
+        if (client.readyState !== WebSocket.OPEN) continue;
+        try {
+          client.send(notice);
+          client.close(
+            WEBSOCKET_RESTART_CLOSE_CODE,
+            WEBSOCKET_RESTART_CLOSE_REASON,
+          );
+        } catch (error) {
+          onInternalError(error);
+        }
+      }
+    },
+    closeTransports: async () => {
+      await Promise.all([
+        closeWebSocketServer(webSocketServer),
+        closeHttpServer(httpServer),
+      ]);
+    },
+    abortActive: () => shutdownOwner?.abortActive() ?? Promise.resolve(),
+    disposeRuntimes: () => shutdownOwner?.dispose() ?? Promise.resolve(),
+    disposeListeners: () => protocol?.dispose(),
+    forceClose: () => {
+      protocol?.terminateClients();
+      if (protocol === undefined) {
+        for (const client of webSocketServer.clients) client.terminate();
+      }
+      httpServer.closeAllConnections();
+    },
+    onError: onInternalError,
+  });
+
+  return {
+    httpServer,
+    webSocketServer,
+    protocol,
+    get isShuttingDown() {
+      return gracefulShutdown.started;
+    },
+    shutdown: () => gracefulShutdown.shutdown(),
+  };
 }
 
 async function main(): Promise<void> {
@@ -177,13 +302,16 @@ async function main(): Promise<void> {
       onListenerError: (error) => console.error("ChatWCA runtime error", error),
     });
 
-    const { httpServer } = createChatWcaServer(config, readServerVersion(), {
+    const server = createChatWcaServer(config, readServerVersion(), {
       registry,
       history,
+      shutdown: registry,
       onInternalError: (error) =>
         console.error("ChatWCA protocol error", error),
     });
-    httpServer.listen(config.port, config.host, () => {
+    installShutdownSignalHandlers(server);
+
+    server.httpServer.listen(config.port, config.host, () => {
       console.log(
         `ChatWCA listening on http://${config.host}:${String(config.port)}`,
       );

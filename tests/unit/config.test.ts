@@ -10,6 +10,8 @@ import {
   DEFAULT_MAX_LIVE_CONVERSATIONS,
   DEFAULT_MAX_TOTAL_IMAGE_BYTES,
   DEFAULT_PORT,
+  DEFAULT_SHUTDOWN_GRACE_MS,
+  MAX_SHUTDOWN_GRACE_MS,
   loadConfig,
 } from "../../src/server/config.js";
 
@@ -25,6 +27,7 @@ describe("loadConfig", () => {
       maxImages: DEFAULT_MAX_IMAGES,
       maxImageBytes: DEFAULT_MAX_IMAGE_BYTES,
       maxTotalImageBytes: DEFAULT_MAX_TOTAL_IMAGE_BYTES,
+      shutdownGraceMs: DEFAULT_SHUTDOWN_GRACE_MS,
       piCodingAgentDir: undefined,
       piOffline: false,
     });
@@ -41,6 +44,7 @@ describe("loadConfig", () => {
         CHATWCA_MAX_IMAGES: "4",
         CHATWCA_MAX_IMAGE_BYTES: "1024",
         CHATWCA_MAX_TOTAL_IMAGE_BYTES: "4096",
+        CHATWCA_SHUTDOWN_GRACE_MS: "2500",
         PI_CODING_AGENT_DIR: "/tmp/pi-agent",
         PI_OFFLINE: "1",
       },
@@ -55,6 +59,7 @@ describe("loadConfig", () => {
       maxImages: 4,
       maxImageBytes: 1024,
       maxTotalImageBytes: 4096,
+      shutdownGraceMs: 2500,
       piCodingAgentDir: "/tmp/pi-agent",
       piOffline: true,
     });
@@ -81,12 +86,22 @@ describe("loadConfig", () => {
     "CHATWCA_MAX_IMAGES",
     "CHATWCA_MAX_IMAGE_BYTES",
     "CHATWCA_MAX_TOTAL_IMAGE_BYTES",
+    "CHATWCA_SHUTDOWN_GRACE_MS",
   ] as const)("rejects non-positive or non-integer %s", (variable) => {
     for (const value of ["", "0", "-2", "2.5", "invalid"]) {
       expect(() => loadConfig({ [variable]: value }, "/tmp")).toThrow(
         new RegExp(`${variable} must be a positive integer`),
       );
     }
+  });
+
+  it("caps the configurable shutdown grace period", () => {
+    expect(() =>
+      loadConfig(
+        { CHATWCA_SHUTDOWN_GRACE_MS: String(MAX_SHUTDOWN_GRACE_MS + 1) },
+        "/tmp",
+      )
+    ).toThrow(/CHATWCA_SHUTDOWN_GRACE_MS must not exceed/);
   });
 
   it("rejects empty string settings", () => {

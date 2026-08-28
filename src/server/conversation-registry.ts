@@ -248,6 +248,8 @@ export class ConversationRegistry {
   readonly #pendingCloses = new WeakMap<ConversationRecord, Promise<void>>();
   readonly #pendingAborts = new WeakMap<ConversationRecord, Promise<void>>();
   readonly #forkSourceReservations = new WeakMap<ConversationRecord, number>();
+  /** Fork runtimes exist before registration and must still be owned at shutdown. */
+  readonly #temporaryRuntimes = new Set<PiConversationRuntimePort>();
   readonly #listeners = new Set<ConversationRegistryListener>();
   readonly #replacementUnsubscribes = new WeakMap<
     ConversationRecord,
@@ -256,6 +258,8 @@ export class ConversationRegistry {
   readonly #normalizers = new WeakMap<ConversationRecord, PiEventNormalizer>();
   #capacityReservations = 0;
   #capacityTail = Promise.resolve();
+  #shuttingDown = false;
+  #abortActivePromise: Promise<void> | undefined;
   #disposePromise: Promise<void> | undefined;
 
   constructor(options: ConversationRegistryOptions) {
@@ -302,11 +306,31 @@ export class ConversationRegistry {
     };
   }
 
+  get shuttingDown(): boolean {
+    return this.#shuttingDown;
+  }
+
+  /** Close the runtime-work admission boundary synchronously. */
+  beginShutdown(): void {
+    this.#shuttingDown = true;
+  }
+
+  /** Abort all sessions active when shutdown begins; repeated calls coalesce. */
+  abortActive(): Promise<void> {
+    this.beginShutdown();
+    this.#abortActivePromise ??= Promise.allSettled(
+      this.records.filter(isBusy).map((record) => this.abort(record.id)),
+    ).then(() => undefined);
+    return this.#abortActivePromise;
+  }
+
   async create(cwd: string): Promise<ConversationRecord> {
+    this.#assertAcceptingWork();
     const releaseCapacity = await this.#reserveCapacity();
     let runtime: PiConversationRuntimePort | undefined;
     try {
       runtime = await this.#runtimeFactory.createPersistent(cwd);
+      this.#assertAcceptingWork();
       const record = await this.#register(runtime, "create");
       await this.#refreshHistory();
       return record;
@@ -319,6 +343,7 @@ export class ConversationRegistry {
   }
 
   async open(sessionFile: string): Promise<ConversationRecord> {
+    this.#assertAcceptingWork();
     let canonical: string;
     try {
       canonical = await canonicalFile(sessionFile);
@@ -332,6 +357,7 @@ export class ConversationRegistry {
       throw error;
     }
 
+    this.#assertAcceptingWork();
     const existing = this.#bySessionFile.get(canonical);
     if (existing !== undefined) {
       const closing = this.#pendingCloses.get(existing);
@@ -399,6 +425,7 @@ export class ConversationRegistry {
     images: readonly UiImage[],
     streamingBehavior?: "steer" | "followUp",
   ): Promise<void> {
+    this.#assertAcceptingWork();
     const record = this.#required(conversationId);
     const streaming =
       record.status === "streaming" || record.session.isStreaming;
@@ -470,6 +497,7 @@ export class ConversationRegistry {
     conversationId: string,
     entryId: string,
   ): Promise<ForkCapacityReservation> {
+    this.#assertAcceptingWork();
     const record = this.#required(conversationId);
     this.#assertForkSource(record, entryId);
     this.#incrementForkReservation(record);
@@ -530,6 +558,8 @@ export class ConversationRegistry {
       temporary = await this.#runtimeFactory.openPersistent(
         reservation.sourceSessionFile,
       );
+      this.#temporaryRuntimes.add(temporary);
+      this.#assertAcceptingWork();
       if (
         path.resolve(temporary.identity.sessionFile) !==
           reservation.sourceSessionFile ||
@@ -565,6 +595,7 @@ export class ConversationRegistry {
         throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
       }
       promoted = true;
+      this.#temporaryRuntimes.delete(temporary);
       temporary = undefined; // Registry ownership starts only here.
 
       const conversation = await this.getState(registered.id);
@@ -580,13 +611,16 @@ export class ConversationRegistry {
       ) {
         await this.#disposeRecord(registered, "close").catch(() => undefined);
       }
-      await temporary?.dispose().catch(() => undefined);
+      if (temporary !== undefined && !temporary.disposed) {
+        await temporary.dispose().catch(() => undefined);
+      }
       await this.#cleanupFailedForkFile(
         failedForkFile,
         reservation.sourceSessionFile,
       );
       throw error;
     } finally {
+      if (temporary !== undefined) this.#temporaryRuntimes.delete(temporary);
       reservation.release();
     }
   }
@@ -643,10 +677,21 @@ export class ConversationRegistry {
 
   /** Dispose every owned runtime. Active runs are allowed for shutdown cleanup. */
   dispose(): Promise<void> {
+    this.beginShutdown();
     this.#disposePromise ??= (async () => {
-      await Promise.allSettled(
-        this.records.map((record) => this.#disposeRecord(record, "dispose")),
+      const disposals = this.records.map((record) =>
+        this.#disposeRecord(record, "dispose")
       );
+      for (const runtime of this.#temporaryRuntimes) {
+        disposals.push(runtime.dispose());
+      }
+      this.#temporaryRuntimes.clear();
+      // Runtime/replacement subscriptions were detached synchronously by
+      // #disposeRecord. Registry observers are no longer useful during process
+      // teardown and must not retain protocol/client objects if an SDK dispose
+      // promise stalls.
+      this.#listeners.clear();
+      await Promise.allSettled(disposals);
       await this.#refreshHistory();
     })();
     return this.#disposePromise;
@@ -657,6 +702,7 @@ export class ConversationRegistry {
     let runtime: PiConversationRuntimePort | undefined;
     try {
       runtime = await this.#runtimeFactory.openPersistent(canonical);
+      this.#assertAcceptingWork();
       return await this.#register(runtime, "open");
     } catch (error) {
       await runtime?.dispose().catch(() => undefined);
@@ -683,6 +729,7 @@ export class ConversationRegistry {
     await previous;
 
     try {
+      this.#assertAcceptingWork();
       validate?.();
       while (
         this.#byId.size + this.#capacityReservations >=
@@ -740,8 +787,10 @@ export class ConversationRegistry {
     source: ConversationRegistrationSource,
     onRegistered?: () => void,
   ): Promise<ConversationRecord> {
+    this.#assertAcceptingWork();
     const identity = runtime.identity;
     const sessionFile = await canonicalFile(identity.sessionFile);
+    this.#assertAcceptingWork();
     const duplicate =
       this.#byId.get(identity.sessionId) ?? this.#bySessionFile.get(sessionFile);
     if (duplicate !== undefined) {
@@ -813,6 +862,12 @@ export class ConversationRegistry {
     onRegistered?.();
     this.#emit({ type: "conversation.registered", source, record });
     return record;
+  }
+
+  #assertAcceptingWork(): void {
+    if (this.#shuttingDown) {
+      throw new AppError(ERROR_CODES.SHUTTING_DOWN);
+    }
   }
 
   #required(conversationId: string): ConversationRecord {

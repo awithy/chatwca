@@ -282,10 +282,10 @@ On `SIGINT` or `SIGTERM`, the server:
 2. closes WebSocket connections;
 3. asks active sessions to abort;
 4. waits for a bounded grace period;
-5. disposes all runtimes; and
+5. disposes all runtimes and listeners; and
 6. closes the HTTP server.
 
-Completed messages already written by Pi remain durable. In-progress responses may be persisted as aborted depending on how far the SDK run progressed.
+The total graceful phase is bounded by `CHATWCA_SHUTDOWN_GRACE_MS` (10 seconds by default, capped at 5 minutes). At the deadline, remaining WebSockets and HTTP connections are forcibly closed and runtime disposal is invoked without waiting on a stalled SDK promise. Repeated signals share the same shutdown operation. Completed messages already written by Pi remain durable. In-progress responses may be persisted as aborted depending on how far the SDK run progressed.
 
 ## 10. Forking
 
@@ -538,6 +538,7 @@ An accepted prompt's later model failure is represented in the message/event str
 | `CHATWCA_MAX_IMAGES` | `8` | Images allowed per prompt |
 | `CHATWCA_MAX_IMAGE_BYTES` | `8388608` | Decoded bytes per image |
 | `CHATWCA_MAX_TOTAL_IMAGE_BYTES` | `25165824` | Aggregate decoded image bytes per prompt |
+| `CHATWCA_SHUTDOWN_GRACE_MS` | `10000` | Bounded graceful shutdown period (maximum 300000 ms) |
 | `PI_CODING_AGENT_DIR` | Pi default | Pi configuration and session root |
 | `PI_OFFLINE` | unset | Use Pi's existing offline behavior |
 

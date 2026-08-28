@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 
-import type { ConversationSummary } from "../../shared/protocol.js";
+import type { ConversationSummary, UiImage } from "../../shared/protocol.js";
 import { useChatSocket } from "./api/index.js";
 import { Composer } from "./components/Composer.js";
 import { ConversationHeader } from "./components/ConversationHeader.js";
@@ -15,6 +15,9 @@ interface HealthResponse {
 
 interface BrowserConfig {
   readonly defaultCwd: string;
+  readonly maxImages: number;
+  readonly maxImageBytes: number;
+  readonly maxTotalImageBytes: number;
 }
 
 interface ServerStatus {
@@ -119,11 +122,15 @@ export function App() {
       });
   }
 
-  async function prompt(action: PromptAction, text: string): Promise<void> {
+  async function prompt(
+    action: PromptAction,
+    text: string,
+    images: readonly UiImage[],
+  ): Promise<void> {
     const conversationId = selectedConversation?.id;
     if (conversationId === undefined) throw new Error("The conversation is not open.");
     setConversationError(null);
-    const input = { conversationId, text, images: [] };
+    const input = { conversationId, text, images: [...images] };
     switch (action) {
       case "prompt.submit":
         await client.send({ type: action, ...input });
@@ -301,6 +308,13 @@ export function App() {
                     draft={chat.drafts[selectedConversation.id] ?? ""}
                     queue={selectedConversation.queue}
                     connected={connected}
+                    {...(server.config === undefined ? {} : {
+                      imageLimits: {
+                        maxImages: server.config.maxImages,
+                        maxImageBytes: server.config.maxImageBytes,
+                        maxTotalImageBytes: server.config.maxTotalImageBytes,
+                      },
+                    })}
                     onDraftChange={(text) => client.setDraft(selectedConversation.id, text)}
                     onPrompt={prompt}
                     onAbort={abortConversation}

@@ -128,6 +128,50 @@ describe("ChatSocketClient", () => {
     client.disconnect();
   });
 
+  it("serializes prepared image payloads into prompt commands", async () => {
+    let request = 0;
+    const socket = new FakeSocket();
+    const client = new ChatSocketClient({
+      url: "ws://test/ws",
+      webSocketFactory: () => socket as unknown as WebSocket,
+      requestId: () => `image-${++request}`,
+    });
+    client.connect();
+    socket.server({ type: "ready", serverVersion: "1" });
+    socket.server({ type: "history", requestId: "image-1", conversations: [] });
+    await flush();
+
+    const image = {
+      mimeType: "image/webp" as const,
+      encoding: "base64" as const,
+      data: "AQID",
+      name: "diagram.webp",
+      width: 2048,
+      height: 1024,
+      byteSize: 3,
+    };
+    const pending = client.send({
+      type: "prompt.submit",
+      conversationId: "conversation-1",
+      text: "Inspect this",
+      images: [image],
+    });
+    expect(socket.commands().at(-1)).toEqual({
+      type: "prompt.submit",
+      requestId: "image-2",
+      conversationId: "conversation-1",
+      text: "Inspect this",
+      images: [image],
+    });
+    socket.server({
+      type: "ack",
+      requestId: "image-2",
+      command: "prompt.submit",
+    });
+    await expect(pending).resolves.toMatchObject({ type: "ack" });
+    client.disconnect();
+  });
+
   it("reconnects with bounded backoff and reloads history plus selected state", async () => {
     vi.useFakeTimers();
     const sockets: FakeSocket[] = [];

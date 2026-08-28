@@ -387,6 +387,8 @@ In `src/web/styles/app.css`:
 
 ### T8.1 Build browser image ingestion
 
+**Status:** Complete — paste/drop/file ingestion, orientation-aware 2048 px resizing, configured preliminary limits, accessible ordered previews, resource cleanup, and browser protocol submission are implemented in [`src/web/src/components/`](src/web/src/components/).
+
 In the composer:
 
 - Support paste, drag/drop, and file selection for PNG, JPEG, and WebP.

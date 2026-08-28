@@ -164,6 +164,25 @@ export type LiveConversationStatus = Static<
   typeof LiveConversationStatusSchema
 >;
 
+export const WorkspaceSchema = strictObject({
+  id: IdentifierSchema,
+  name: NonEmptyStringSchema,
+  path: NonEmptyStringSchema,
+  createdAt: Type.Number({ minimum: 0 }),
+  updatedAt: Type.Number({ minimum: 0 }),
+});
+export type Workspace = Static<typeof WorkspaceSchema>;
+
+export const WorkspaceSummarySchema = strictObject({
+  id: IdentifierSchema,
+  name: NonEmptyStringSchema,
+  path: NonEmptyStringSchema,
+  createdAt: Type.Number({ minimum: 0 }),
+  updatedAt: Type.Number({ minimum: 0 }),
+  available: Type.Boolean(),
+});
+export type WorkspaceSummary = Static<typeof WorkspaceSummarySchema>;
+
 export const ConversationSummarySchema = strictObject({
   id: IdentifierSchema,
   sessionFile: NonEmptyStringSchema,
@@ -217,6 +236,40 @@ export const ConversationStateSchema = strictObject({
   queue: QueueStateSchema,
 });
 export type ConversationState = Static<typeof ConversationStateSchema>;
+
+export const WorkspaceListCommandSchema = strictObject({
+  type: Type.Literal("workspace.list"),
+  requestId: RequestIdSchema,
+});
+export const WorkspaceCreateCommandSchema = strictObject({
+  type: Type.Literal("workspace.create"),
+  requestId: RequestIdSchema,
+  name: NonEmptyStringSchema,
+  path: NonEmptyStringSchema,
+});
+const WorkspaceUpdateWithNameSchema = strictObject({
+  type: Type.Literal("workspace.update"),
+  requestId: RequestIdSchema,
+  workspaceId: IdentifierSchema,
+  name: NonEmptyStringSchema,
+  path: Type.Optional(NonEmptyStringSchema),
+});
+const WorkspaceUpdateWithPathSchema = strictObject({
+  type: Type.Literal("workspace.update"),
+  requestId: RequestIdSchema,
+  workspaceId: IdentifierSchema,
+  name: Type.Optional(NonEmptyStringSchema),
+  path: NonEmptyStringSchema,
+});
+export const WorkspaceUpdateCommandSchema = Type.Union([
+  WorkspaceUpdateWithNameSchema,
+  WorkspaceUpdateWithPathSchema,
+]);
+export const WorkspaceDeleteCommandSchema = strictObject({
+  type: Type.Literal("workspace.delete"),
+  requestId: RequestIdSchema,
+  workspaceId: IdentifierSchema,
+});
 
 export const HistoryListCommandSchema = strictObject({
   type: Type.Literal("history.list"),
@@ -274,6 +327,10 @@ export const ConversationAbortCommandSchema = strictObject({
   conversationId: IdentifierSchema,
 });
 
+export type WorkspaceListCommand = Static<typeof WorkspaceListCommandSchema>;
+export type WorkspaceCreateCommand = Static<typeof WorkspaceCreateCommandSchema>;
+export type WorkspaceUpdateCommand = Static<typeof WorkspaceUpdateCommandSchema>;
+export type WorkspaceDeleteCommand = Static<typeof WorkspaceDeleteCommandSchema>;
 export type HistoryListCommand = Static<typeof HistoryListCommandSchema>;
 export type ConversationCreateCommand = Static<
   typeof ConversationCreateCommandSchema
@@ -301,6 +358,10 @@ export type ConversationAbortCommand = Static<
 >;
 
 export const ClientCommandSchema = Type.Union([
+  WorkspaceListCommandSchema,
+  WorkspaceCreateCommandSchema,
+  WorkspaceUpdateCommandSchema,
+  WorkspaceDeleteCommandSchema,
   HistoryListCommandSchema,
   ConversationCreateCommandSchema,
   ConversationOpenCommandSchema,
@@ -332,6 +393,7 @@ export type ServerShutdownMessage = Static<
 >;
 
 export const AcknowledgedCommandTypeSchema = Type.Union([
+  Type.Literal("workspace.delete"),
   Type.Literal("conversation.close"),
   Type.Literal("conversation.delete"),
   Type.Literal("prompt.submit"),
@@ -364,6 +426,13 @@ export const ErrorMessageSchema = strictObject({
   message: NonEmptyStringSchema,
 });
 export type ErrorMessage = Static<typeof ErrorMessageSchema>;
+
+export const WorkspacesMessageSchema = strictObject({
+  type: Type.Literal("workspaces"),
+  requestId: Type.Optional(RequestIdSchema),
+  workspaces: Type.Array(WorkspaceSummarySchema),
+});
+export type WorkspacesMessage = Static<typeof WorkspacesMessageSchema>;
 
 export const HistoryMessageSchema = strictObject({
   type: Type.Literal("history"),
@@ -399,6 +468,10 @@ type ForkStateMessage = Omit<StateMessage, "requestId" | "editorText"> & {
  * valid server broadcasts and are not command responses.
  */
 export type CommandSuccessByType = {
+  "workspace.list": Correlated<WorkspacesMessage>;
+  "workspace.create": Correlated<WorkspacesMessage>;
+  "workspace.update": Correlated<WorkspacesMessage>;
+  "workspace.delete": AckFor<"workspace.delete">;
   "history.list": Correlated<HistoryMessage>;
   "conversation.create": Correlated<StateMessage>;
   "conversation.open": Correlated<StateMessage>;
@@ -580,6 +653,7 @@ export const ServerMessageSchema = Type.Union([
   ServerShutdownMessageSchema,
   AcknowledgementMessageSchema,
   ErrorMessageSchema,
+  WorkspacesMessageSchema,
   HistoryMessageSchema,
   StateMessageSchema,
   ConversationEventSchema,

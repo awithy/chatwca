@@ -5,11 +5,38 @@ import {
   ClientCommandSchema,
   ConversationStateSchema,
   ServerMessageSchema,
+  WorkspaceSchema,
+  WorkspaceSummarySchema,
+  type CommandSuccessByType,
 } from "../../src/shared/protocol.js";
 
 const requestId = "request-1";
 
 const commands = [
+  { type: "workspace.list", requestId },
+  {
+    type: "workspace.create",
+    requestId,
+    name: "Example",
+    path: "/workspace",
+  },
+  {
+    type: "workspace.update",
+    requestId,
+    workspaceId: "workspace-1",
+    name: "Renamed",
+  },
+  {
+    type: "workspace.update",
+    requestId,
+    workspaceId: "workspace-1",
+    path: "/other-workspace",
+  },
+  {
+    type: "workspace.delete",
+    requestId,
+    workspaceId: "workspace-1",
+  },
   { type: "history.list", requestId },
   { type: "conversation.create", requestId, cwd: "/workspace" },
   { type: "conversation.open", requestId, conversationId: "session-1" },
@@ -119,6 +146,25 @@ describe("ClientCommandSchema", () => {
     );
   });
 
+  it("requires at least one workspace update field", () => {
+    expect(
+      Value.Check(ClientCommandSchema, {
+        type: "workspace.update",
+        requestId,
+        workspaceId: "workspace-1",
+      }),
+    ).toBe(false);
+    expect(
+      Value.Check(ClientCommandSchema, {
+        type: "workspace.update",
+        requestId,
+        workspaceId: "workspace-1",
+        name: "Renamed",
+        ignored: true,
+      }),
+    ).toBe(false);
+  });
+
   it("rejects unknown command types and extra properties", () => {
     expect(
       Value.Check(ClientCommandSchema, {
@@ -166,6 +212,47 @@ describe("ClientCommandSchema", () => {
   });
 });
 
+describe("workspace schemas", () => {
+  const workspace = {
+    id: "workspace-1",
+    name: "Example",
+    path: "/workspace",
+    createdAt: 10,
+    updatedAt: 20,
+  } as const;
+
+  it("defines closed workspace records and availability summaries", () => {
+    expect(Value.Check(WorkspaceSchema, workspace)).toBe(true);
+    expect(
+      Value.Check(WorkspaceSummarySchema, { ...workspace, available: true }),
+    ).toBe(true);
+    expect(
+      Value.Check(WorkspaceSummarySchema, {
+        ...workspace,
+        available: true,
+        privateMetadata: "no",
+      }),
+    ).toBe(false);
+  });
+
+  it("types workspace command successes as exact correlated responses", () => {
+    const listResponse = {
+      type: "workspaces",
+      requestId,
+      workspaces: [{ ...workspace, available: true }],
+    } satisfies CommandSuccessByType["workspace.list"];
+    const createResponse = listResponse satisfies CommandSuccessByType["workspace.create"];
+    const updateResponse = listResponse satisfies CommandSuccessByType["workspace.update"];
+    const deleteResponse = {
+      type: "ack",
+      requestId,
+      command: "workspace.delete",
+    } satisfies CommandSuccessByType["workspace.delete"];
+
+    expect([createResponse, updateResponse, deleteResponse]).toHaveLength(3);
+  });
+});
+
 describe("normalized conversation state", () => {
   it("accepts messages containing all normalized block categories", () => {
     expect(Value.Check(ConversationStateSchema, conversationState)).toBe(true);
@@ -202,6 +289,21 @@ describe("ServerMessageSchema", () => {
   it("accepts acknowledgements, correlated errors, snapshots, and events", () => {
     const messages = [
       { type: "ready", serverVersion: "0.0.0" },
+      {
+        type: "workspaces",
+        requestId,
+        workspaces: [
+          {
+            id: "workspace-1",
+            name: "Example",
+            path: "/workspace",
+            createdAt: 1,
+            updatedAt: 2,
+            available: true,
+          },
+        ],
+      },
+      { type: "workspaces", workspaces: [] },
       {
         type: "ack",
         requestId,
@@ -295,6 +397,13 @@ describe("ServerMessageSchema", () => {
         type: "ack",
         requestId,
         command: "conversation.close",
+      }),
+    ).toBe(true);
+    expect(
+      Value.Check(ServerMessageSchema, {
+        type: "ack",
+        requestId,
+        command: "workspace.delete",
       }),
     ).toBe(true);
     expect(

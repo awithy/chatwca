@@ -8,6 +8,13 @@ export const ERROR_CODES = {
   INVALID_CWD: "invalid_cwd",
   CWD_NOT_FOUND: "cwd_not_found",
   CWD_NOT_ACCESSIBLE: "cwd_not_accessible",
+  WORKSPACE_NOT_FOUND: "workspace_not_found",
+  INVALID_WORKSPACE_NAME: "invalid_workspace_name",
+  INVALID_WORKSPACE_PATH: "invalid_workspace_path",
+  DUPLICATE_WORKSPACE_PATH: "duplicate_workspace_path",
+  WORKSPACE_UNAVAILABLE: "workspace_unavailable",
+  WORKSPACE_BUSY: "workspace_busy",
+  DATABASE_ERROR: "database_error",
   MODEL_UNAVAILABLE: "model_unavailable",
   MODEL_FAILED: "model_failed",
   IMAGE_NOT_SUPPORTED: "image_not_supported",
@@ -43,6 +50,13 @@ const DEFAULT_MESSAGES: Readonly<Record<ErrorCode, string>> = {
   invalid_cwd: "The working directory is invalid.",
   cwd_not_found: "The working directory does not exist.",
   cwd_not_accessible: "The working directory is not accessible.",
+  workspace_not_found: "The workspace was not found.",
+  invalid_workspace_name: "Enter a workspace name.",
+  invalid_workspace_path: "The workspace path must be an existing accessible directory.",
+  duplicate_workspace_path: "That workspace path is already registered.",
+  workspace_unavailable: "The workspace directory is unavailable.",
+  workspace_busy: "Close the workspace's live conversations before changing its path or removing it.",
+  database_error: "The workspace database operation failed.",
   model_unavailable: "No model is configured or available.",
   model_failed: "The model failed while processing the prompt.",
   image_not_supported: "The selected model does not support images.",
@@ -95,6 +109,17 @@ export type ErrorContext =
       readonly issue?: "command" | "message-size" | "prompt" | "revision";
     }
   | { readonly source: "filesystem"; readonly target: "cwd" | "session" }
+  | {
+      readonly source: "workspace";
+      readonly issue:
+        | "missing"
+        | "name"
+        | "path"
+        | "duplicate"
+        | "unavailable"
+        | "busy";
+    }
+  | { readonly source: "database" }
   | {
       readonly source: "registry";
       readonly issue:
@@ -162,6 +187,23 @@ function contextCode(error: unknown, context: ErrorContext): ErrorCode {
       }
     case "filesystem":
       return filesystemCode(error, context.target);
+    case "workspace":
+      switch (context.issue) {
+        case "missing":
+          return ERROR_CODES.WORKSPACE_NOT_FOUND;
+        case "name":
+          return ERROR_CODES.INVALID_WORKSPACE_NAME;
+        case "path":
+          return ERROR_CODES.INVALID_WORKSPACE_PATH;
+        case "duplicate":
+          return ERROR_CODES.DUPLICATE_WORKSPACE_PATH;
+        case "unavailable":
+          return ERROR_CODES.WORKSPACE_UNAVAILABLE;
+        case "busy":
+          return ERROR_CODES.WORKSPACE_BUSY;
+      }
+    case "database":
+      return ERROR_CODES.DATABASE_ERROR;
     case "registry":
       switch (context.issue) {
         case "missing":

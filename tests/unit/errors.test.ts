@@ -69,6 +69,13 @@ describe("safe error conversion", () => {
   it.each([
     [{ source: "validation", issue: "command" } as const, "invalid_command"],
     [{ source: "validation", issue: "revision" } as const, "revision_gap"],
+    [{ source: "workspace", issue: "missing" } as const, "workspace_not_found"],
+    [{ source: "workspace", issue: "name" } as const, "invalid_workspace_name"],
+    [{ source: "workspace", issue: "path" } as const, "invalid_workspace_path"],
+    [{ source: "workspace", issue: "duplicate" } as const, "duplicate_workspace_path"],
+    [{ source: "workspace", issue: "unavailable" } as const, "workspace_unavailable"],
+    [{ source: "workspace", issue: "busy" } as const, "workspace_busy"],
+    [{ source: "database" } as const, "database_error"],
     [{ source: "registry", issue: "capacity" } as const, "live_runtime_limit"],
     [{ source: "registry", issue: "fork-target" } as const, "invalid_fork_target"],
     [{ source: "image", issue: "malformed" } as const, "invalid_image"],
@@ -79,6 +86,31 @@ describe("safe error conversion", () => {
     const converted = toAppError(new Error("private SDK details"), context);
     expect(converted.code).toBe(code);
     expect(converted.message).not.toContain("private SDK details");
+  });
+
+  it("does not expose filesystem or SQLite details in workspace errors", () => {
+    const pathFailure = toErrorResponse(
+      filesystemError("ENOENT", "/secret/operator/workspace"),
+      { source: "workspace", issue: "path" },
+      "request-1",
+    );
+    const databaseFailure = toErrorResponse(
+      new Error("SQLITE_BUSY at /secret/data/chatwca.sqlite"),
+      { source: "database" },
+      "request-2",
+    );
+
+    expect(pathFailure).toMatchObject({
+      code: ERROR_CODES.INVALID_WORKSPACE_PATH,
+      message: "The workspace path must be an existing accessible directory.",
+    });
+    expect(databaseFailure).toMatchObject({
+      code: ERROR_CODES.DATABASE_ERROR,
+      message: "The workspace database operation failed.",
+    });
+    expect(JSON.stringify([pathFailure, databaseFailure])).not.toContain(
+      "/secret",
+    );
   });
 
   it("defaults unknown failures to a generic redacted response", () => {

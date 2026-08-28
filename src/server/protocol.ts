@@ -168,6 +168,15 @@ export async function dispatchClientCommand(
   }
 
   switch (command.type) {
+    // Workspace dispatch is wired in Phase 3. Keeping the newly validated
+    // commands behind a safe error preserves exhaustive compilation without
+    // exposing an unimplemented persistence path through this legacy handler.
+    case "workspace.list":
+    case "workspace.create":
+    case "workspace.update":
+    case "workspace.delete":
+      throw new AppError(ERROR_CODES.INTERNAL_ERROR);
+
     case "history.list":
       return {
         response: {

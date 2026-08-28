@@ -74,6 +74,10 @@ function isExpectedResponse(
   message: ServerMessage,
 ): message is CommandSuccessByType[ClientCommandType] {
   switch (commandType) {
+    case "workspace.list":
+    case "workspace.create":
+    case "workspace.update":
+      return message.type === "workspaces";
     case "history.list":
       return message.type === "history";
     case "conversation.create":
@@ -81,6 +85,7 @@ function isExpectedResponse(
     case "conversation.state":
     case "conversation.fork":
       return message.type === "state";
+    case "workspace.delete":
     case "conversation.close":
     case "conversation.delete":
     case "prompt.submit":

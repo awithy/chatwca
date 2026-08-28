@@ -217,4 +217,4 @@ The SDK smoke test uses temporary Pi state and a faux provider; it does not requ
 
 ## License
 
-A license has not yet been selected.
+ChatWCA is licensed under the [MIT License](LICENSE).

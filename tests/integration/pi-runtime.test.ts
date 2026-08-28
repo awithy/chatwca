@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -153,6 +153,83 @@ describe("PiRuntimeFactory", () => {
     } finally {
       await registry.dispose();
       await reopened?.dispose();
+    }
+  });
+
+  it("creates and promotes a fork without mutating the live source", async () => {
+    const { cwd, factory, faux } = await isolatedFactory();
+    faux.setResponses([
+      fauxAssistantMessage("First response"),
+      fauxAssistantMessage("Second response"),
+    ]);
+    const registry = new ConversationRegistry({
+      runtimeFactory: factory,
+      maxLiveConversations: 2,
+    });
+
+    try {
+      const source = await registry.create(cwd);
+      await registry.prompt(source.id, "Keep this earlier turn.", []);
+      await vi.waitFor(() => {
+        expect(source.status).toBe("idle");
+        expect(source.session.isStreaming).toBe(false);
+      });
+      await registry.prompt(source.id, "Copy this prompt into the editor.", []);
+      await vi.waitFor(() => {
+        expect(source.status).toBe("idle");
+        expect(source.session.isStreaming).toBe(false);
+        expect(
+          source.session.sessionManager
+            .getBranch()
+            .filter((entry) => entry.type === "message"),
+        ).toHaveLength(4);
+      });
+
+      const sourceRuntime = source.runtime;
+      const sourceSession = source.session;
+      const sourceIdentity = source.runtime.identity;
+      const sourceRevision = source.revision;
+      const sourceBranchIds = source.session.sessionManager
+        .getBranch()
+        .map((entry) => entry.id);
+      const sourceBytes = await readFile(sourceIdentity.sessionFile);
+      const target = source.session.sessionManager
+        .getBranch()
+        .filter(
+          (entry) => entry.type === "message" && entry.message.role === "user",
+        )[1];
+      expect(target).toBeDefined();
+
+      const result = await registry.fork(source.id, target!.id);
+
+      expect(result.editorText).toBe("Copy this prompt into the editor.");
+      expect(result.conversation).toMatchObject({
+        cwd,
+        status: "idle",
+        durable: true,
+        model: {
+          id: sourceRuntime.model?.id,
+          provider: sourceRuntime.model?.provider,
+        },
+      });
+      expect(result.conversation.id).not.toBe(sourceIdentity.sessionId);
+      expect(result.conversation.sessionFile).not.toBe(sourceIdentity.sessionFile);
+      expect(result.conversation.messages).toHaveLength(2);
+      expect(result.conversation.messages[0]).toMatchObject({
+        role: "user",
+        blocks: [{ type: "text", text: "Keep this earlier turn." }],
+      });
+
+      expect(registry.get(source.id)).toBe(source);
+      expect(source.runtime).toBe(sourceRuntime);
+      expect(source.session).toBe(sourceSession);
+      expect(source.runtime.identity).toEqual(sourceIdentity);
+      expect(source.revision).toBe(sourceRevision);
+      expect(source.session.sessionManager.getBranch().map((entry) => entry.id))
+        .toEqual(sourceBranchIds);
+      expect(await readFile(sourceIdentity.sessionFile)).toEqual(sourceBytes);
+    } finally {
+      await registry.dispose();
     }
   });
 

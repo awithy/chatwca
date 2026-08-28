@@ -88,6 +88,10 @@ describe("WebSocket command server", () => {
       open: vi.fn(async () => ({ id: reconnectState.id })),
       getState: vi.fn(async () => reconnectState),
       close: vi.fn(async () => undefined),
+      fork: vi.fn(async () => ({
+        conversation: reconnectState,
+        editorText: "",
+      })),
       prompt: vi.fn(async () => {
         reconnectState = {
           ...reconnectState,
@@ -218,6 +222,7 @@ describe("WebSocket command server", () => {
       open: vi.fn(async () => ({ id: state.id })),
       getState: vi.fn(async () => state),
       close: vi.fn(async () => undefined),
+      fork: vi.fn(async () => ({ conversation: state, editorText: "" })),
       prompt: vi.fn(async () => undefined),
       abort: vi.fn(async () => undefined),
       subscribe: (listener) => {

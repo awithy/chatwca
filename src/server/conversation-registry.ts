@@ -1,4 +1,4 @@
-import { access, realpath } from "node:fs/promises";
+import { access, realpath, unlink } from "node:fs/promises";
 import path from "node:path";
 
 import type {
@@ -41,7 +41,7 @@ import type {
 
 const UNTITLED_CONVERSATION = "Untitled conversation";
 
-export type ConversationRegistrationSource = "create" | "open";
+export type ConversationRegistrationSource = "create" | "open" | "fork";
 
 /**
  * A slot held for T9.2's source-preserving fork construction. The caller must
@@ -52,7 +52,15 @@ export interface ForkCapacityReservation {
   readonly sourceConversationId: string;
   readonly sourceSessionFile: string;
   readonly sourceCwd: string;
+  /** Convert the temporary-runtime slot to registered ownership. */
+  promote(): void;
+  /** Release any remaining capacity and source protection. */
   release(): void;
+}
+
+export interface ForkConversationResult {
+  readonly conversation: ConversationState;
+  readonly editorText: string;
 }
 
 /** Mutable server-owned state for one live Pi runtime. */
@@ -478,18 +486,109 @@ export class ConversationRegistry {
       throw error;
     }
 
-    let released = false;
+    let capacityHeld = true;
+    let sourceHeld = true;
+    const promote = () => {
+      if (!capacityHeld) return;
+      capacityHeld = false;
+      releaseCapacity?.();
+    };
     return {
       sourceConversationId: record.id,
       sourceSessionFile: record.sessionFile,
       sourceCwd: record.cwd,
+      promote,
       release: () => {
-        if (released) return;
-        released = true;
-        releaseCapacity?.();
+        promote();
+        if (!sourceHeld) return;
+        sourceHeld = false;
         this.#decrementForkReservation(record);
       },
     };
+  }
+
+  /**
+   * Create a source-preserving fork in an unregistered temporary runtime.
+   *
+   * The reserved slot accounts for that temporary runtime. It is converted to
+   * registry ownership only after Pi has replaced the temporary session with a
+   * distinct fork. Any failed replacement, registration, or snapshot rolls the
+   * fork artifact back and leaves the live source untouched.
+   */
+  async fork(
+    conversationId: string,
+    entryId: string,
+  ): Promise<ForkConversationResult> {
+    const reservation = await this.reserveFork(conversationId, entryId);
+    const source = this.#required(reservation.sourceConversationId);
+    let temporary: PiConversationRuntimePort | undefined;
+    let registered: ConversationRecord | undefined;
+    let promoted = false;
+    let forkSessionFile: string | undefined;
+
+    try {
+      temporary = await this.#runtimeFactory.openPersistent(
+        reservation.sourceSessionFile,
+      );
+      if (
+        path.resolve(temporary.identity.sessionFile) !==
+          reservation.sourceSessionFile ||
+        path.resolve(temporary.identity.cwd) !== reservation.sourceCwd
+      ) {
+        throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
+      }
+
+      const result = await temporary.fork(entryId, {
+        ...(source.session.model === undefined
+          ? {}
+          : { inheritModel: source.session.model }),
+      });
+      if (result.cancelled) {
+        throw new AppError(ERROR_CODES.PI_RUNTIME_REPLACE_FAILED);
+      }
+
+      const forkIdentity = temporary.identity;
+      forkSessionFile = path.resolve(forkIdentity.sessionFile);
+      if (
+        forkIdentity.sessionId === reservation.sourceConversationId ||
+        forkSessionFile === reservation.sourceSessionFile
+      ) {
+        throw new AppError(ERROR_CODES.PI_RUNTIME_REPLACE_FAILED);
+      }
+
+      registered = await this.#register(
+        temporary,
+        "fork",
+        reservation.promote,
+      );
+      if (registered.runtime !== temporary) {
+        throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
+      }
+      promoted = true;
+      temporary = undefined; // Registry ownership starts only here.
+
+      const conversation = await this.getState(registered.id);
+      await this.#refreshHistory();
+      return { conversation, editorText: result.editorText ?? "" };
+    } catch (error) {
+      const failedForkFile =
+        forkSessionFile ?? this.#forkFileAfterReplacement(temporary, reservation);
+      if (
+        promoted &&
+        registered !== undefined &&
+        this.#byId.get(registered.id) === registered
+      ) {
+        await this.#disposeRecord(registered, "close").catch(() => undefined);
+      }
+      await temporary?.dispose().catch(() => undefined);
+      await this.#cleanupFailedForkFile(
+        failedForkFile,
+        reservation.sourceSessionFile,
+      );
+      throw error;
+    } finally {
+      reservation.release();
+    }
   }
 
   /** Request cancellation of an active run. Concurrent repeats share one abort. */
@@ -639,6 +738,7 @@ export class ConversationRegistry {
   async #register(
     runtime: PiConversationRuntimePort,
     source: ConversationRegistrationSource,
+    onRegistered?: () => void,
   ): Promise<ConversationRecord> {
     const identity = runtime.identity;
     const sessionFile = await canonicalFile(identity.sessionFile);
@@ -679,21 +779,38 @@ export class ConversationRegistry {
 
     this.#byId.set(record.id, record);
     this.#bySessionFile.set(record.sessionFile, record);
-    this.#normalizers.set(record, this.#createNormalizer(record));
-    record.unsubscribe = runtime.subscribe((event) => {
-      this.#touch(record);
-      try {
-        this.#normalizers.get(record)?.handle(event);
-      } catch (error) {
-        this.#handleRuntimeFailure(record, error);
+    try {
+      this.#normalizers.set(record, this.#createNormalizer(record));
+      record.unsubscribe = runtime.subscribe((event) => {
+        this.#touch(record);
+        try {
+          this.#normalizers.get(record)?.handle(event);
+        } catch (error) {
+          this.#handleRuntimeFailure(record, error);
+        }
+      });
+      this.#replacementUnsubscribes.set(
+        record,
+        runtime.onSessionReplaced((replacement) => {
+          this.#replaceIdentity(record, replacement);
+        }),
+      );
+    } catch (error) {
+      record.unsubscribe();
+      this.#normalizers.get(record)?.dispose();
+      this.#normalizers.delete(record);
+      this.#replacementUnsubscribes.get(record)?.();
+      this.#replacementUnsubscribes.delete(record);
+      if (this.#byId.get(record.id) === record) this.#byId.delete(record.id);
+      if (this.#bySessionFile.get(record.sessionFile) === record) {
+        this.#bySessionFile.delete(record.sessionFile);
       }
-    });
-    this.#replacementUnsubscribes.set(
-      record,
-      runtime.onSessionReplaced((replacement) => {
-        this.#replaceIdentity(record, replacement);
-      }),
-    );
+      throw error;
+    }
+
+    // Convert a fork's in-flight capacity reservation to a registered runtime
+    // before another serialized capacity decision can observe both counts.
+    onRegistered?.();
     this.#emit({ type: "conversation.registered", source, record });
     return record;
   }
@@ -704,6 +821,45 @@ export class ConversationRegistry {
       throw new AppError(ERROR_CODES.CONVERSATION_NOT_FOUND);
     }
     return record;
+  }
+
+  #forkFileAfterReplacement(
+    runtime: PiConversationRuntimePort | undefined,
+    reservation: ForkCapacityReservation,
+  ): string | undefined {
+    if (runtime === undefined) return undefined;
+    try {
+      const identity = runtime.identity;
+      return identity.sessionId !== reservation.sourceConversationId
+        ? path.resolve(identity.sessionFile)
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async #cleanupFailedForkFile(
+    sessionFile: string | undefined,
+    sourceSessionFile: string,
+  ): Promise<void> {
+    if (sessionFile === undefined) return;
+    const candidate = path.resolve(sessionFile);
+    if (
+      candidate === sourceSessionFile ||
+      this.#bySessionFile.has(candidate)
+    ) {
+      return;
+    }
+
+    try {
+      await unlink(candidate);
+    } catch (error) {
+      const code =
+        typeof error === "object" && error !== null && "code" in error
+          ? (error as { readonly code?: unknown }).code
+          : undefined;
+      if (code !== "ENOENT") this.#onListenerError(error);
+    }
   }
 
   #assertForkSource(record: ConversationRecord, entryId: string): void {

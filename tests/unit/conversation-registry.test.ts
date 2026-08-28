@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -18,6 +19,8 @@ import {
 } from "../../src/server/conversation-registry.js";
 import type {
   PiConversationRuntimePort,
+  PiForkOptions,
+  PiForkResult,
   PiModelCapability,
   PiRuntimeFactoryPort,
   PiRuntimeIdentity,
@@ -44,6 +47,7 @@ interface FakeSessionOptions {
   readonly title?: string;
   readonly prompt?: string;
   readonly branch?: readonly unknown[];
+  readonly sdkModel?: NonNullable<AgentSession["model"]>;
 }
 
 function fakeSession(
@@ -53,6 +57,7 @@ function fakeSession(
   const content = options.prompt;
   return {
     isStreaming: false,
+    model: options.sdkModel,
     getSteeringMessages: () => [],
     getFollowUpMessages: () => [],
     sessionManager: {
@@ -94,6 +99,11 @@ class FakeRuntime implements PiConversationRuntimePort {
     },
   );
   readonly abortSpy = vi.fn(async () => undefined);
+  readonly forkSpy = vi.fn(
+    async (_entryId: string, _options?: PiForkOptions): Promise<PiForkResult> => ({
+      cancelled: true,
+    }),
+  );
   readonly disposeSpy = vi.fn(async () => {
     this.disposed = true;
     this.events.clear();
@@ -126,8 +136,8 @@ class FakeRuntime implements PiConversationRuntimePort {
     return this.abortSpy();
   }
 
-  fork(): Promise<{ cancelled: boolean }> {
-    return Promise.resolve({ cancelled: true });
+  fork(entryId: string, options?: PiForkOptions): Promise<PiForkResult> {
+    return this.forkSpy(entryId, options);
   }
 
   dispose(): Promise<void> {
@@ -747,6 +757,145 @@ describe("ConversationRegistry", () => {
     await expect(
       registry.reserveFork(source.id, userEntry.id),
     ).rejects.toMatchObject({ code: ERROR_CODES.FORK_SOURCE_BUSY });
+  });
+
+  it("promotes a successful temporary fork without replacing its source", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessions = path.join(root, "sessions");
+    const sourceFile = path.join(sessions, "source.jsonl");
+    const forkFile = path.join(sessions, "fork.jsonl");
+    await Promise.all([mkdir(cwd), mkdir(sessions)]);
+    await writeFile(sourceFile, "source");
+
+    const sourceModel = {
+      provider: "faux",
+      id: "faux-1",
+    } as NonNullable<AgentSession["model"]>;
+    const branch = [
+      {
+        type: "message",
+        id: "a1b2c3d4",
+        message: { role: "user", content: "copy this prompt" },
+      },
+      {
+        type: "message",
+        id: "b2c3d4e5",
+        message: { role: "assistant", content: [] },
+      },
+    ];
+    const sourceRuntime = new FakeRuntime(
+      identity("source", sourceFile, cwd),
+      { branch, sdkModel: sourceModel },
+    );
+    const temporary = new FakeRuntime(
+      identity("source", sourceFile, cwd),
+      { branch, sdkModel: sourceModel },
+    );
+    temporary.forkSpy.mockImplementation(async () => {
+      await writeFile(forkFile, "fork");
+      temporary.replace(identity("forked", forkFile, cwd));
+      return { cancelled: false, editorText: "copy this prompt" };
+    });
+
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(sourceRuntime);
+    factory.openPersistent.mockResolvedValue(temporary);
+    const refreshHistory = vi.fn();
+    const registry = new ConversationRegistry({
+      runtimeFactory: factory,
+      maxLiveConversations: 2,
+      refreshHistory,
+    });
+    const registeredEvents: ConversationRegistryEvent[] = [];
+    registry.subscribe((event) => {
+      if (event.type === "conversation.registered") registeredEvents.push(event);
+    });
+    const source = await registry.create(cwd);
+    const sourceIdentity = source.runtime.identity;
+    const sourceSession = source.session;
+    const sourceListenerCount = sourceRuntime.events.size;
+
+    const result = await registry.fork(source.id, "a1b2c3d4");
+
+    expect(factory.openPersistent).toHaveBeenCalledWith(sourceFile);
+    expect(temporary.forkSpy).toHaveBeenCalledWith("a1b2c3d4", {
+      inheritModel: sourceModel,
+    });
+    expect(result).toMatchObject({
+      editorText: "copy this prompt",
+      conversation: { id: "forked", sessionFile: forkFile, cwd },
+    });
+    expect(registry.size).toBe(2);
+    expect(registry.get("source")).toBe(source);
+    expect(source.runtime.identity).toEqual(sourceIdentity);
+    expect(source.session).toBe(sourceSession);
+    expect(sourceRuntime.disposed).toBe(false);
+    expect(sourceRuntime.events.size).toBe(sourceListenerCount);
+    expect(temporary.disposed).toBe(false);
+    expect(registeredEvents.at(-1)).toMatchObject({
+      type: "conversation.registered",
+      source: "fork",
+      record: { id: "forked" },
+    });
+    expect(refreshHistory).toHaveBeenCalled();
+  });
+
+  it("disposes and removes every failed temporary fork resource", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessions = path.join(root, "sessions");
+    const sourceFile = path.join(sessions, "source.jsonl");
+    const failedForkFile = path.join(sessions, "failed-fork.jsonl");
+    await Promise.all([mkdir(cwd), mkdir(sessions)]);
+    await writeFile(sourceFile, "source");
+
+    const branch = [{
+      type: "message",
+      id: "a1b2c3d4",
+      message: { role: "user", content: "fork this" },
+    }];
+    const sourceRuntime = new FakeRuntime(
+      identity("source", sourceFile, cwd),
+      { branch },
+    );
+    const temporary = new FakeRuntime(
+      identity("source", sourceFile, cwd),
+      { branch },
+    );
+    temporary.forkSpy.mockImplementation(async () => {
+      await writeFile(failedForkFile, "partial fork");
+      temporary.replace(identity("failed-fork", failedForkFile, cwd));
+      throw new AppError(ERROR_CODES.PI_RUNTIME_REPLACE_FAILED);
+    });
+
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(sourceRuntime);
+    factory.openPersistent.mockResolvedValue(temporary);
+    const registry = new ConversationRegistry({
+      runtimeFactory: factory,
+      maxLiveConversations: 2,
+    });
+    const source = await registry.create(cwd);
+
+    await expect(registry.fork(source.id, "a1b2c3d4")).rejects.toMatchObject({
+      code: ERROR_CODES.PI_RUNTIME_REPLACE_FAILED,
+    });
+    expect(temporary.disposeSpy).toHaveBeenCalledOnce();
+    expect(temporary.events.size).toBe(0);
+    expect(temporary.replacements.size).toBe(0);
+    expect(existsSync(failedForkFile)).toBe(false);
+    expect(existsSync(sourceFile)).toBe(true);
+    expect(registry.records).toEqual([source]);
+    expect(sourceRuntime.disposed).toBe(false);
+
+    // Both source protection and reserved capacity are released on failure.
+    await expect(registry.prompt(source.id, "still usable", [])).resolves.toBeUndefined();
+    const nextRuntime = new FakeRuntime(
+      identity("next", path.join(sessions, "next.jsonl"), cwd),
+    );
+    factory.createPersistent.mockResolvedValueOnce(nextRuntime);
+    await expect(registry.create(cwd)).resolves.toMatchObject({ id: "next" });
   });
 
   it("rejects non-user, off-branch, and malformed fork entry IDs", async () => {

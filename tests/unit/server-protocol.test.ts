@@ -49,6 +49,7 @@ function services(): {
     create: ReturnType<typeof vi.fn>;
     open: ReturnType<typeof vi.fn>;
     close: ReturnType<typeof vi.fn>;
+    fork: ReturnType<typeof vi.fn>;
     prompt: ReturnType<typeof vi.fn>;
     abort: ReturnType<typeof vi.fn>;
     delete: ReturnType<typeof vi.fn>;
@@ -57,6 +58,10 @@ function services(): {
   const create = vi.fn(async () => ({ id: state.id }));
   const open = vi.fn(async () => ({ id: state.id }));
   const close = vi.fn(async () => undefined);
+  const fork = vi.fn(async () => ({
+    conversation: state,
+    editorText: "copied prompt",
+  }));
   const prompt = vi.fn(async () => undefined);
   const abort = vi.fn(async () => undefined);
   const deleteSession = vi.fn(async () => [summary]);
@@ -67,6 +72,7 @@ function services(): {
       open,
       getState: vi.fn(async () => state),
       close,
+      fork,
       prompt,
       abort,
       subscribe: vi.fn(() => () => undefined),
@@ -76,7 +82,7 @@ function services(): {
       resolve: vi.fn(async () => ({ summary })),
       delete: deleteSession,
     },
-    calls: { create, open, close, prompt, abort, delete: deleteSession },
+    calls: { create, open, close, fork, prompt, abort, delete: deleteSession },
   };
 }
 
@@ -210,7 +216,7 @@ describe("server WebSocket protocol", () => {
     });
   });
 
-  it("routes submit, steer, follow-up, and abort and fails fork closed", async () => {
+  it("routes submit, steer, follow-up, abort, and source-preserving fork", async () => {
     const { registry, history, calls } = services();
     const promptBase = {
       conversationId: state.id,
@@ -263,6 +269,15 @@ describe("server WebSocket protocol", () => {
         registry,
         history,
       ),
-    ).rejects.toMatchObject({ code: ERROR_CODES.INVALID_COMMAND });
+    ).resolves.toEqual({
+      response: {
+        type: "state",
+        requestId: "fork",
+        conversation: state,
+        editorText: "copied prompt",
+      },
+      historyChanged: true,
+    });
+    expect(calls.fork).toHaveBeenCalledWith(state.id, "entry-1");
   });
 });

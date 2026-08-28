@@ -432,6 +432,8 @@ In `src/server/images.ts`:
 
 ### T9.2 Implement source-preserving fork creation
 
+**Status:** Complete — forks are built in reserved, unregistered source runtimes, promoted atomically after replacement, rolled back on failure, and returned as correlated full-state responses with editor text.
+
 - Open the source session in an unregistered temporary runtime rather than calling `fork()` on the source record.
 - Invoke `runtime.fork(entryId)` on the temporary runtime.
 - Handle the resulting session replacement using the same replacement helper as other runtime operations.

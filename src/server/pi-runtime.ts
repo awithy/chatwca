@@ -45,6 +45,11 @@ export interface PiForkResult {
   readonly editorText?: string;
 }
 
+export interface PiForkOptions {
+  /** The live source model to apply to the new session after replacement. */
+  readonly inheritModel?: NonNullable<AgentSession["model"]>;
+}
+
 export interface PiRuntimeReplacement {
   readonly previous: PiRuntimeIdentity;
   readonly current: PiRuntimeIdentity;
@@ -76,7 +81,7 @@ export interface PiConversationRuntimePort {
   onSessionReplaced(listener: PiRuntimeReplacementListener): () => void;
   prompt(text: string, options?: PromptOptions): Promise<void>;
   abort(): Promise<void>;
-  fork(entryId: string): Promise<PiForkResult>;
+  fork(entryId: string, options?: PiForkOptions): Promise<PiForkResult>;
   dispose(): Promise<void>;
 }
 
@@ -255,12 +260,32 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
     }
   }
 
-  async fork(entryId: string): Promise<PiForkResult> {
+  async fork(entryId: string, options?: PiForkOptions): Promise<PiForkResult> {
     this.#assertUsable();
     this.#replacementSource = this.identity;
 
     try {
-      const result = await this.#runtime.fork(entryId);
+      const inheritedModel = options?.inheritModel;
+      const result = await this.#runtime.fork(
+        entryId,
+        inheritedModel === undefined
+          ? undefined
+          : {
+              // Pi rebuilds the fork from entries before the selected user
+              // message. A later model change on the live source may therefore
+              // not be present in that branch. Apply the source's current model
+              // only after replacement, so the source JSONL is never modified.
+              withSession: async () => {
+                const current = this.session.model;
+                if (
+                  current?.provider !== inheritedModel.provider ||
+                  current.id !== inheritedModel.id
+                ) {
+                  await this.session.setModel(inheritedModel);
+                }
+              },
+            },
+      );
       if (result.cancelled) this.#replacementSource = undefined;
       return result.selectedText === undefined
         ? { cancelled: result.cancelled }

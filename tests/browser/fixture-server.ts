@@ -107,6 +107,9 @@ const registry: ProtocolRegistry = {
   async close() {
     return undefined;
   },
+  async fork() {
+    return { conversation: state, editorText: "" };
+  },
   async prompt(conversationId, text, images) {
     if (conversationId !== state.id) throw new Error("Unknown fixture conversation");
 

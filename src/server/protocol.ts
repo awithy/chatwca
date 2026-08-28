@@ -34,6 +34,13 @@ export interface ProtocolRegistry {
   open(sessionFile: string): Promise<{ readonly id: string }>;
   getState(conversationId: string): Promise<ConversationState>;
   close(conversationId: string): Promise<void>;
+  fork(
+    conversationId: string,
+    entryId: string,
+  ): Promise<{
+    readonly conversation: ConversationState;
+    readonly editorText: string;
+  }>;
   prompt(
     conversationId: string,
     text: string,
@@ -244,11 +251,21 @@ export async function dispatchClientCommand(
         },
       };
 
-    // Forking has source-preservation and capacity requirements implemented in
-    // milestone 9. Keeping it in the shared schema reserves the wire shape,
-    // while failing closed here prevents accidental in-place SDK forks.
-    case "conversation.fork":
-      throw new AppError(ERROR_CODES.INVALID_COMMAND);
+    case "conversation.fork": {
+      const fork = await registry.fork(
+        command.conversationId,
+        command.entryId,
+      );
+      return {
+        response: {
+          type: "state",
+          requestId: command.requestId,
+          conversation: fork.conversation,
+          editorText: fork.editorText,
+        },
+        historyChanged: true,
+      };
+    }
   }
 }
 

@@ -169,6 +169,8 @@ In `src/server/pi-runtime.ts`:
 
 ### T3.3 Implement session history
 
+**Status:** Complete — Pi-native listing normalization, canonical open/delete allow-sets, missing-CWD visibility, live deletion guards, and history tests are implemented in [`src/server/session-history.ts`](src/server/session-history.ts).
+
 In `src/server/session-history.ts`:
 
 - Discover sessions only through Pi listing APIs.

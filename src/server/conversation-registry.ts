@@ -12,6 +12,7 @@ import type {
   LiveConversationStatus,
   ModelInfo,
   QueueState,
+  UiImage,
 } from "../shared/protocol.js";
 import {
   PiEventNormalizer,
@@ -346,6 +347,45 @@ export class ConversationRegistry {
       messages: serializeActiveBranch(record.session.sessionManager),
       queue: queueOf(record.session),
     };
+  }
+
+  /**
+   * Deliver a text prompt using Pi's explicit streaming behavior.
+   *
+   * Image payload validation/conversion belongs to the image boundary added in
+   * milestone 8; until then, image-bearing commands fail closed instead of
+   * forwarding unverified base64 to Pi.
+   */
+  async prompt(
+    conversationId: string,
+    text: string,
+    images: readonly UiImage[],
+    streamingBehavior?: "steer" | "followUp",
+  ): Promise<void> {
+    const record = this.#required(conversationId);
+    const busy = isBusy(record);
+    if (record.status === "aborting") {
+      throw new AppError(ERROR_CODES.CONVERSATION_BUSY);
+    }
+    if (streamingBehavior === undefined ? busy : !busy) {
+      throw new AppError(ERROR_CODES.CONVERSATION_BUSY);
+    }
+    if (!text.trim() && images.length === 0) {
+      throw new AppError(ERROR_CODES.INVALID_PROMPT);
+    }
+    if (images.length > 0) {
+      throw new AppError(
+        record.runtime.supportsImages
+          ? ERROR_CODES.INVALID_IMAGE
+          : ERROR_CODES.IMAGE_NOT_SUPPORTED,
+      );
+    }
+
+    this.#touch(record);
+    await record.runtime.prompt(
+      text,
+      streamingBehavior === undefined ? undefined : { streamingBehavior },
+    );
   }
 
   /** Request cancellation of an active run. Repeated idle aborts are no-ops. */

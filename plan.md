@@ -270,6 +270,8 @@ Cover:
 
 ### T5.2 Implement command dispatch
 
+**Status:** Complete — bounded TypeBox command decoding, correlated lifecycle/prompt dispatch, isolated socket sends, normalized event broadcasts, and coalesced authoritative history updates are implemented in [`src/server/protocol.ts`](src/server/protocol.ts).
+
 In `src/server/protocol.ts`:
 
 - Parse JSON safely, enforce an inbound message-size limit, validate against TypeBox, and dispatch by command type.

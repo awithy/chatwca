@@ -10,6 +10,14 @@ import {
   loadConfig,
   type ServerConfig,
 } from "./config.js";
+import { ConversationRegistry } from "./conversation-registry.js";
+import { PiRuntimeFactory } from "./pi-runtime.js";
+import {
+  WebSocketProtocol,
+  type ProtocolHistory,
+  type ProtocolRegistry,
+} from "./protocol.js";
+import { SessionHistory } from "./session-history.js";
 import { serveWebApp } from "./static.js";
 import { hasAllowedWebSocketOrigin } from "./websocket-boundary.js";
 
@@ -20,6 +28,13 @@ interface PackageMetadata {
 export interface ChatWcaServer {
   readonly httpServer: Server;
   readonly webSocketServer: WebSocketServer;
+  readonly protocol: WebSocketProtocol | undefined;
+}
+
+export interface ChatWcaProtocolServices {
+  readonly registry: ProtocolRegistry;
+  readonly history: ProtocolHistory;
+  readonly onInternalError?: (error: unknown) => void;
 }
 
 function readServerVersion(): string {
@@ -55,6 +70,7 @@ function readServerVersion(): string {
 export function createChatWcaServer(
   config: Readonly<ServerConfig>,
   serverVersion = readServerVersion(),
+  services?: ChatWcaProtocolServices,
 ): ChatWcaServer {
   const app = express();
 
@@ -92,33 +108,74 @@ export function createChatWcaServer(
     });
   });
 
-  webSocketServer.on("connection", (socket) => {
-    socket.send(JSON.stringify({ type: "ready", serverVersion }));
-  });
+  const protocol =
+    services === undefined
+      ? undefined
+      : new WebSocketProtocol({
+          webSocketServer,
+          serverVersion,
+          registry: services.registry,
+          history: services.history,
+          ...(services.onInternalError === undefined
+            ? {}
+            : { onInternalError: services.onInternalError }),
+        });
 
-  return { httpServer, webSocketServer };
+  // The dependency-free shell remains useful for HTTP and upgrade-boundary
+  // tests. Production always supplies protocol services.
+  if (protocol === undefined) {
+    webSocketServer.on("connection", (socket) => {
+      socket.send(JSON.stringify({ type: "ready", serverVersion }));
+    });
+  }
+  webSocketServer.once("close", () => protocol?.dispose());
+
+  return { httpServer, webSocketServer, protocol };
 }
 
-function main(): void {
-  let config;
+async function main(): Promise<void> {
   try {
-    config = loadConfig();
+    const config = loadConfig();
+    const runtimeFactory = await PiRuntimeFactory.create({
+      ...(config.piCodingAgentDir === undefined
+        ? {}
+        : { agentDir: config.piCodingAgentDir }),
+    });
+
+    let registry: ConversationRegistry | undefined;
+    const history = new SessionHistory({
+      getLiveStatus: (identity) =>
+        registry?.get(identity.id)?.status ??
+        registry?.getBySessionFile(identity.sessionFile)?.status,
+    });
+    registry = new ConversationRegistry({
+      runtimeFactory,
+      maxLiveConversations: config.maxLiveConversations,
+      refreshHistory: async () => {
+        await history.refresh();
+      },
+      onListenerError: (error) => console.error("ChatWCA runtime error", error),
+    });
+
+    const { httpServer } = createChatWcaServer(config, readServerVersion(), {
+      registry,
+      history,
+      onInternalError: (error) =>
+        console.error("ChatWCA protocol error", error),
+    });
+    httpServer.listen(config.port, config.host, () => {
+      console.log(
+        `ChatWCA listening on http://${config.host}:${String(config.port)}`,
+      );
+    });
   } catch (error: unknown) {
     const message =
       error instanceof ConfigurationError
         ? error.message
-        : "Unexpected error while loading configuration";
-    console.error(`ChatWCA configuration error: ${message}`);
+        : "Unexpected error while starting ChatWCA";
+    console.error(`ChatWCA startup error: ${message}`);
     process.exitCode = 1;
-    return;
   }
-
-  const { httpServer } = createChatWcaServer(config);
-  httpServer.listen(config.port, config.host, () => {
-    console.log(
-      `ChatWCA listening on http://${config.host}:${String(config.port)}`,
-    );
-  });
 }
 
 const entryPoint = process.argv[1];

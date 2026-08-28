@@ -492,6 +492,8 @@ Verify:
 
 ### T10.3 Complete integration coverage
 
+**Status:** Complete — isolated real-Pi lifecycle integration coverage now exercises persistence/reopen, concurrency/background work, queues, abort/failure, reconnect snapshots, replacement subscriptions, capacity/LRU, guarded deletion, and missing storage without touching operator sessions.
+
 Using temporary Pi session roots and a deterministic fake model/provider, cover:
 
 - create → prompt → persist → dispose → reopen;

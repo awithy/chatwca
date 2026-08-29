@@ -34,6 +34,28 @@ test("fork selects a new conversation and prefills an editable unsent prompt", a
   await deleteSelectedConversation(page);
 });
 
+test("rewind replaces the source with a fork and prefills the selected prompt", async ({ page }) => {
+  const sourcePrompt = "Rewind this editable prompt";
+  await waitForConnected(page);
+  await createConversation(page);
+  await submitAndWait(page, sourcePrompt);
+
+  const sourceRow = page.locator("button.conversation-row").filter({
+    has: page.getByText(sourcePrompt, { exact: true }),
+  });
+  await expect(sourceRow).toHaveCount(1);
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Rewind conversation to this message" }).click();
+
+  const composer = page.getByRole("textbox", { name: "Message" });
+  await expect(page.getByRole("heading", { name: `Fork of ${sourcePrompt}` })).toBeVisible();
+  await expect(composer).toHaveValue(sourcePrompt);
+  await expect(page.locator(".chat-message")).toHaveCount(0);
+  await expect(sourceRow).toHaveCount(0);
+
+  await deleteSelectedConversation(page);
+});
+
 test("recovers only the in-memory selected workspace and conversation after a socket interruption", async ({ page }) => {
   const sent: Array<{
     socket: number;

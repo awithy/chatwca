@@ -37,7 +37,7 @@ Each conversation:
 - Stream assistant text, thinking, tool calls, and tool results.
 - Show Pi's active context usage percentage and model context-window size.
 - Support pasted, dropped, and selected images.
-- Fork a conversation from an earlier user message without changing the source.
+- Fork a conversation from an earlier user message without changing the source, or rewind by replacing the source with that fork.
 - Recover cleanly after browser disconnects.
 - Use a dark-only interface on desktop and laptop-sized screens.
 - Bind to all interfaces so the application is reachable from the trusted LAN.
@@ -383,6 +383,8 @@ Fork rules:
 - The user may edit and submit that prompt in the new conversation.
 - If fork creation fails, the temporary runtime is disposed and the source is untouched.
 
+**Rewind** uses the same target validation and fork construction, but is destructive. After the distinct fork has been created successfully, the server closes and deletes the source Pi session, returns the fork state and copied editor text, and the browser selects the fork. The source is not deleted when fork construction fails. The UI requires explicit confirmation and states that the source conversation cannot be recovered through ChatWCA.
+
 An optional later command can expose `fork(entryId, { position: "at" })` as “Clone through here.” In-place tree navigation with `navigateTree()` is not part of v1.
 
 ## 11. Prompt and image handling
@@ -490,6 +492,7 @@ type ClientCommand =
   | { type: "conversation.close"; conversationId: string }
   | { type: "conversation.delete"; workspaceId: string; conversationId: string }
   | { type: "conversation.fork"; conversationId: string; entryId: string }
+  | { type: "conversation.rewind"; conversationId: string; entryId: string }
   | { type: "prompt.submit"; conversationId: string; text: string; images: UiImage[] }
   | { type: "prompt.steer"; conversationId: string; text: string; images: UiImage[] }
   | { type: "prompt.followUp"; conversationId: string; text: string; images: UiImage[] }
@@ -736,6 +739,7 @@ The initial release is complete when:
 - text, thinking, tool calls, and tool results render incrementally;
 - PNG, JPEG, and WebP prompts work with vision-capable models;
 - a user can fork from an earlier user message and edit the copied prompt;
-- the source conversation remains unchanged and switchable;
+- a user can rewind from an earlier user message, replacing the source only after fork creation succeeds;
+- a normal fork leaves the source conversation unchanged and switchable;
 - the UI is dark-only and works at common laptop resolutions; and
 - sessions remain readable by the Pi CLI.

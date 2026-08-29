@@ -24,7 +24,9 @@ export interface MessageTimelineProps {
   readonly cwd: string;
   readonly canFork?: boolean;
   readonly forkingEntryId?: string | null;
+  readonly rewindingEntryId?: string | null;
   readonly onFork?: (entryId: string) => void;
+  readonly onRewind?: (entryId: string) => void;
 }
 
 function formatTime(timestamp: number | undefined): string | null {
@@ -218,7 +220,9 @@ export function MessageTimeline({
   cwd,
   canFork = false,
   forkingEntryId = null,
+  rewindingEntryId = null,
   onFork,
+  onRewind,
 }: MessageTimelineProps) {
   const timelineRef = useRef<HTMLDivElement>(null);
   const followOutputRef = useRef(true);
@@ -284,29 +288,45 @@ export function MessageTimeline({
                 )}
                 {message.role === "user" && message.forkEligible && (() => {
                   const isForking = forkingEntryId === message.entryId;
-                  const anotherForkPending = forkingEntryId !== null && !isForking;
+                  const isRewinding = rewindingEntryId === message.entryId;
+                  const branchActionPending = forkingEntryId !== null || rewindingEntryId !== null;
                   return (
-                    <button
-                      className="message-fork-button"
-                      type="button"
-                      disabled={!canFork || forkingEntryId !== null || onFork === undefined}
-                      aria-busy={isForking || undefined}
-                      aria-label="Fork conversation from this message"
-                      title={!canFork ? "Forking is available while this conversation is idle and connected." : undefined}
-                      onClick={() => onFork?.(message.entryId)}
-                    >
-                      <span aria-hidden="true">⑂</span>
-                      {isForking ? "Forking…" : "Fork"}
-                      {anotherForkPending && (
-                        <span className="visually-hidden">Another fork is being created.</span>
-                      )}
-                    </button>
+                    <span className="message-branch-actions">
+                      <button
+                        className="message-fork-button"
+                        type="button"
+                        disabled={!canFork || branchActionPending || onFork === undefined}
+                        aria-busy={isForking || undefined}
+                        aria-label="Fork conversation from this message"
+                        title={!canFork ? "Forking is available while this conversation is idle and connected." : undefined}
+                        onClick={() => onFork?.(message.entryId)}
+                      >
+                        <span aria-hidden="true">⑂</span>
+                        {isForking ? "Forking…" : "Fork"}
+                      </button>
+                      <button
+                        className="message-rewind-button"
+                        type="button"
+                        disabled={!canFork || branchActionPending || onRewind === undefined}
+                        aria-busy={isRewinding || undefined}
+                        aria-label="Rewind conversation to this message"
+                        title={!canFork ? "Rewinding is available while this conversation is idle and connected." : "Replace this conversation with a fork from this message"}
+                        onClick={() => onRewind?.(message.entryId)}
+                      >
+                        <span aria-hidden="true">↶</span>
+                        {isRewinding ? "Rewinding…" : "Rewind"}
+                      </button>
+                    </span>
                   );
                 })()}
               </header>
-              {message.role === "user" && forkingEntryId === message.entryId && (
+              {message.role === "user" && (
+                forkingEntryId === message.entryId || rewindingEntryId === message.entryId
+              ) && (
                 <span className="visually-hidden" role="status">
-                  Creating a new conversation from this message.
+                  {rewindingEntryId === message.entryId
+                    ? "Rewinding the conversation to this message."
+                    : "Creating a new conversation from this message."}
                 </span>
               )}
               <MessageContent

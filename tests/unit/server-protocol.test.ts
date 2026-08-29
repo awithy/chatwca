@@ -299,4 +299,52 @@ describe("server WebSocket protocol", () => {
       affectedWorkspaceId: workspace.id,
     });
   });
+
+  it("rewinds by creating a fork before closing and deleting its source", async () => {
+    const { registry, history, workspaces, calls } = services();
+    const forked = {
+      ...state,
+      id: "conversation-2",
+      sessionFile: "/sessions/conversation-2.jsonl",
+      title: "Rewound",
+    };
+    calls.fork.mockResolvedValueOnce({
+      conversation: forked,
+      editorText: "copied prompt",
+    });
+    calls.delete.mockResolvedValueOnce([{
+      ...summary,
+      id: forked.id,
+      sessionFile: forked.sessionFile,
+      title: forked.title,
+    }]);
+
+    await expect(dispatchClientCommand(command({
+      type: "conversation.rewind",
+      requestId: "rewind",
+      conversationId: state.id,
+      entryId: "entry-1",
+    }), registry, history, workspaces)).resolves.toMatchObject({
+      response: {
+        type: "state",
+        requestId: "rewind",
+        conversation: forked,
+        editorText: "copied prompt",
+      },
+      affectedWorkspaceId: workspace.id,
+      history: [{ id: forked.id }],
+    });
+
+    expect(workspaces.requireAvailable).toHaveBeenCalledWith(workspace.id);
+    expect(history.resolve).toHaveBeenCalledWith(workspace, state.id);
+    expect(calls.fork).toHaveBeenCalledWith(state.id, "entry-1");
+    expect(calls.close).toHaveBeenCalledWith(state.id);
+    expect(calls.delete).toHaveBeenCalledWith(workspace, state.id);
+    expect(calls.fork.mock.invocationCallOrder[0]).toBeLessThan(
+      calls.close.mock.invocationCallOrder[0]!,
+    );
+    expect(calls.close.mock.invocationCallOrder[0]).toBeLessThan(
+      calls.delete.mock.invocationCallOrder[0]!,
+    );
+  });
 });

@@ -61,6 +61,12 @@ const commands = [
     entryId: "entry-1",
   },
   {
+    type: "conversation.rewind",
+    requestId,
+    conversationId: "session-1",
+    entryId: "entry-1",
+  },
+  {
     type: "prompt.submit",
     requestId,
     conversationId: "session-1",

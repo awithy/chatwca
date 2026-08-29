@@ -359,6 +359,74 @@ describe("ChatSocketClient", () => {
     client.disconnect();
   });
 
+  it("selects a rewind fork and removes the replaced source projection and draft", async () => {
+    let request = 0;
+    const socket = new FakeSocket();
+    const client = new ChatSocketClient({
+      url: "ws://test/ws",
+      webSocketFactory: () => socket as unknown as WebSocket,
+      requestId: () => `rewind-${++request}`,
+    });
+    client.connect();
+    socket.server({ type: "ready", serverVersion: "1" });
+    socket.server({ type: "workspaces", requestId: "rewind-1", workspaces: [workspace] });
+    await flush();
+    const selection = client.selectWorkspace("workspace-1");
+    socket.server({
+      type: "history",
+      requestId: "rewind-2",
+      workspaceId: "workspace-1",
+      conversations: [{
+        id: "conversation-1",
+        workspaceId: "workspace-1",
+        sessionFile: "/sessions/one.jsonl",
+        title: "One",
+        cwd: "/workspace",
+        modifiedAt: 2,
+        messageCount: 1,
+        status: "idle",
+        runnable: true,
+      }],
+    });
+    await selection;
+    socket.server({ type: "state", conversation: conversation() });
+    client.selectConversation("conversation-1");
+    client.setDraft("conversation-1", "discard this draft");
+
+    const pending = client.rewindConversation("conversation-1", "user-entry-1");
+    expect(socket.commands().at(-1)).toEqual({
+      type: "conversation.rewind",
+      requestId: "rewind-3",
+      conversationId: "conversation-1",
+      entryId: "user-entry-1",
+    });
+
+    const rewound = {
+      ...conversation(0),
+      id: "conversation-2",
+      sessionFile: "/sessions/two.jsonl",
+      title: "Rewound",
+      messages: [],
+    };
+    socket.server({
+      type: "state",
+      requestId: "rewind-3",
+      conversation: rewound,
+      editorText: "Try this prompt again",
+    });
+    await expect(pending).resolves.toMatchObject({ conversation: rewound });
+
+    expect(client.getState()).toMatchObject({
+      selectedConversationId: "conversation-2",
+      drafts: { "conversation-2": "Try this prompt again" },
+    });
+    expect(client.getState().drafts).not.toHaveProperty("conversation-1");
+    expect(client.getState().conversations).not.toHaveProperty("conversation-1");
+    expect(client.getState().conversations["conversation-2"]?.conversation).toEqual(rewound);
+    expect(client.getState().history).toEqual([]);
+    client.disconnect();
+  });
+
   it("does not change selection or drafts when a fork fails", async () => {
     let request = 0;
     const socket = new FakeSocket();

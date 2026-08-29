@@ -41,7 +41,8 @@ export function App() {
   const [conversationError, setConversationError] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const pendingActionRef = useRef<string | null>(null);
-  const [forkAction, setForkAction] = useState<{
+  const [branchAction, setBranchAction] = useState<{
+    readonly kind: "fork" | "rewind";
     readonly conversationId: string;
     readonly entryId: string;
   } | null>(null);
@@ -259,13 +260,13 @@ export function App() {
     if (
       selectedConversation === undefined ||
       selectedConversation.status !== "idle" ||
-      forkAction !== null ||
+      branchAction !== null ||
       pendingActionRef.current !== null ||
       selectedWorkspaceUnavailable
     ) return;
 
     const conversationId = selectedConversation.id;
-    setForkAction({ conversationId, entryId });
+    setBranchAction({ kind: "fork", conversationId, entryId });
     setConversationError(null);
     try {
       await runExclusive("conversation.fork", () => client.forkConversation(conversationId, entryId));
@@ -273,7 +274,35 @@ export function App() {
     } catch (error) {
       setConversationError(errorMessage(error, "Unable to fork the conversation."));
     } finally {
-      setForkAction(null);
+      setBranchAction(null);
+    }
+  }
+
+  async function rewindConversation(entryId: string): Promise<void> {
+    if (
+      selectedConversation === undefined ||
+      selectedConversation.status !== "idle" ||
+      branchAction !== null ||
+      pendingActionRef.current !== null ||
+      selectedWorkspaceUnavailable
+    ) return;
+
+    const title = selectedConversation.title.trim() || "Untitled conversation";
+    const confirmed = window.confirm(
+      `Rewind “${title}” to this message? The current conversation will be permanently deleted, and this message will be copied into the new conversation’s composer. This cannot be undone.`,
+    );
+    if (!confirmed) return;
+
+    const conversationId = selectedConversation.id;
+    setBranchAction({ kind: "rewind", conversationId, entryId });
+    setConversationError(null);
+    try {
+      await runExclusive("conversation.rewind", () => client.rewindConversation(conversationId, entryId));
+      setSidebarOpen(false);
+    } catch (error) {
+      setConversationError(errorMessage(error, "Unable to rewind the conversation."));
+    } finally {
+      setBranchAction(null);
     }
   }
 
@@ -477,10 +506,14 @@ export function App() {
                     streaming={selectedConversation.status === "streaming"}
                     cwd={selectedConversation.cwd}
                     canFork={connected && !selectedWorkspaceUnavailable && pendingAction === null && selectedConversation.status === "idle"}
-                    forkingEntryId={forkAction?.conversationId === selectedConversation.id
-                      ? forkAction.entryId
+                    forkingEntryId={branchAction?.kind === "fork" && branchAction.conversationId === selectedConversation.id
+                      ? branchAction.entryId
+                      : null}
+                    rewindingEntryId={branchAction?.kind === "rewind" && branchAction.conversationId === selectedConversation.id
+                      ? branchAction.entryId
                       : null}
                     onFork={(entryId) => void forkConversation(entryId)}
+                    onRewind={(entryId) => void rewindConversation(entryId)}
                   />
                   <Composer
                     key={selectedConversation.id}

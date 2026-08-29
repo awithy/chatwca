@@ -299,6 +299,27 @@ export async function dispatchClientCommand(
         affectedWorkspaceId: fork.conversation.workspaceId,
       };
     }
+    case "conversation.rewind": {
+      // Rewind is deliberately server-orchestrated: the source is retained if
+      // fork construction fails, and is closed/deleted only after the distinct
+      // fork snapshot is available.
+      const source = await registry.getState(command.conversationId);
+      const workspace = workspaces.requireAvailable(source.workspaceId);
+      await history.resolve(workspace, source.id);
+      const fork = await registry.fork(command.conversationId, command.entryId);
+      await registry.close(source.id);
+      const conversations = await history.delete(workspace, source.id);
+      return {
+        response: {
+          type: "state",
+          requestId: command.requestId,
+          conversation: fork.conversation,
+          editorText: fork.editorText,
+        },
+        affectedWorkspaceId: source.workspaceId,
+        history: conversations,
+      };
+    }
   }
 }
 

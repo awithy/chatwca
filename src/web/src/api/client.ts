@@ -96,6 +96,7 @@ function isExpectedResponse(
       return message.type === "state" &&
         message.conversation.id === command.conversationId;
     case "conversation.fork":
+    case "conversation.rewind":
       return message.type === "state" && message.editorText !== undefined;
     case "workspace.delete":
     case "conversation.close":
@@ -272,6 +273,24 @@ export class ChatSocketClient {
     return result;
   }
 
+  /**
+   * Replace a conversation with a fork ending immediately before the selected
+   * user message. The server deletes the source only after creating the fork.
+   */
+  async rewindConversation(
+    conversationId: string,
+    entryId: string,
+  ): Promise<CommandSuccessByType["conversation.rewind"]> {
+    const result = await this.send<"conversation.rewind">({
+      type: "conversation.rewind",
+      conversationId,
+      entryId,
+    });
+    this.setDraft(result.conversation.id, result.editorText);
+    this.selectConversation(result.conversation.id);
+    return result;
+  }
+
   async reload(): Promise<void> {
     await this.#recover(this.#generation);
   }
@@ -431,7 +450,10 @@ export class ChatSocketClient {
         type: "conversation.closed",
         conversationId: command.conversationId,
       });
-    } else if (command.type === "conversation.delete") {
+    } else if (
+      command.type === "conversation.delete" ||
+      command.type === "conversation.rewind"
+    ) {
       this.#dispatch({
         type: "conversation.deleted",
         conversationId: command.conversationId,

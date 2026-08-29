@@ -355,6 +355,12 @@ export const ConversationForkCommandSchema = strictObject({
   conversationId: IdentifierSchema,
   entryId: IdentifierSchema,
 });
+export const ConversationRewindCommandSchema = strictObject({
+  type: Type.Literal("conversation.rewind"),
+  requestId: RequestIdSchema,
+  conversationId: IdentifierSchema,
+  entryId: IdentifierSchema,
+});
 
 const promptCommand = <T extends "prompt.submit" | "prompt.steer" | "prompt.followUp">(
   type: T,
@@ -402,6 +408,9 @@ export type ConversationDeleteCommand = Static<
 export type ConversationForkCommand = Static<
   typeof ConversationForkCommandSchema
 >;
+export type ConversationRewindCommand = Static<
+  typeof ConversationRewindCommandSchema
+>;
 export type PromptSubmitCommand = Static<typeof PromptSubmitCommandSchema>;
 export type PromptSteerCommand = Static<typeof PromptSteerCommandSchema>;
 export type PromptFollowUpCommand = Static<typeof PromptFollowUpCommandSchema>;
@@ -422,6 +431,7 @@ export const ClientCommandSchema = Type.Union([
   ConversationCloseCommandSchema,
   ConversationDeleteCommandSchema,
   ConversationForkCommandSchema,
+  ConversationRewindCommandSchema,
   PromptSubmitCommandSchema,
   PromptSteerCommandSchema,
   PromptFollowUpCommandSchema,
@@ -534,6 +544,7 @@ export type CommandSuccessByType = {
   "conversation.close": AckFor<"conversation.close">;
   "conversation.delete": AckFor<"conversation.delete">;
   "conversation.fork": ForkStateMessage;
+  "conversation.rewind": ForkStateMessage;
   "prompt.submit": AckFor<"prompt.submit">;
   "prompt.steer": AckFor<"prompt.steer">;
   "prompt.followUp": AckFor<"prompt.followUp">;

@@ -874,6 +874,7 @@ pre {
 .conversation-header {
   display: flex;
   justify-content: space-between;
+  min-width: 0;
   align-items: center;
   gap: 2rem;
   min-height: 5.25rem;

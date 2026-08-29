@@ -5,6 +5,7 @@ import { expect, test } from "@playwright/test";
 import {
   createConversation,
   deleteSelectedConversation,
+  submitAndWait,
   waitForConnected,
 } from "./helpers.js";
 
@@ -86,6 +87,49 @@ test("responsive layout stays dark-only and exposes mobile navigation", async ({
   await expect(page.getByRole("button", { name: "Close workspaces and conversations" }).first()).toBeVisible();
   await page.getByRole("button", { name: "Close workspaces and conversations" }).first().click();
   await expect(page.locator(".conversation-sidebar")).not.toBeInViewport();
+});
+
+test("long generated conversation titles do not push the chat workspace out of view", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 720 });
+  await waitForConnected(page);
+  await createConversation(page);
+
+  const prompt = [
+    "Explain how this deliberately long initial prompt becomes a conversation title",
+    "while the message timeline and composer remain inside the visible chat workspace",
+    "instead of being pushed beyond the right edge of a laptop-sized viewport.",
+  ].join(" ");
+  await submitAndWait(page, prompt);
+  await expect(page.getByRole("heading", { name: prompt })).toBeVisible();
+
+  const layout = await page.evaluate(() => {
+    const conversationPage = document.querySelector<HTMLElement>(".conversation-page");
+    const header = document.querySelector<HTMLElement>(".conversation-header");
+    const content = document.querySelector<HTMLElement>(".conversation-content");
+    const composer = document.querySelector<HTMLElement>(".composer");
+    const title = document.querySelector<HTMLElement>(".conversation-title-row h1");
+    if (
+      conversationPage === null || header === null || content === null ||
+      composer === null || title === null
+    ) {
+      throw new Error("Expected an open conversation layout");
+    }
+
+    return {
+      page: conversationPage.getBoundingClientRect().toJSON(),
+      header: header.getBoundingClientRect().toJSON(),
+      content: content.getBoundingClientRect().toJSON(),
+      composer: composer.getBoundingClientRect().toJSON(),
+      titleIsTruncated: title.scrollWidth > title.clientWidth,
+    };
+  });
+
+  expect(layout.header.right).toBeLessThanOrEqual(layout.page.right);
+  expect(layout.content.right).toBeLessThanOrEqual(layout.page.right);
+  expect(layout.composer.left).toBeGreaterThanOrEqual(layout.page.left);
+  expect(layout.composer.right).toBeLessThanOrEqual(layout.page.right);
+  expect(layout.titleIsTruncated).toBe(true);
+  await deleteSelectedConversation(page);
 });
 
 test("long conversation history scrolls without pushing the sidebar footer below the viewport", async ({ page }) => {

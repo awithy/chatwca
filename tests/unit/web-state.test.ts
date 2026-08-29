@@ -22,6 +22,7 @@ function conversation(revision = 0): ConversationState {
     lastActiveAt: 1,
     revision,
     durable: true,
+    contextUsage: null,
     messages: [],
     queue: { steering: [], followUp: [] },
   };
@@ -140,6 +141,7 @@ describe("web chat state", () => {
             role: "assistant",
             blocks: [{ type: "text", text: "done" }],
           },
+          contextUsage: { tokens: 14_144, contextWindow: 272_000, percent: 5.2 },
         },
       },
       {
@@ -227,6 +229,63 @@ describe("web chat state", () => {
     expect(projection?.notices).toEqual([
       { kind: "runtime", level: "info", message: "Settled" },
     ]);
+  });
+
+  it("updates context usage on completed messages and clears the estimate after compaction", () => {
+    let state = reduceChatClientState(createInitialChatClientState(), {
+      type: "snapshot",
+      conversation: conversation(),
+    });
+    state = reduceChatClientState(state, {
+      type: "event",
+      event: {
+        type: "message.completed",
+        workspaceId: "workspace-1",
+        conversationId: "conversation-1",
+        revision: 1,
+        payload: {
+          message: {
+            entryId: "user-1",
+            role: "user",
+            blocks: [{ type: "text", text: "hello" }],
+            forkEligible: true,
+          },
+          contextUsage: {
+            tokens: 14_144,
+            contextWindow: 272_000,
+            percent: 5.2,
+          },
+        },
+      },
+    });
+
+    expect(state.conversations["conversation-1"]?.conversation.contextUsage).toEqual({
+      tokens: 14_144,
+      contextWindow: 272_000,
+      percent: 5.2,
+    });
+
+    state = reduceChatClientState(state, {
+      type: "event",
+      event: {
+        type: "conversation.notice",
+        workspaceId: "workspace-1",
+        conversationId: "conversation-1",
+        revision: 2,
+        payload: {
+          notice: {
+            kind: "compaction",
+            phase: "completed",
+            message: "Conversation compaction completed.",
+          },
+        },
+      },
+    });
+    expect(state.conversations["conversation-1"]?.conversation.contextUsage).toEqual({
+      tokens: null,
+      contextWindow: 272_000,
+      percent: null,
+    });
   });
 
   it("materializes streamed thinking and keeps active tool output and status current", () => {

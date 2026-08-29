@@ -16,6 +16,11 @@ function event(value: unknown): AgentSessionEvent {
 function sessionWithBranch(branch: unknown[]): AgentSession {
   return {
     sessionManager: { getBranch: () => branch },
+    getContextUsage: () => ({
+      tokens: 14_144,
+      contextWindow: 272_000,
+      percent: 5.2,
+    }),
   } as unknown as AgentSession;
 }
 
@@ -95,6 +100,11 @@ describe("PiEventNormalizer", () => {
           entryId: "pi-entry-42",
           role: "assistant",
           blocks: [{ type: "text", text: "Hello" }],
+        },
+        contextUsage: {
+          tokens: 14_144,
+          contextWindow: 272_000,
+          percent: 5.2,
         },
       },
     });

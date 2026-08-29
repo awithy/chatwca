@@ -100,6 +100,7 @@ function emptyState(
     lastActiveAt: now,
     revision: 0,
     durable: true,
+    contextUsage: { tokens: 14_144, contextWindow: 272_000, percent: 5.2 },
     messages: [],
     queue: { steering: [], followUp: [] },
   };
@@ -370,10 +371,11 @@ function beginRun(fixture: FixtureConversation, promptText: string): void {
       messages: fixture.state.messages.map((message) =>
         message.entryId === streamId ? completed : message),
       queue: { steering: [], followUp: [] },
+      contextUsage: { tokens: 14_144, contextWindow: 272_000, percent: 5.2 },
     };
     emitEvent(fixture, {
       type: "message.completed",
-      payload: { message: completed },
+      payload: { message: completed, contextUsage: fixture.state.contextUsage },
     });
     fixture.state = { ...fixture.state, status: "idle" };
     emitEvent(fixture, {
@@ -496,7 +498,7 @@ const registry: ProtocolRegistry = {
     };
     emitEvent(fixture, {
       type: "message.completed",
-      payload: { message },
+      payload: { message, contextUsage: fixture.state.contextUsage },
     });
     beginRun(fixture, text);
   },

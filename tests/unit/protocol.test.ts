@@ -100,6 +100,7 @@ const conversationState = {
   lastActiveAt: 2,
   revision: 0,
   durable: true,
+  contextUsage: { tokens: 14_144, contextWindow: 272_000, percent: 5.2 },
   messages: [
     {
       entryId: "entry-1",
@@ -329,6 +330,17 @@ describe("normalized conversation state", () => {
         messages: [unmarkedUser, assistant],
       }),
     ).toBe(false);
+  });
+
+  it("validates context usage metrics", () => {
+    expect(Value.Check(ConversationStateSchema, {
+      ...conversationState,
+      contextUsage: { tokens: null, contextWindow: 272_000, percent: null },
+    })).toBe(true);
+    expect(Value.Check(ConversationStateSchema, {
+      ...conversationState,
+      contextUsage: { tokens: -1, contextWindow: 272_000, percent: -0.1 },
+    })).toBe(false);
   });
 
   it("applies the closed-object policy recursively", () => {

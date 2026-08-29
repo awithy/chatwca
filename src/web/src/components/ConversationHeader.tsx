@@ -1,3 +1,4 @@
+import * as React from "react";
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 
 import {
@@ -22,6 +23,14 @@ export interface ConversationHeaderProps {
   readonly onRename: (title: string) => Promise<void>;
   readonly onClose: () => void;
   readonly onDelete: () => void;
+}
+
+function formatTokens(count: number): string {
+  if (count < 1_000) return count.toString();
+  if (count < 10_000) return `${(count / 1_000).toFixed(1)}k`;
+  if (count < 1_000_000) return `${Math.round(count / 1_000)}k`;
+  if (count < 10_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
+  return `${Math.round(count / 1_000_000)}M`;
 }
 
 function headerStatus(
@@ -64,6 +73,17 @@ export function ConversationHeader({
     : model === null
       ? "No model available"
       : model.name ?? model.id;
+  const contextUsage = conversation?.contextUsage;
+  const contextLabel = contextUsage === undefined
+    ? loading ? "Loading…" : "—"
+    : contextUsage === null
+      ? "—"
+      : `${contextUsage.percent === null ? "?" : `${contextUsage.percent.toFixed(1)}%`}/${formatTokens(contextUsage.contextWindow)}`;
+  const contextTitle = contextUsage === undefined || contextUsage === null
+    ? undefined
+    : contextUsage.tokens === null
+      ? `Context usage unknown · ${contextUsage.contextWindow.toLocaleString()} token window`
+      : `${contextUsage.tokens.toLocaleString()} of ${contextUsage.contextWindow.toLocaleString()} context tokens`;
   const status = loading ? "Opening" : headerStatus(conversation, summary);
   const statusClass = loading ? "opening" : (conversation?.status ?? summary.status);
   const actualStatus = conversation?.status ?? summary.status;
@@ -167,6 +187,10 @@ export function ConversationHeader({
             <dd title={model === null || model === undefined ? undefined : `${model.provider}/${model.id}`}>
               {modelLabel}
             </dd>
+          </div>
+          <div>
+            <dt>Context</dt>
+            <dd title={contextTitle}>{contextLabel}</dd>
           </div>
           <div>
             <dt>Status</dt>

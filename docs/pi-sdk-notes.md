@@ -80,6 +80,8 @@ Opening uses the CWD from the session header unless `cwdOverride` is passed. Run
 
 `AgentSession.subscribe(listener)` returns an unsubscribe function. Subscriptions belong to that exact session object and do not move when `runtime.session` is replaced.
 
+`session.getContextUsage()` returns Pi's active-context estimate as `{ tokens, contextWindow, percent }`. After compaction, `tokens` and `percent` are `null` until a reliable assistant response occurs; `contextWindow` remains available. ChatWCA includes this value in authoritative snapshots and completed-message events so the header stays current without reimplementing Pi's compaction-aware accounting.
+
 The event union includes core lifecycle and stream events:
 
 - `agent_start`, `agent_end`, `agent_settled`;

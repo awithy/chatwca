@@ -6,6 +6,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 import {
   serializeActiveBranch,
+  serializeContextUsage,
   serializeSessionEntries,
 } from "../../src/server/serialize.js";
 import {
@@ -295,6 +296,20 @@ describe("session serialization", () => {
     }]);
 
     expect(messages[0]).not.toHaveProperty("usage");
+  });
+
+  it("normalizes Pi context usage and preserves the post-compaction unknown state", () => {
+    expect(serializeContextUsage({
+      tokens: 14_144,
+      contextWindow: 272_000,
+      percent: 5.2,
+    })).toEqual({ tokens: 14_144, contextWindow: 272_000, percent: 5.2 });
+    expect(serializeContextUsage({
+      tokens: null,
+      contextWindow: 272_000,
+      percent: null,
+    })).toEqual({ tokens: null, contextWindow: 272_000, percent: null });
+    expect(serializeContextUsage({ tokens: -1, contextWindow: 272_000 })).toBeNull();
   });
 
   it("rejects invalid serializer bounds", () => {

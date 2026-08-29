@@ -74,6 +74,7 @@ function conversation(revision = 0): ConversationState {
     lastActiveAt: 1,
     revision,
     durable: true,
+    contextUsage: null,
     messages: [],
     queue: { steering: [], followUp: [] },
   };

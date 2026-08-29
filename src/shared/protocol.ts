@@ -128,6 +128,15 @@ export const UsageSchema = strictObject({
 });
 export type Usage = Static<typeof UsageSchema>;
 
+export const ContextUsageSchema = strictObject({
+  /** Estimated active-context tokens; unknown immediately after compaction. */
+  tokens: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
+  contextWindow: Type.Number({ exclusiveMinimum: 0 }),
+  /** Percentage of the model context window; unknown when tokens are unknown. */
+  percent: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
+});
+export type ContextUsage = Static<typeof ContextUsageSchema>;
+
 const MessageErrorSchema = strictObject({
   code: ErrorCodeSchema,
   message: NonEmptyStringSchema,
@@ -261,6 +270,7 @@ export const ConversationStateSchema = strictObject({
   lastActiveAt: Type.Number({ minimum: 0 }),
   revision: RevisionSchema,
   durable: Type.Boolean(),
+  contextUsage: Type.Union([ContextUsageSchema, Type.Null()]),
   messages: Type.Array(NormalizedMessageSchema),
   queue: QueueStateSchema,
 });
@@ -544,6 +554,7 @@ export const MessageDeltaPayloadSchema = strictObject({
 });
 export const MessageCompletedPayloadSchema = strictObject({
   message: NormalizedMessageSchema,
+  contextUsage: Type.Union([ContextUsageSchema, Type.Null()]),
 });
 export const ToolStartedPayloadSchema = strictObject({
   entryId: Type.Optional(IdentifierSchema),

@@ -214,6 +214,11 @@ describe("complete conversation lifecycle integration", () => {
       "Persist this conversation",
       "Persisted deterministic response",
     ]);
+    expect(persisted.contextUsage).toEqual({
+      tokens: expect.any(Number),
+      contextWindow: expect.any(Number),
+      percent: expect.any(Number),
+    });
     expect(existsSync(persisted.sessionFile)).toBe(true);
 
     const renamed = await firstServices.registry.rename(

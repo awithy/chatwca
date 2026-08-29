@@ -35,6 +35,7 @@ Each conversation:
 - Keep multiple conversations alive concurrently.
 - Associate every conversation with a registered workspace and explicit working directory.
 - Stream assistant text, thinking, tool calls, and tool results.
+- Show Pi's active context usage percentage and model context-window size.
 - Support pasted, dropped, and selected images.
 - Fork a conversation from an earlier user message without changing the source.
 - Recover cleanly after browser disconnects.
@@ -538,7 +539,7 @@ Reverse proxies are optional. HTTP is sufficient for the intended segmented LAN 
 │       ├── New conversation
 │       └── Selected-workspace conversation rows with status
 └── <ConversationPage>
-    ├── <ConversationHeader> workspace, editable title, cwd, model, status
+    ├── <ConversationHeader> workspace, editable title, cwd, model, context usage, status
     ├── <MessageTimeline>
     │   ├── User messages and images
     │   ├── Assistant markdown
@@ -582,7 +583,7 @@ Messages are rendered from a normalized UI model, not directly from provider-spe
 - stop reason; and
 - error state.
 
-Only user messages with valid Pi entry IDs show the Fork action.
+Only user messages with valid Pi entry IDs show the Fork action. The header displays the SDK's active-context estimate in Pi's compact form (for example, `5.2%/272k`). The estimate is refreshed with completed messages; immediately after compaction, the unknown percentage is shown as `?/272k` until the next reliable model response.
 
 ## 16. Error handling
 

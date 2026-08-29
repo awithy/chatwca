@@ -1,4 +1,5 @@
 import type {
+  AgentSession,
   SessionEntry,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
@@ -8,6 +9,7 @@ import { isPiEntryId } from "./fork-target.js";
 import type {
   AssistantContentBlock,
   AssistantMessage,
+  ContextUsage,
   ImageBlock,
   ImageMimeType,
   NormalizedMessage,
@@ -117,6 +119,36 @@ function serializeUserBlocks(content: unknown): UserContentBlock[] {
     }
   }
   return blocks;
+}
+
+export function serializeContextUsage(value: unknown): ContextUsage | null {
+  const source = record(value);
+  if (source === undefined) return null;
+
+  const contextWindow = nonNegativeNumber(source.contextWindow);
+  if (contextWindow === undefined || contextWindow === 0) return null;
+
+  if (source.tokens === null) {
+    return { tokens: null, contextWindow, percent: null };
+  }
+
+  const tokens = nonNegativeNumber(source.tokens);
+  if (tokens === undefined) return null;
+  const suppliedPercent = nonNegativeNumber(source.percent);
+  return {
+    tokens,
+    contextWindow,
+    percent: suppliedPercent ?? (tokens / contextWindow) * 100,
+  };
+}
+
+/** Read Pi's active-context estimate without exposing malformed SDK values. */
+export function serializeSessionContextUsage(session: AgentSession): ContextUsage | null {
+  try {
+    return serializeContextUsage(session.getContextUsage());
+  } catch {
+    return null;
+  }
 }
 
 function serializeUsage(value: unknown): Usage | undefined {

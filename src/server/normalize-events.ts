@@ -12,6 +12,7 @@ import type {
 import {
   serializeLiveMessage,
   serializeLiveToolResult,
+  serializeSessionContextUsage,
 } from "./serialize.js";
 
 /** A normalized event before the registry assigns identity and revision. */
@@ -191,7 +192,13 @@ export class PiEventNormalizer {
             if (message.role === "assistant" && record(event.message)?.role === "assistant") {
               this.#lastAssistantEntryId = entryId;
             }
-            this.#emit({ type: "message.completed", payload: { message } });
+            this.#emit({
+              type: "message.completed",
+              payload: {
+                message,
+                contextUsage: serializeSessionContextUsage(this.#getSession()),
+              },
+            });
           }
           this.#onMessagePersisted(event.message);
         });

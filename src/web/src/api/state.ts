@@ -196,6 +196,7 @@ function applyConversationEvent(
   let messages = [...conversation.messages];
   let queue = conversation.queue;
   let status = conversation.status;
+  let contextUsage = conversation.contextUsage;
 
   switch (event.type) {
     case "message.started":
@@ -203,6 +204,7 @@ function applyConversationEvent(
       break;
     case "message.completed":
       messages = replaceMessage(messages, event.payload.message, true);
+      contextUsage = event.payload.contextUsage;
       break;
     case "message.delta":
       messages = messages.map((message) => {
@@ -291,6 +293,17 @@ function applyConversationEvent(
       status = event.payload.status;
       break;
     case "conversation.notice":
+      if (
+        event.payload.notice.kind === "compaction" &&
+        event.payload.notice.phase === "completed" &&
+        contextUsage !== null
+      ) {
+        contextUsage = {
+          tokens: null,
+          contextWindow: contextUsage.contextWindow,
+          percent: null,
+        };
+      }
       break;
   }
 
@@ -299,6 +312,7 @@ function applyConversationEvent(
     messages,
     queue,
     status,
+    contextUsage,
     revision: event.revision,
   };
 }

@@ -35,6 +35,7 @@ const state: ConversationState = {
   lastActiveAt: 2,
   revision: 0,
   durable: true,
+  contextUsage: null,
   messages: [],
   queue: { steering: [], followUp: [] },
 };

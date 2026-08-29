@@ -37,7 +37,10 @@ import {
   conversationImageUrl,
   type ConversationImage,
 } from "./conversation-images.js";
-import { serializeActiveBranch } from "./serialize.js";
+import {
+  serializeActiveBranch,
+  serializeSessionContextUsage,
+} from "./serialize.js";
 import type {
   PiConversationRuntimePort,
   PiRuntimeFactoryPort,
@@ -453,6 +456,7 @@ export class ConversationRegistry {
       lastActiveAt: record.lastActiveAt,
       revision: record.revision,
       durable: record.durable,
+      contextUsage: serializeSessionContextUsage(record.session),
       messages: serializeActiveBranch(record.session.sessionManager, {
         toolImageUrl: (entryId, imageIndex) =>
           conversationImageUrl(record.id, entryId, imageIndex),

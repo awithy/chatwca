@@ -78,6 +78,38 @@ test("orders workspaces by most recently selected", async ({ page }) => {
   await expect(items.nth(1)).toContainText("Recent workspace B");
 });
 
+test("opens the most recent conversation when changing workspaces", async ({ page }) => {
+  const olderPrompt = "Older workspace conversation";
+  const latestPrompt = "Most recent workspace conversation";
+
+  await waitForConnected(page);
+  await addWorkspace(page, "Recent conversations", "/tmp/chatwca-recent-conversations");
+  await createSelectedConversation(
+    page,
+    "Recent conversations",
+    "/tmp/chatwca-recent-conversations",
+  );
+  await submitAndWait(page, olderPrompt);
+  await createSelectedConversation(
+    page,
+    "Recent conversations",
+    "/tmp/chatwca-recent-conversations",
+  );
+  await submitAndWait(page, latestPrompt);
+
+  await addWorkspace(page, "Workspace switch target", "/tmp/chatwca-switch-target");
+  await expect(page.getByRole("heading", { name: "Start in Workspace switch target" })).toBeVisible();
+
+  await page.getByRole("button", { name: /Recent conversations.*chatwca-recent-conversations/ }).click();
+
+  await expect(page.locator(".message-user")).toContainText(latestPrompt);
+  await expect(page.locator(".message-user")).not.toContainText(olderPrompt);
+  await expect(page.getByRole("button", { name: new RegExp(latestPrompt) })).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
+});
+
 test("creates immutable workspace-local storage and shows it in workspace info", async ({ page }) => {
   const name = "Local session project";
   const directoryPath = "/tmp/chatwca-local-session-project";
@@ -213,7 +245,7 @@ test("busy workspace mutation is rejected and removal retains closed sessions", 
 
   await addWorkspace(page, workspaceName, workspacePath);
   const retained = page.getByRole("button", { name: new RegExp(prompt) });
-  await expect(retained).toContainText("Closed");
-  await retained.click();
+  await expect(retained).toContainText("Idle");
+  await expect(retained).toHaveAttribute("aria-current", "page");
   await expect(page.locator(".message-user")).toContainText(prompt);
 });

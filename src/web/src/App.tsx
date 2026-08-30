@@ -12,6 +12,7 @@ import { WorkspaceSidebar } from "./components/WorkspaceSidebar.js";
 import type { WorkspaceFormValues } from "./components/WorkspaceForm.js";
 import { MessageTimeline } from "./components/MessageTimeline.js";
 import type { PromptAction } from "./components/chat-interactions.js";
+import { orderConversations } from "./components/conversation-list.js";
 
 interface HealthResponse {
   readonly ready: boolean;
@@ -136,7 +137,7 @@ export function App() {
     }));
     const created = result.workspaces.find((workspace) => !knownIds.has(workspace.id));
     if (created !== undefined) {
-      void client.selectWorkspace(created.id).catch(() => undefined);
+      void changeWorkspace(created.id).catch(() => undefined);
     }
   }
 
@@ -152,7 +153,7 @@ export function App() {
     }));
     if (values.path !== undefined && chat.selectedWorkspaceId === workspaceId) {
       await client.selectWorkspace(null);
-      void client.selectWorkspace(workspaceId).catch(() => undefined);
+      void changeWorkspace(workspaceId).catch(() => undefined);
     }
   }
 
@@ -185,6 +186,23 @@ export function App() {
     }
   }
 
+  async function changeWorkspace(workspaceId: string): Promise<void> {
+    const changed = client.getState().selectedWorkspaceId !== workspaceId;
+    setConversationError(null);
+    setLoadingConversationId(null);
+    await client.selectWorkspace(workspaceId);
+    if (!changed) return;
+
+    const state = client.getState();
+    if (
+      state.selectedWorkspaceId !== workspaceId ||
+      state.historyWorkspaceId !== workspaceId
+    ) return;
+
+    const latest = orderConversations(state.history)[0];
+    if (latest !== undefined) selectConversation(latest);
+  }
+
   function selectConversation(summary: ConversationSummary): void {
     client.selectConversation(summary.id);
     setSidebarOpen(false);
@@ -194,11 +212,12 @@ export function App() {
       setConversationError("This conversation's working directory is unavailable.");
       return;
     }
-    if (!connected) {
+    const state = client.getState();
+    if (state.connection !== "connected") {
       setConversationError("Reconnect to the server before opening this conversation.");
       return;
     }
-    if (summary.status !== "closed" && chat.conversations[summary.id] !== undefined) {
+    if (summary.status !== "closed" && state.conversations[summary.id] !== undefined) {
       return;
     }
 
@@ -383,8 +402,7 @@ export function App() {
         open={sidebarOpen}
         onDismiss={() => setSidebarOpen(false)}
         onSelectWorkspace={(workspaceId) => {
-          setConversationError(null);
-          void client.selectWorkspace(workspaceId).catch(() => undefined);
+          void changeWorkspace(workspaceId).catch(() => undefined);
           setSidebarOpen(false);
         }}
         onCreateWorkspace={createWorkspace}

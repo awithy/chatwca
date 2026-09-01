@@ -15,6 +15,7 @@ import {
 import type { SandboxProbeContext } from "../../src/server/sandbox/probe.js";
 import {
   SandboxWorkerClient,
+  SandboxWorkerOperationError,
   type SandboxSpawn,
 } from "../../src/server/sandbox/worker-client.js";
 
@@ -118,6 +119,21 @@ describe("SandboxWorkerClient hostile transport", () => {
     expect(output).toEqual(["one", "two"]);
     await client.close();
     expect(child.stdio.every((stream) => stream.destroyed)).toBe(true);
+  });
+
+  it("rejects invalid and oversized typed requests without writing to or killing the worker", async () => {
+    const child = new FakeChild(); const fatal = vi.fn(); const seen: ParentFrame[] = [];
+    child.onFrame = (frame) => { seen.push(frame); };
+    const { client } = await start(child, fatal);
+    await expect(client.readFile({ path: "", maxBytes: 10, detectMime: false }))
+      .rejects.toEqual(new SandboxWorkerOperationError("invalid_arguments"));
+    await expect(client.editFile({ path: "x", edits: [{ oldText: "x".repeat(1024 * 1024), newText: "y" }] }))
+      .rejects.toEqual(new SandboxWorkerOperationError("output_limit"));
+    await expect(client.writeFile("x", Buffer.alloc(16 * 1024 * 1024 + 1)))
+      .rejects.toEqual(new SandboxWorkerOperationError("output_limit"));
+    expect(seen.filter((frame) => frame.type === "request")).toEqual([]);
+    expect(fatal).not.toHaveBeenCalled();
+    await client.close();
   });
 
   it("treats spoofed IDs and duplicate terminals as fatal exactly once", async () => {

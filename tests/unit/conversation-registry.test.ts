@@ -468,6 +468,48 @@ describe("ConversationRegistry", () => {
       .toBeUndefined();
   });
 
+  it("routes sandboxed Markdown image paths unchanged through the worker and fails closed without it", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessionFile = path.join(root, "sessions", "sandbox-image.jsonl");
+    await Promise.all([mkdir(cwd), mkdir(path.dirname(sessionFile))]);
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const reader = { readFile: vi.fn(async () => ({ data: bytes, mimeType: "image/png" as const })) };
+    const runtime = new FakeRuntime(identity("sandbox-image", sessionFile, cwd));
+    Object.defineProperty(runtime, "sandboxFileReader", { value: reader });
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(runtime);
+    const registry = new ConversationRegistry({ runtimeFactory: factory });
+    await registry.create({ ...ownership(cwd), securityProfile: "workspace-sandboxed" });
+
+    expect(await registry.getWorkspaceImage("sandbox-image", "../../parent-secret.png")).toEqual({
+      mimeType: "image/png", data: bytes,
+    });
+    expect(reader.readFile).toHaveBeenCalledWith({
+      path: "../../parent-secret.png", maxBytes: 8 * 1024 * 1024, detectMime: true,
+    });
+
+    const noWorker = new FakeRuntime(identity("sandbox-no-worker", path.join(root, "sessions", "none.jsonl"), cwd));
+    factory.createPersistent.mockResolvedValue(noWorker);
+    await registry.create({ ...ownership(cwd, "other"), securityProfile: "workspace-sandboxed" });
+    expect(await registry.getWorkspaceImage("sandbox-no-worker", "generated.png")).toBeUndefined();
+  });
+
+  it("rejects worker image MIME claims that do not match the returned signature", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessionFile = path.join(root, "sessions", "bad-sandbox-image.jsonl");
+    await Promise.all([mkdir(cwd), mkdir(path.dirname(sessionFile))]);
+    const runtime = new FakeRuntime(identity("bad-sandbox-image", sessionFile, cwd));
+    Object.defineProperty(runtime, "sandboxFileReader", {
+      value: { readFile: vi.fn(async () => ({ data: Buffer.from("not png"), mimeType: "image/png" })) },
+    });
+    const factory = new FakeFactory(); factory.createPersistent.mockResolvedValue(runtime);
+    const registry = new ConversationRegistry({ runtimeFactory: factory });
+    await registry.create({ ...ownership(cwd), securityProfile: "workspace-sandboxed" });
+    expect(await registry.getWorkspaceImage("bad-sandbox-image", "anything")).toBeUndefined();
+  });
+
   it("rejects image prompts for a text-only model with a stable error", async () => {
     const root = await temporaryRoot();
     const cwd = path.join(root, "workspace");

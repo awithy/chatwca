@@ -588,6 +588,34 @@ export class ConversationRegistry {
       return undefined;
     }
 
+    if (conversation.securityProfile === "workspace-sandboxed") {
+      // A sandboxed assistant-selected path is never resolved, statted, or opened
+      // in the parent. A missing worker reader is a fail-closed unavailable image.
+      const reader = conversation.runtime.sandboxFileReader;
+      if (reader === undefined) return undefined;
+      try {
+        const result = await reader.readFile({
+          path: filePath,
+          maxBytes: Math.min(this.#imageLimits.maxImageBytes, 16 * 1024 * 1024),
+          detectMime: true,
+        });
+        if (
+          result.mimeType !== "image/png" &&
+          result.mimeType !== "image/jpeg" &&
+          result.mimeType !== "image/webp"
+        ) return undefined;
+        const [validated] = validatePromptImages(
+          [{ mimeType: result.mimeType, encoding: "base64", data: result.data.toString("base64") }],
+          { supportsImages: true, limits: this.#imageLimits },
+        );
+        return validated === undefined
+          ? undefined
+          : { mimeType: result.mimeType, data: result.data };
+      } catch {
+        return undefined;
+      }
+    }
+
     let mimeType: ImageMimeType;
     switch (path.extname(filePath).toLowerCase()) {
       case ".png":

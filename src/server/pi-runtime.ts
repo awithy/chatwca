@@ -71,12 +71,25 @@ export type PiSessionOptions = Omit<
   "services" | "sessionManager" | "sessionStartEvent"
 >;
 
+export interface SandboxWorkspaceFileReaderPort {
+  readFile(input: {
+    readonly path: string;
+    readonly maxBytes: number;
+    readonly detectMime: boolean;
+  }, options?: { readonly signal?: AbortSignal }): Promise<{
+    readonly data: Buffer;
+    readonly mimeType: string | null;
+  }>;
+}
+
 export interface PiConversationRuntimePort {
   readonly session: AgentSession;
   readonly identity: PiRuntimeIdentity;
   readonly model: PiModelCapability | undefined;
   readonly supportsImages: boolean;
   readonly disposed: boolean;
+  /** Present only when model-directed workspace reads cross a sandbox worker. */
+  readonly sandboxFileReader?: SandboxWorkspaceFileReaderPort;
   subscribe(listener: AgentSessionEventListener): () => void;
   onSessionReplaced(listener: PiRuntimeReplacementListener): () => void;
   prompt(text: string, options?: PromptOptions): Promise<void>;

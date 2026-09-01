@@ -14,6 +14,7 @@ import type { SandboxConfig } from "./config.js";
 import {
   OrderedChunkAssembler,
   SANDBOX_MAX_ACTIVE_OPERATIONS,
+  SANDBOX_MAX_ASSEMBLED_REQUEST_BYTES,
   SANDBOX_MAX_DIAGNOSTIC_BYTES,
   SANDBOX_MAX_PENDING_OUTPUT_BYTES,
   SANDBOX_MAX_PENDING_OUTPUT_FRAMES,
@@ -23,6 +24,7 @@ import {
   encodeSandboxFrame,
   isParentFrame,
   isWorkerFrame,
+  validateOperationArguments,
   validateOperationResult,
   type EditFileArguments,
   type EditFileResult,
@@ -278,6 +280,7 @@ export class SandboxWorkerClient {
   }
   async writeFile(path: string, data: Buffer | string, options: SandboxCallOptions & { readonly createParents?: boolean } = {}): Promise<WriteFileResult> {
     const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data, "utf8");
+    if (bytes.byteLength > SANDBOX_MAX_ASSEMBLED_REQUEST_BYTES) throw new SandboxWorkerOperationError("output_limit");
     const encoding = Buffer.isBuffer(data) ? "base64" as const : "utf8" as const;
     const arguments_ = {
       path, createParents: options.createParents ?? true, encoding, bytes: bytes.byteLength,
@@ -332,8 +335,13 @@ export class SandboxWorkerClient {
   ): Promise<{ readonly result: unknown; readonly data?: Buffer }> {
     if (this.#fatal || this.#closing || this.#closed) throw new AppError(ERROR_CODES.SANDBOX_WORKER_FAILED);
     if (options.signal?.aborted === true) throw options.signal.reason ?? new Error("aborted");
+    if (!validateOperationArguments(operation, arguments_)) throw new SandboxWorkerOperationError("invalid_arguments");
     if (this.#pending.size >= SANDBOX_MAX_ACTIVE_OPERATIONS) throw new SandboxWorkerOperationError("operation_failed");
     const id = randomUUID().replaceAll("-", "");
+    // Inline operation arguments must themselves fit one frame. Reject this as
+    // a healthy bounded-operation failure rather than poisoning the worker.
+    try { encodeSandboxFrame({ type: "request", id, operation, arguments: arguments_ } as ParentFrame); }
+    catch { throw new SandboxWorkerOperationError("output_limit"); }
     const result = new Promise<{ readonly result: unknown; readonly data?: Buffer }>((resolve, reject) => {
       const pending: PendingOperation = {
         id, operation, resolve, reject, assembler: new OrderedChunkAssembler(), outputSequence: 0,

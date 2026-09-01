@@ -14,6 +14,14 @@ import {
   workerIsParentFrame,
   type WorkerOperation,
 } from "./worker-protocol.js";
+import {
+  WorkerFileSystemError,
+  mapFileSystemError,
+  workerEditFile,
+  workerListDirectory,
+  workerReadFile,
+  workerWriteFile,
+} from "./worker-fs.js";
 
 const REQUEST_FD = 8;
 const RESPONSE_FD = 9;
@@ -22,13 +30,17 @@ const NAMESPACE_NAMES = ["user", "mnt", "pid", "ipc", "uts", "net"] as const;
 
 type ParentFrame = Record<string, unknown> & { readonly type: string };
 interface ActiveRequest {
+  readonly id: string;
   readonly operation: WorkerOperation;
+  readonly arguments: Record<string, unknown>;
   sequence: number;
   bytes: number;
   readonly hash: ReturnType<typeof createHash>;
+  readonly chunks: Buffer[];
   readonly declaredBytes: number;
   readonly declaredSha256: string;
   cancelled: boolean;
+  started: boolean;
 }
 
 class FrameDecoder {
@@ -72,6 +84,13 @@ function writeFrame(value: unknown): void {
   if (payload.byteLength === 0 || payload.byteLength > WORKER_MAX_FRAME_BYTES) throw new Error("frame too large");
   const prefix = Buffer.allocUnsafe(4); prefix.writeUInt32BE(payload.byteLength);
   writeAll(prefix); writeAll(payload);
+}
+function writeChunkedResponse(id: string, data: Buffer, result: unknown): void {
+  const chunkBytes = WORKER_MAX_RAW_CHUNK_BYTES;
+  for (let offset = 0, sequence = 0; offset < data.byteLength; offset += chunkBytes, sequence += 1) {
+    writeFrame({ type: "response.chunk", id, sequence, encoding: "base64", data: data.subarray(offset, offset + chunkBytes).toString("base64") });
+  }
+  writeFrame({ type: "response.end", id, bytes: data.byteLength, sha256: createHash("sha256").update(data).digest("hex"), result });
 }
 function decodeData(encoding: unknown, data: unknown): Buffer {
   if (typeof data !== "string") throw new Error("invalid chunk");
@@ -148,65 +167,112 @@ async function main(): Promise<void> {
   const decoder = new FrameDecoder();
   const requestStream = new net.Socket({ fd: REQUEST_FD, readable: true, writable: false });
   let helloDone = false;
-  let exitAfterProbe = false;
   let shutdown = false;
   const active = new Map<string, ActiveRequest>();
+  const tasks = new Set<Promise<void>>();
+
+  const execute = async (request: ActiveRequest): Promise<void> => {
+    if (request.started) throw new Error("request executed twice");
+    request.started = true;
+    try {
+      if (request.cancelled) throw new WorkerFileSystemError("cancelled");
+      switch (request.operation) {
+        case "health": writeFrame({ type: "response", id: request.id, result: { healthy: true } }); break;
+        case "readFile": {
+          const result = await workerReadFile(request.arguments as never, request);
+          writeChunkedResponse(request.id, result.data, { mimeType: result.mimeType });
+          break;
+        }
+        case "writeFile": {
+          const result = await workerWriteFile(request.arguments as never, Buffer.concat(request.chunks, request.bytes), request);
+          writeFrame({ type: "response", id: request.id, result });
+          break;
+        }
+        case "editFile": {
+          const result = await workerEditFile(request.arguments as never, request);
+          writeFrame({ type: "response", id: request.id, result });
+          break;
+        }
+        case "listDirectory": {
+          const result = await workerListDirectory(request.arguments as never, request);
+          writeFrame({ type: "response", id: request.id, result });
+          break;
+        }
+        default: throw new WorkerFileSystemError("operation_not_implemented");
+      }
+    } catch (error) {
+      const failure = error instanceof WorkerFileSystemError ? error : mapFileSystemError(error);
+      writeFrame({ type: "error", id: request.id, code: request.cancelled ? "cancelled" : failure.code });
+    } finally { active.delete(request.id); }
+  };
+  const start = (request: ActiveRequest) => {
+    const task = execute(request).catch((error) => { throw error; }).finally(() => tasks.delete(task));
+    tasks.add(task);
+    // A response-pipe failure is process-fatal; keep the rejection observed while
+    // allowing the outer loop to be terminated by the resulting uncaught error.
+    void task.catch((error) => { process.stderr.write(String(error).slice(0, 1_024)); process.exitCode = 1; requestStream.destroy(error as Error); });
+  };
 
   const handle = async (frame: ParentFrame): Promise<void> => {
     if (!helloDone) {
       if (frame.type !== "hello" || frame.artifactSha256 !== actualHash || frame.artifactVersion !== WORKER_VERSION) throw new Error("invalid worker handshake");
-      helloDone = true; exitAfterProbe = frame.exitAfterProbe as boolean;
+      helloDone = true;
       writeFrame({ type: "ready", protocol: 1, nonce: frame.nonce, probe: await collectProbe(frame, actualHash) });
-      if (exitAfterProbe) shutdown = true;
+      if (frame.exitAfterProbe === true) shutdown = true;
       else fs.unlinkSync(`/workspace/.chatwca-probe-${String(frame.nonce)}`);
       return;
     }
     if (frame.type === "hello") throw new Error("duplicate hello");
-    if (frame.type === "shutdown") { writeFrame({ type: "shutdown.complete" }); shutdown = true; return; }
+    if (frame.type === "shutdown") {
+      for (const request of active.values()) request.cancelled = true;
+      await Promise.allSettled([...tasks]);
+      writeFrame({ type: "shutdown.complete" }); shutdown = true; return;
+    }
     if (frame.type === "cancel.all") { for (const request of active.values()) request.cancelled = true; return; }
     if (frame.type === "cancel") {
-      const request = active.get(frame.id as string); if (request === undefined) throw new Error("unknown cancel id");
-      request.cancelled = true; return;
+      // Cancellation can cross a terminal response in the pipes. An unknown ID
+      // therefore conveys no authority and is safely ignored by the worker.
+      const request = active.get(frame.id as string);
+      if (request !== undefined) request.cancelled = true;
+      return;
     }
     if (frame.type === "request") {
       const id = frame.id as string; const operation = frame.operation as WorkerOperation;
       if (active.has(id) || active.size >= WORKER_MAX_ACTIVE_OPERATIONS) throw new Error("duplicate id or active operation overflow");
-      if (operation === "health") { writeFrame({ type: "response", id, result: { healthy: true } }); return; }
-      if (operation !== "writeFile") { writeFrame({ type: "error", id, code: "operation_not_implemented" }); return; }
-      const arguments_ = frame.arguments as { readonly bytes: number; readonly sha256: string };
-      active.set(id, {
-        operation, sequence: 0, bytes: 0, hash: createHash("sha256"),
-        declaredBytes: arguments_.bytes, declaredSha256: arguments_.sha256, cancelled: false,
-      }); return;
+      const arguments_ = frame.arguments as Record<string, unknown>;
+      const request: ActiveRequest = {
+        id, operation, arguments: arguments_, sequence: 0, bytes: 0, hash: createHash("sha256"), chunks: [],
+        declaredBytes: operation === "writeFile" ? arguments_.bytes as number : 0,
+        declaredSha256: operation === "writeFile" ? arguments_.sha256 as string : createHash("sha256").digest("hex"),
+        cancelled: false, started: false,
+      };
+      active.set(id, request);
+      if (operation !== "writeFile") start(request);
+      return;
     }
     const id = frame.id as string; const request = active.get(id);
-    if (request === undefined) throw new Error("unknown request id");
+    if (request === undefined || request.operation !== "writeFile" || request.started) throw new Error("unknown request data id");
     if (frame.type === "request.chunk") {
-      if (frame.sequence !== request.sequence ||
-          request.sequence > Math.ceil(WORKER_MAX_ASSEMBLED_REQUEST_BYTES / WORKER_MAX_RAW_CHUNK_BYTES)) throw new Error("chunk sequence gap or overflow");
+      if (frame.sequence !== request.sequence || request.sequence > Math.ceil(WORKER_MAX_ASSEMBLED_REQUEST_BYTES / WORKER_MAX_RAW_CHUNK_BYTES)) throw new Error("chunk sequence gap or overflow");
       const bytes = decodeData(frame.encoding, frame.data);
       if (bytes.byteLength > WORKER_MAX_RAW_CHUNK_BYTES || request.bytes + bytes.byteLength > WORKER_MAX_ASSEMBLED_REQUEST_BYTES) throw new Error("request data overflow");
-      request.sequence += 1; request.bytes += bytes.byteLength; request.hash.update(bytes); return;
+      request.sequence += 1; request.bytes += bytes.byteLength; request.hash.update(bytes); request.chunks.push(bytes); return;
     }
     if (frame.type === "request.end") {
-      active.delete(id);
-      const actualHash = request.hash.digest("hex");
-      if (frame.bytes !== request.bytes || frame.sha256 !== actualHash ||
-          request.declaredBytes !== request.bytes || request.declaredSha256 !== actualHash) throw new Error("request hash mismatch");
-      writeFrame({ type: "error", id, code: request.cancelled ? "cancelled" : "operation_not_implemented" }); return;
+      const requestHash = request.hash.digest("hex");
+      if (frame.bytes !== request.bytes || frame.sha256 !== requestHash || request.declaredBytes !== request.bytes || request.declaredSha256 !== requestHash) throw new Error("request hash mismatch");
+      start(request); return;
     }
     throw new Error("unexpected parent frame");
   };
 
   for await (const chunk of requestStream) {
-    for (const frame of decoder.push(chunk as Buffer)) {
-      await handle(frame as ParentFrame);
-      if (shutdown) break;
-    }
+    for (const frame of decoder.push(chunk as Buffer)) { await handle(frame as ParentFrame); if (shutdown) break; }
     if (shutdown) break;
   }
   if (!shutdown) decoder.end();
   if (!helloDone) throw new Error("protocol pipe closed before hello");
+  await Promise.allSettled([...tasks]);
   requestStream.destroy();
   try { fs.closeSync(RESPONSE_FD); } catch { /* already closed */ }
 }

@@ -13,7 +13,14 @@ EnvironmentFile=-/home/adrian/projects/chatwca/.env
 ExecStart=/usr/bin/node /home/adrian/projects/chatwca/dist/server/server/index.js
 Restart=on-failure
 RestartSec=5s
+NoNewPrivileges=true
+KillMode=control-group
+TasksMax=512
+# Bubblewrap must create user/mount/PID/IPC/UTS/network namespaces itself.
+PrivateUsers=false
+RestrictNamespaces=false
 KillSignal=SIGTERM
+# ChatWCA caps graceful shutdown at 300s; allow a 10s manager margin.
 TimeoutStopSec=310s
 SyslogIdentifier=chatwca
 

@@ -18,7 +18,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-describe("profile-selected strict Pi runtime", () => {
+describe.skipIf(process.env.CHATWCA_SANDBOX_CAPABLE !== "1")("profile-selected strict Pi runtime", () => {
   it("runs a faux provider in the parent while its tool executes in Bubblewrap", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "chatwca-strict-runtime-"));
     roots.push(root);

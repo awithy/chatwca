@@ -3,14 +3,15 @@
 ChatWCA is a single-user, dark-only web interface for the [Pi coding agent](https://pi.dev/). A Node.js server runs the pinned `@earendil-works/pi-coding-agent` SDK in-process and serves a React client over HTTP and WebSocket.
 
 > [!CAUTION]
-> **ChatWCA has no authentication or authorization.** It listens on `0.0.0.0` by default, and every client that can reach the port can operate Pi, access configured conversations, and request tools that read, write, or execute with the server process's permissions. Run it only on a trusted, segmented LAN behind host/network firewall rules. Do not expose it to the public internet or an untrusted network.
+> **ChatWCA has no authentication or authorization.** It listens on `0.0.0.0` by default, and every accepted client has full ChatWCA authority: it can operate Pi, access configured conversations, and request tools. Prefer `CHATWCA_HOST=127.0.0.1` behind an authenticated mTLS reverse proxy. If binding to a LAN address, isolate the port with host/network firewall rules on a trusted, segmented LAN. Do not expose it directly to the public internet or an untrusted network. Bubblewrap workspace sandboxing limits tool authority; it does not authenticate clients.
 
 ## Requirements
 
 - Node.js **22.19.0 or newer** and npm.
 - A host supported by Pi, with at least one model/provider configured and available to the server process.
 - Read/search access to every directory registered as a workspace, read/write access to Pi's agent/session directory, and read/write access to ChatWCA's data directory. A workspace configured for workspace-local session storage must also be writable.
-- Network access to any remote model provider. `PI_OFFLINE` intentionally disables Pi model network access.
+- Network access from the **parent** to any remote model provider. `PI_OFFLINE` intentionally disables Pi model network access.
+- To enable Workspace sandbox: Linux with unprivileged user namespaces, Bubblewrap **0.6.1+** at a canonical root-owned executable, `/usr/bin/node` **22.19.0+**, `/usr/bin/bash`, and ripgrep on the configured synthetic-root `PATH`. Sandboxing is Linux-only; disabled mode does not inspect these dependencies.
 
 `npm ci` installs the Pi SDK and its local `pi` executable; a separate global Pi installation is not required. ChatWCA uses Pi's existing settings, credentials, context files, skills, and extensions. Configure those through Pi rather than ChatWCA—the web UI has no model or credential settings. You can inspect the models visible to the same installation with:
 
@@ -71,6 +72,8 @@ systemctl status chatwca.service
 journalctl -u chatwca.service -f
 ```
 
+The unit uses `NoNewPrivileges=true`, `KillMode=control-group`, and process-wide `TasksMax=512`, with namespace restrictions left disabled so Bubblewrap can create its own user/mount/PID/IPC/UTS/network namespaces. `TasksMax` is defense in depth for the whole service, **not** a per-conversation quota. Validate the real profile under the service constraints before enabling it; see [the Bubblewrap operations runbook](docs/bubblewrap-operations.md).
+
 After application updates, run `npm ci`, rebuild, and use `sudo systemctl restart chatwca.service`. If the checkout or user changes, update `User`, `WorkingDirectory`, `EnvironmentFile`, `ExecStart`, and `Documentation` in the service file.
 
 Operational endpoints are:
@@ -90,8 +93,9 @@ ChatWCA starts with no selected workspace. Before creating or opening a conversa
 1. Open **Manage workspaces** and choose **Add**.
 2. Enter a name and a directory path on the **server** machine. An absolute path is recommended. The directory must already exist and be readable/searchable by the server process.
 3. Optionally enable **Store sessions in this workspace**. It is disabled by default and cannot be changed after creation. Enabled workspaces use `<workspace>/.chatwca/sessions`; otherwise they use Pi's default session store.
-4. Select the workspace. Only then does ChatWCA ask Pi for sessions whose exact working directory is that workspace path, and it opens that workspace's most recently modified conversation when one exists.
-5. Create a new conversation or open one from the selected workspace's history. An open conversation's title can be edited from its header; the custom title is stored in Pi's native session metadata. From an eligible user message, **Fork** keeps the source conversation while **Rewind** replaces it with the fork and permanently deletes the source after fork creation succeeds.
+4. Select the security profile when the server permits it. **Workspace sandbox** routes the seven coding tools through a per-conversation, no-network Bubblewrap worker; **Unrestricted** retains the server user's full host authority. The sandbox still permits all workspace and `.git` changes and workspace content can be sent by the parent to the configured remote model.
+5. Select the workspace. Only then does ChatWCA ask Pi for sessions whose exact working directory is that workspace path, and it opens that workspace's most recently modified conversation when one exists.
+6. Create a new conversation or open one from the selected workspace's history. An open conversation's title can be edited from its header; the custom title is stored in Pi's native session metadata. From an eligible user message, **Fork** keeps the source conversation while **Rewind** replaces it with the fork and permanently deletes the source after fork creation succeeds.
 
 Workspace definitions persist across browser and server restarts, but browser selection is intentionally in memory only and resets after a full page load. During a browser session, the workspace list is ordered by most recently selected; that usage order resets with the browser selection after a full page load. Starting ChatWCA or connecting a browser loads the small SQLite workspace list; it does **not** scan Pi session history. ChatWCA performs no automatic discovery or import of directories from existing global Pi history.
 
@@ -119,6 +123,14 @@ These are all environment variables interpreted by ChatWCA or explicitly passed 
 | `CHATWCA_MAX_IMAGE_BYTES` | `8388608` (8 MiB) | Positive integer; maximum decoded bytes for one image. |
 | `CHATWCA_MAX_TOTAL_IMAGE_BYTES` | `25165824` (24 MiB) | Positive integer; maximum aggregate decoded image bytes in one prompt. |
 | `CHATWCA_SHUTDOWN_GRACE_MS` | `10000` | Positive integer in milliseconds, capped at `300000` (5 minutes). |
+| `CHATWCA_SANDBOX_MODE` | `disabled` | `disabled`, `optional`, or `required`. Optional/required runs the real functional probe before listening; required needs at least one workspace root. |
+| `CHATWCA_BWRAP_PATH` | `/usr/bin/bwrap` | Absolute canonical root-owned Bubblewrap 0.6.1+ executable. Ignored in disabled mode. |
+| `CHATWCA_WORKSPACE_ROOTS` | `[]` | JSON string array of approved canonical roots. Non-empty roots apply in every mode. |
+| `CHATWCA_SANDBOX_RO_MOUNTS` | `[]` | JSON string array of administrator-trusted host files/directories mounted read-only at the same guest paths. |
+| `CHATWCA_SANDBOX_PATH` | `/usr/bin:/bin` | Absolute, empty-segment-free guest `PATH` covered by `/usr` or approved read-only mounts. |
+| `CHATWCA_SANDBOX_START_TIMEOUT_MS` | `5000` | Positive worker probe/handshake deadline in milliseconds. |
+| `CHATWCA_SANDBOX_COMMAND_TIMEOUT_MS` | `900000` | Positive hard maximum for a sandbox shell command. |
+| `CHATWCA_SANDBOX_MAX_COMMAND_OUTPUT_BYTES` | `67108864` | Positive total command-output bound; exceeding it terminates the worker. |
 | `PI_CODING_AGENT_DIR` | Pi default (`~/.pi/agent`) | Non-empty Pi configuration, credential, resource, and session root. Prefer an absolute path. Changing it selects a different Pi history/configuration universe. |
 | `PI_OFFLINE` | unset | Pi offline mode is enabled by the variable's **presence**, regardless of value; even `PI_OFFLINE=0` enables it. Remove/unset the variable to disable offline mode. |
 
@@ -154,7 +166,9 @@ Tool-result text is bounded only in the browser projection; Pi's native session 
 
 ## Network and security behavior
 
-The browser client uses `/api/*` and `/ws` on the same authority that served the page. ChatWCA does not enable broad CORS. Browser WebSocket upgrades are accepted only when the `Origin` authority matches the request `Host`; direct clients that omit `Origin` are accepted. This check reduces cross-site WebSocket abuse but **is not authentication**.
+The browser client uses `/api/*` and `/ws` on the same authority that served the page. ChatWCA does not enable broad CORS. Browser WebSocket upgrades are accepted only when the `Origin` authority matches the request `Host`; direct clients that omit `Origin` are accepted. This check reduces cross-site WebSocket abuse but **is not authentication**. The recommended remote deployment is loopback binding behind a reverse proxy that requires and validates client certificates (mTLS) for both HTTP and WebSocket upgrades. Preserve the browser-facing `Host` header. Firewall isolation is still required when binding directly to a LAN address. Every client accepted by the proxy/firewall retains full ChatWCA authority; there are no per-client roles.
+
+Workspace sandboxing is a tool boundary, not an access-control or resource-quota system. It has no package network access, but model requests still leave through the parent. It cannot prevent harmful workspace, `.git`, hook, dependency, or build-script changes, and it has no per-conversation CPU, memory, process, or disk quota. Sandboxed runtimes disable arbitrary Pi extensions, extension-only providers, skills, and prompt packages; use an administrator-configured native provider. See [Bubblewrap operations](docs/bubblewrap-operations.md) for rollout and residual risks.
 
 Use a single ChatWCA process. The process-wide registry prevents duplicate live writers inside that process, but it does not coordinate session writes with another ChatWCA or Pi CLI process.
 
@@ -213,6 +227,15 @@ A registered workspace is retained in SQLite when its directory disappears or be
 
 ChatWCA intentionally does not override the working directory recorded in a Pi session header. Sessions discovered for a different directory are not admitted to the selected workspace. There is no UI for rewriting or relocating a stored Pi session.
 
+### Workspace sandbox is blocked or startup fails
+
+- `sandbox_disabled`: the stored workspace requests sandboxing while server mode is disabled. This is fail-closed; change mode after validating the host, or explicitly downgrade the workspace with the UI warning.
+- `sandbox_configuration_error` / `sandbox_unavailable`: verify the JSON environment values, canonical root-owned Bubblewrap executable, unprivileged namespaces, `/usr/bin/node`, Bash, ripgrep, roots, and read-only mounts. Optional and required mode intentionally fail before binding.
+- `sandbox_workspace_rejected`: move data and Pi state outside the workspace, avoid overlap with read-only mounts, make `.chatwca` a real directory, and remove all Unix sockets. A checkout containing default `./data` cannot itself be sandboxed until `CHATWCA_DATA_DIR` moves elsewhere.
+- `sandbox_worker_start_failed` / `sandbox_worker_failed`: close/reopen only after correcting the host problem. ChatWCA never retries with unrestricted tools.
+
+Normal logs and CI output contain stable redacted codes, not worker stderr, paths, commands, output, or stacks. Run `npm run spike:sandbox-profile` interactively as the service user for a deployment probe, and consult [the operations runbook](docs/bubblewrap-operations.md). Treat any detailed local probe output as private operational data.
+
 ### WebSocket origin mismatch or repeated reconnects
 
 A rejected browser upgrade usually appears as HTTP `403` for `/ws` in browser developer tools. Load the UI and WebSocket from the same scheme/host/port. When using a reverse proxy, preserve the browser-facing `Host` header (including a non-default port) on the WebSocket upgrade and proxy `/ws` with upgrade support. Do not serve the UI from one hostname while directing its WebSocket to another. HTTP health can be checked independently at `/api/health`.
@@ -238,6 +261,8 @@ npm run test:unit
 npm run test:integration
 npm run test:browser
 npm run test:sdk-smoke
+# Linux host explicitly declared sandbox-capable; failure never skips:
+npm run test:sandbox-real
 ```
 
 The SDK smoke test uses temporary Pi state and a faux provider; it does not require paid credentials or network access. Browser tests use a deterministic fixture server.
@@ -246,6 +271,9 @@ The SDK smoke test uses temporary Pi state and a faux provider; it does not requ
 
 - [Technical design](docs/design.md)
 - [Validated Pi SDK integration notes](docs/pi-sdk-notes.md)
+- [Bubblewrap design](docs/bubblewrap-design.md)
+- [Bubblewrap operations runbook](docs/bubblewrap-operations.md)
+- [Sandbox acceptance-criteria mapping](docs/bubblewrap-acceptance.md)
 - [Implementation plan](plan.md)
 
 ## License

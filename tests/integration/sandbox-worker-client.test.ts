@@ -18,7 +18,7 @@ afterEach(async () => Promise.all(temporaryDirectories.splice(0).map((directory)
   rm(directory, { recursive: true, force: true })
 )));
 
-describe("real sandbox worker client", () => {
+describe.skipIf(process.env.CHATWCA_SANDBOX_CAPABLE !== "1")("real sandbox worker client", () => {
   it("handshakes through production Bubblewrap, exposes typed APIs, and closes cleanly", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "chatwca-worker-client-"));
     temporaryDirectories.push(root);

@@ -1,6 +1,6 @@
 # Bubblewrap Workspace Sandboxing Design
 
-**Status:** Proposed
+**Status:** Implemented
 
 **Platform:** Linux
 

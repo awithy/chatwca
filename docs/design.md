@@ -8,9 +8,9 @@
 
 ## 1. Summary
 
-ChatWCA is a single-user, dark-only web interface for the Pi coding agent. A Node.js server runs the Pi SDK in-process and serves a React application to browsers on the local network.
+ChatWCA is a single-operator, dark-only web interface for the Pi coding agent. A Node.js server runs the Pi SDK in-process and serves a React application to browsers through an authenticated reverse proxy or a tightly isolated local network.
 
-The server intentionally binds to `0.0.0.0` and has no authentication or authorization. It is intended to run inside a trusted, segmented LAN. Network access control is an infrastructure concern and is outside the application.
+The server defaults to `0.0.0.0` for compatibility and has no authentication or authorization. The recommended deployment binds ChatWCA to loopback behind an mTLS reverse proxy; direct LAN binding requires host/network firewall isolation. Every client accepted by that infrastructure has full ChatWCA authority. Workspace sandboxing is specified separately in [`bubblewrap-design.md`](bubblewrap-design.md) and does not authenticate clients.
 
 A workspace is a user-named, canonical path to a directory with an immutable session-storage policy. ChatWCA stores workspace definitions in its own SQLite database. The server does not scan Pi's global session history during startup or browser connection; it lists Pi sessions only for a workspace selected by the browser.
 
@@ -40,7 +40,7 @@ Each conversation:
 - Fork a conversation from an earlier user message without changing the source, or rewind by replacing the source with that fork.
 - Recover cleanly after browser disconnects.
 - Use a dark-only interface on desktop and laptop-sized screens.
-- Bind to all interfaces so the application is reachable from the trusted LAN.
+- Support configurable loopback or LAN binding; direct LAN reachability requires external isolation.
 
 ## 3. Non-goals
 
@@ -65,12 +65,12 @@ Pi resources already configured on the host—models, credentials, context files
 
 - One trusted operator uses the application.
 - The server and workspaces are on the same machine.
-- Browsers may run on another machine in the same segmented LAN.
-- The LAN controls which devices can reach the configured port.
+- Browsers may run on another machine through an authenticated mTLS reverse proxy, or in the same segmented trusted LAN.
+- The reverse proxy, host firewall, and network firewall control which clients can reach the configured port; every accepted client has full authority.
 - The Node.js process has the same filesystem permissions as the operator.
 - The process can create and write the configured ChatWCA data directory (`./data` by default) containing the SQLite database, plus any workspace configured for local session storage.
 - There is one ChatWCA server process. A restart interrupts active model requests, but completed session history remains persisted by Pi.
-- The application is not a sandbox. Pi tools can read, write, edit, and execute commands in the selected workspace with the server process's permissions.
+- Unrestricted workspaces run Pi tools with the server process's permissions. Workspace-sandboxed conversations use the separate Bubblewrap boundary, with the residual risks documented in `bubblewrap-design.md`.
 
 Default listener:
 
@@ -78,11 +78,7 @@ Default listener:
 http://0.0.0.0:8787
 ```
 
-A browser connects using the server's LAN address, for example:
-
-```text
-http://192.168.20.10:8787
-```
+For remote access, prefer `CHATWCA_HOST=127.0.0.1` with an mTLS reverse proxy. If direct LAN binding is explicitly accepted, a browser connects through a firewall-restricted server address such as `http://192.168.20.10:8787`.
 
 ## 5. System architecture
 
@@ -102,7 +98,7 @@ flowchart LR
     D --> P
     P --> S[Pi JSONL session store]
     P --> F[Workspace files and tools]
-    W --> M[Shared ModelRuntime]
+    W --> M[Profile-separated ModelRuntimes]
     A --> M
     C --> M
     D --> M
@@ -137,12 +133,7 @@ The server owns one global `WorkspaceRepository` and one global `ConversationReg
 
 ### 6.1 Shared services
 
-The server creates one `ModelRuntime` and reuses it across all conversations. This centralizes:
-
-- provider credentials;
-- model catalogs;
-- model availability; and
-- model refresh state.
+The server creates separate process-lifetime unrestricted and strict `ModelRuntime` instances from the same administrator-controlled credential/model paths. This prevents unrestricted extension provider registration from mutating strict sessions while retaining centralized credentials, catalogs, availability, and refresh state.
 
 CWD-bound Pi services and resources are created separately for each runtime.
 
@@ -178,15 +169,17 @@ CREATE TABLE IF NOT EXISTS workspaces (
   session_storage TEXT NOT NULL DEFAULT 'pi-default'
     CHECK (session_storage IN ('pi-default', 'workspace')),
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  security_profile TEXT NOT NULL DEFAULT 'unrestricted'
+    CHECK (security_profile IN ('unrestricted', 'workspace-sandboxed'))
 );
 
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;
 ```
 
 Workspace names must be non-empty. A path is resolved, verified as a directory, and canonicalized before insertion or update; canonical paths are unique. Creation selects an immutable `pi-default` or `workspace` session-storage policy, with `pi-default` used when migrating version-one rows. Workspace-local storage resolves to `<workspace>/.chatwca/sessions`; registering the workspace does not create that directory. The Pi SDK creates it when the first local runtime is created. A registered workspace remains visible if its directory later disappears, but it is marked unavailable and cannot list, create, or open conversations until the path is restored.
 
-Removing a workspace deletes only its database row. It never deletes the directory or any Pi session. Removal and path changes are rejected while that workspace owns a live runtime; renaming remains allowed. The session-storage policy is not accepted by workspace updates and cannot change after creation. Database version two migrates existing rows to `pi-default`; it does not move Pi sessions.
+Removing a workspace deletes only its database row. It never deletes the directory or any Pi session. Removal and path changes are rejected while that workspace owns a live runtime; renaming remains allowed. The session-storage policy is not accepted by workspace updates and cannot change after creation. Database version two migrated existing rows to `pi-default`; version three adds requested security profiles defaulted to `unrestricted`. Neither migration moves Pi sessions.
 
 ### 6.3 Conversation registry
 
@@ -517,17 +510,13 @@ Commands include a client-generated `requestId` in the concrete schema so respon
 
 ## 14. Network behavior
 
-The default host is deliberately:
+The compatibility default remains `CHATWCA_HOST=0.0.0.0`, but production remote access should set `127.0.0.1` and use a reverse proxy that requires valid mTLS client certificates for HTTP and WebSocket upgrades. A direct LAN listener is acceptable only behind explicit host/network firewall isolation on a segmented trusted network.
 
-```text
-CHATWCA_HOST=0.0.0.0
-```
+There is no application login, token, cookie, API key, role, or authorization check. ChatWCA trusts every client accepted by the proxy or network boundary and grants each full authority.
 
-There is no login page, token, cookie, API key, or authorization check. ChatWCA trusts any client that can reach the listener.
+The server serves the frontend and WebSocket endpoint from the same authority. It does not enable broad CORS. Browser WebSocket upgrades must have an `Origin` whose authority matches the request `Host`; this prevents unrelated web pages from driving the socket and does not add user authentication. Direct non-browser clients without `Origin` are accepted. A proxy must preserve the browser-facing `Host` header and WebSocket upgrade headers.
 
-The server serves the frontend and WebSocket endpoint from the same authority. It does not enable broad CORS. Browser WebSocket upgrades must have an `Origin` whose authority matches the request `Host`; this prevents unrelated web pages from driving the socket and does not add user authentication. Direct non-browser clients without `Origin` are accepted.
-
-Reverse proxies are optional. HTTP is sufficient for the intended segmented LAN deployment.
+Bubblewrap's network namespace applies only to workspace tools. Parent model-provider traffic and accepted browser traffic remain outside it.
 
 ## 15. Frontend design
 
@@ -712,7 +701,7 @@ Use temporary SQLite databases, temporary Pi sessions, and a fake model/provider
 1. **Foundation** — TypeScript, Vite, Express, WebSocket, shared protocol, health endpoint.
 2. **Workspace storage** — gitignored data directory, SQLite lifecycle, workspace repository, CRUD protocol and UI.
 3. **Scoped Pi history** — selected-workspace listing with `SessionManager.list()`, scoped authorization, and no `listAll()` startup path.
-4. **Pi runtime** — shared `ModelRuntime`, workspace-bound runtime factory, persistent create/open, diagnostics.
+4. **Pi runtime** — profile-separated `ModelRuntime` instances, workspace-bound runtime factory, persistent create/open, diagnostics.
 5. **Core chat** — prompt, abort, event normalization, state snapshots, text streaming.
 6. **Conversation registry** — workspace ownership, multiple live runtimes, switching, background status, LRU disposal.
 7. **Rich rendering** — markdown, thinking, tools, errors, usage metadata.

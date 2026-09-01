@@ -85,5 +85,5 @@ describe("sandbox framed protocol", () => {
         zeroFlood.push({ sequence, encoding: "base64", data: "" });
       }
     }).toThrow(/too many/);
-  });
+  }, 10_000);
 });

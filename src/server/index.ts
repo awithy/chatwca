@@ -7,7 +7,7 @@ import { loadEnvFile } from "node:process";
 import { fileURLToPath } from "node:url";
 import WebSocket, { WebSocketServer } from "ws";
 
-import { toAppError } from "../shared/errors.js";
+import { redactedErrorDiagnostic, toAppError } from "../shared/errors.js";
 import {
   ConfigurationError,
   loadConfig,
@@ -96,7 +96,7 @@ export function installShutdownSignalHandlers(
   target: ShutdownSignalTarget = process,
   exit: (code: number) => void = (code) => process.exit(code),
   onError: (error: unknown) => void = (error) =>
-    console.error("ChatWCA shutdown error", error),
+    console.error(`ChatWCA shutdown error: ${redactedErrorDiagnostic(error)}`),
 ): () => void {
   let handled = false;
   const handle = () => {
@@ -592,7 +592,8 @@ async function main(): Promise<void> {
     }
 
     const server = await startChatWcaServer({
-      onInternalError: (error) => console.error("ChatWCA internal error", error),
+      onInternalError: (error) =>
+        console.error(`ChatWCA internal error: ${redactedErrorDiagnostic(error)}`),
     });
     installShutdownSignalHandlers(server);
     const address = server.httpServer.address();
@@ -605,7 +606,7 @@ async function main(): Promise<void> {
     if (error instanceof ConfigurationError) {
       console.error(`ChatWCA startup error: ${error.message}`);
     } else {
-      console.error("ChatWCA startup error: Unexpected error while starting ChatWCA", error);
+      console.error(`ChatWCA startup error: ${redactedErrorDiagnostic(error)}`);
     }
     process.exitCode = 1;
   }

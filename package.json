@@ -23,6 +23,8 @@
     "test:unit": "vitest run tests/unit --passWithNoTests",
     "pretest:integration": "npm run build:sandbox-worker",
     "test:integration": "vitest run tests/integration --passWithNoTests",
+    "pretest:sandbox-real": "npm run build:sandbox-worker",
+    "test:sandbox-real": "CHATWCA_SANDBOX_CAPABLE=1 vitest run tests/integration/sandbox-probe.test.ts tests/integration/sandbox-worker-client.test.ts tests/integration/sandbox-pi-runtime.test.ts tests/integration/sandbox-attack-concurrency.test.ts --passWithNoTests",
     "test:browser": "playwright test --pass-with-no-tests",
     "test:sdk-smoke": "node --test tests/smoke/pi-sdk.test.mjs",
     "spike:sandbox-profile": "node scripts/spike-bubblewrap-profile.mjs"

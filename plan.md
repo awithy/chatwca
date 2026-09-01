@@ -1,6 +1,6 @@
 # Bubblewrap Workspace Sandboxing Implementation Plan
 
-**Status:** Proposed
+**Status:** Implemented
 
 **Design:** [`docs/bubblewrap-design.md`](docs/bubblewrap-design.md)
 

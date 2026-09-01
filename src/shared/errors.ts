@@ -333,3 +333,12 @@ export function toErrorResponse(
         message: appError.message,
       };
 }
+
+/** A log-safe diagnostic that never includes causes, paths, output, or stacks. */
+export function redactedErrorDiagnostic(
+  error: unknown,
+  context: ErrorContext = { source: "internal" },
+): string {
+  const appError = toAppError(error, context);
+  return `code=${appError.code} message=${JSON.stringify(appError.message)}`;
+}

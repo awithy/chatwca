@@ -19,7 +19,7 @@ afterEach(async () => {
   ));
 });
 
-describe("real Bubblewrap startup probe", () => {
+describe.skipIf(process.env.CHATWCA_SANDBOX_CAPABLE !== "1")("real Bubblewrap startup probe", () => {
   it("validates the production executable/toolchain and complete functional boundary", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "chatwca-real-probe-"));
     temporaryDirectories.push(root);

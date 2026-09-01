@@ -44,3 +44,59 @@ jobs:
 
       - name: Pi SDK smoke test
         run: npm run test:sdk-smoke
+
+  sandbox-linux:
+    name: Real Bubblewrap (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+
+      - name: Install sandbox host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap ripgrep
+          # The synthetic root intentionally mounts only /usr. setup-node lives
+          # elsewhere, so install its exact binary into /usr on this disposable VM.
+          sudo install -m 0755 "$(command -v node)" /usr/bin/node
+          bwrap --version
+          /usr/bin/node --version
+          /usr/bin/rg --version
+
+      - name: Install dependencies and build worker
+        run: |
+          npm ci
+          npm run build:sandbox-worker
+
+      - name: Real sandbox suite (direct, isolated runner)
+        env:
+          CHATWCA_SANDBOX_RESOURCE_STRESS: "1"
+        run: npm run test:sandbox-real
+
+      - name: Validate hardened unit syntax
+        run: |
+          sed "s/^User=.*/User=$(id -un)/" systemd/chatwca.service > /tmp/chatwca.service
+          systemd-analyze verify /tmp/chatwca.service
+
+      - name: Real sandbox suite under service-unit constraints
+        run: |
+          sudo systemd-run --wait --pipe --collect \
+            --unit=chatwca-sandbox-ci \
+            --uid="$(id -u)" --gid="$(id -g)" \
+            --working-directory="$GITHUB_WORKSPACE" \
+            --property=NoNewPrivileges=true \
+            --property=KillMode=control-group \
+            --property=TasksMax=512 \
+            --property=TimeoutStopSec=310s \
+            --property=PrivateUsers=false \
+            --property=RestrictNamespaces=false \
+            --setenv=CHATWCA_SANDBOX_CAPABLE=1 \
+            --setenv=CHATWCA_SANDBOX_RESOURCE_STRESS=1 \
+            "$(command -v npm)" run test:sandbox-real

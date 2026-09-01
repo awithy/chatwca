@@ -5,6 +5,7 @@ import {
   AppError,
   ERROR_CODES,
   ErrorCodeSchema,
+  redactedErrorDiagnostic,
   toAppError,
   toErrorResponse,
 } from "../../src/shared/errors.js";
@@ -119,15 +120,20 @@ describe("safe error conversion", () => {
     );
   });
 
-  it("defaults unknown failures to a generic redacted response", () => {
+  it("defaults unknown failures to generic redacted wire and log diagnostics", () => {
     const error = new Error("token=secret at /home/operator/session.jsonl");
     error.stack = "private stack";
+    const response = toErrorResponse(error);
+    const diagnostic = redactedErrorDiagnostic(error);
 
-    expect(toErrorResponse(error)).toEqual({
+    expect(response).toEqual({
       type: "error",
       code: ERROR_CODES.INTERNAL_ERROR,
       message: "An internal server error occurred.",
     });
+    expect(diagnostic).toBe('code=internal_error message="An internal server error occurred."');
+    expect(JSON.stringify({ response, diagnostic })).not.toContain("secret");
+    expect(JSON.stringify({ response, diagnostic })).not.toContain("/home/operator");
   });
 
   it("includes a request ID without serializing the retained cause", () => {

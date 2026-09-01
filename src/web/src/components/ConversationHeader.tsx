@@ -87,6 +87,12 @@ export function ConversationHeader({
   const status = loading ? "Opening" : headerStatus(conversation, summary);
   const statusClass = loading ? "opening" : (conversation?.status ?? summary.status);
   const actualStatus = conversation?.status ?? summary.status;
+  const securityProfile = conversation?.securityProfile;
+  const securityLabel = securityProfile === undefined
+    ? "Loading security profile…"
+    : securityProfile === "workspace-sandboxed"
+      ? "Sandboxed"
+      : "Unrestricted";
   const closeEnabled = conversation !== undefined && canCloseConversation(conversation.status);
   const deleteEnabled = canDeleteConversation(actualStatus);
   const renameEnabled = conversation !== undefined && connected && !loading && actionPending === null;
@@ -134,7 +140,17 @@ export function ConversationHeader({
       <div className="conversation-heading">
         <p className="conversation-workspace-name">
           <span>{workspace.name}</span>
-          {!workspace.available && <strong>Workspace unavailable</strong>}
+          {!workspace.available ? (
+            <strong>Workspace unavailable</strong>
+          ) : !workspace.usable ? (
+            <strong>Workspace blocked by policy</strong>
+          ) : null}
+          <span
+            className={`security-badge${securityProfile === undefined ? " security-loading" : securityProfile === "workspace-sandboxed" ? " security-sandboxed" : " security-unrestricted"}`}
+            aria-label={`Conversation security profile: ${securityLabel}`}
+          >
+            {securityLabel}
+          </span>
         </p>
         {editingTitle ? (
           <form className="conversation-title-form" onSubmit={(event) => void submitTitle(event)}>

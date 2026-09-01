@@ -33,6 +33,8 @@ test("keyboard focus and primary chat controls remain operable", async ({ page }
   await expect(path).toBeFocused();
   await path.fill("/tmp/chatwca-browser-keyboard");
   await page.keyboard.press("Tab");
+  await expect(page.getByLabel("Security profile", { exact: true })).toBeFocused();
+  await page.keyboard.press("Tab");
   await expect(page.getByLabel("Store sessions in this workspace")).toBeFocused();
   await page.keyboard.press("Tab");
   await expect(page.getByRole("button", { name: "Cancel" })).toBeFocused();

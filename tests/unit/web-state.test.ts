@@ -25,6 +25,7 @@ function conversation(revision = 0): ConversationState {
     contextUsage: null,
     messages: [],
     queue: { steering: [], followUp: [] },
+    securityProfile: "unrestricted",
   };
 }
 
@@ -430,6 +431,48 @@ describe("web chat state", () => {
     expect(state.drafts).toEqual({
       "conversation-1": "unfinished",
       "conversation-2": "other",
+    });
+  });
+
+  it("replaces stored/effective usability from each authoritative workspace list", () => {
+    let state = reduceChatClientState(createInitialChatClientState(), {
+      type: "workspaces",
+      workspaces: [{
+        id: "workspace-1",
+        name: "One",
+        path: "/one",
+        sessionStorage: "pi-default",
+        sessionDirectory: null,
+        securityProfile: "workspace-sandboxed",
+        effectiveSecurityProfile: null,
+        createdAt: 1,
+        updatedAt: 1,
+        available: true,
+        usable: false,
+        policyIssue: "sandbox_disabled",
+      }],
+    });
+    expect(state.workspaces[0]).toMatchObject({
+      securityProfile: "workspace-sandboxed",
+      effectiveSecurityProfile: null,
+      usable: false,
+      policyIssue: "sandbox_disabled",
+    });
+
+    state = reduceChatClientState(state, {
+      type: "workspaces",
+      workspaces: [{
+        ...state.workspaces[0]!,
+        effectiveSecurityProfile: "workspace-sandboxed",
+        usable: true,
+        policyIssue: null,
+      }],
+    });
+    expect(state.workspaces[0]).toMatchObject({
+      securityProfile: "workspace-sandboxed",
+      effectiveSecurityProfile: "workspace-sandboxed",
+      usable: true,
+      policyIssue: null,
     });
   });
 

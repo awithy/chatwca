@@ -1,0 +1,189 @@
+import { expect, test, type Page, type WebSocket as PlaywrightWebSocket } from "@playwright/test";
+
+import { waitForConnected } from "./helpers.js";
+
+interface SentFrame {
+  readonly type?: string;
+  readonly name?: string;
+  readonly securityProfile?: string;
+  readonly acknowledgeSecurityDowngrade?: boolean;
+}
+
+function captureSent(page: Page): SentFrame[] {
+  const sent: SentFrame[] = [];
+  page.on("websocket", (socket: PlaywrightWebSocket) => {
+    socket.on("framesent", ({ payload }) => {
+      if (typeof payload === "string") sent.push(JSON.parse(payload) as SentFrame);
+    });
+  });
+  return sent;
+}
+
+async function openCreate(page: Page, name: string, directoryPath: string): Promise<void> {
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await page.getByLabel("Name").fill(name);
+  await page.getByLabel("Directory path").fill(directoryPath);
+}
+
+async function addSandboxWorkspace(page: Page, name: string, directoryPath: string): Promise<void> {
+  await openCreate(page, name, directoryPath);
+  await page.getByRole("form", { name: "Create workspace" })
+    .getByLabel("Security profile", { exact: true })
+    .selectOption("workspace-sandboxed");
+  await page.getByRole("button", { name: "Add workspace", exact: true }).click();
+  await expect(page.locator("button.workspace-select-button").filter({ hasText: name })).toBeVisible();
+}
+
+async function openWorkspaceInfo(page: Page, name: string) {
+  await page.getByRole("button", { name: `Workspace actions for ${name}` }).click();
+  await page.getByRole("button", { name: `Workspace info ${name}` }).click();
+  return page.getByRole("region", { name: `Workspace info for ${name}` });
+}
+
+test("optional mode defaults to Unrestricted and creates a badged Workspace sandbox", async ({ page }) => {
+  await waitForConnected(page);
+  const name = "Sandbox profile project";
+  await openCreate(page, name, "/tmp/chatwca-browser-sandbox-profile");
+  const form = page.getByRole("form", { name: "Create workspace" });
+  await expect(form.getByLabel("Security profile", { exact: true })).toHaveValue("unrestricted");
+  await form.getByLabel("Security profile", { exact: true }).selectOption("workspace-sandboxed");
+  await page.getByRole("button", { name: "Add workspace", exact: true }).click();
+
+  await page.getByRole("button", { name: `New conversation in ${name}` }).click();
+  const badge = page.locator(".security-badge");
+  await expect(badge).toHaveText("Sandboxed");
+  await expect(badge).toHaveAttribute("aria-label", "Conversation security profile: Sandboxed");
+
+  const info = await openWorkspaceInfo(page, name);
+  await expect(info).toContainText("Stored profile");
+  await expect(info).toContainText("Effective profile");
+  await expect(info).toContainText("Optional — sandboxing is not required");
+  await expect(info).toContainText("No network access");
+  await expect(info).toContainText(".git");
+  await expect(info).toContainText("/usr");
+  await expect(info).toContainText("administrator-approved runtime mounts");
+  await expect(info).toContainText("Workspace content may still be sent to the configured model provider");
+  await expect(info).toContainText("does not isolate CPU, memory, or disk denial-of-service");
+  await expect(info).not.toContainText("/administrator/private/mount");
+});
+
+test("downgrade requires confirmation and acknowledges only an accepted warning", async ({ page }) => {
+  const sent = captureSent(page);
+  await waitForConnected(page);
+  const name = "Downgrade confirmation project";
+  await addSandboxWorkspace(page, name, "/tmp/chatwca-browser-downgrade");
+
+  await page.getByRole("button", { name: `Workspace actions for ${name}` }).click();
+  await page.getByRole("button", { name: `Edit workspace ${name}` }).click();
+  await page.getByRole("form", { name: "Edit workspace" })
+    .getByLabel("Security profile", { exact: true })
+    .selectOption("unrestricted");
+
+  page.once("dialog", (dialog) => dialog.dismiss());
+  await page.getByRole("button", { name: "Save changes" }).click();
+  await expect(page.getByRole("form", { name: "Edit workspace" })).toBeVisible();
+  expect(sent.filter((frame) => frame.type === "workspace.update" && frame.name === name)).toHaveLength(0);
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Save changes" }).click();
+  await expect(page.getByRole("form", { name: "Edit workspace" })).toHaveCount(0);
+  await expect.poll(() => sent.filter(
+    (frame) => frame.type === "workspace.update" && frame.name === name,
+  )).toHaveLength(1);
+  expect(sent.find(
+    (frame) => frame.type === "workspace.update" && frame.name === name,
+  )).toMatchObject({
+    securityProfile: "unrestricted",
+    acknowledgeSecurityDowngrade: true,
+  });
+});
+
+test("policy-blocked workspace retains history/info but disables runtime actions", async ({ page }) => {
+  await waitForConnected(page);
+  const name = "Policy blocked project";
+  await openCreate(page, name, "/tmp/chatwca-fixture-policy-blocked");
+  await page.getByRole("button", { name: "Add workspace", exact: true }).click();
+
+  await expect(page.getByRole("heading", { name: "Workspace blocked by policy" })).toBeVisible();
+  await expect(page.getByText("Policy blocked", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: `New conversation in ${name}` })).toBeDisabled();
+  await expect(page.getByText("New, Open, Fork, and Rewind are disabled.")).toBeVisible();
+
+  const info = await openWorkspaceInfo(page, name);
+  await expect(info).toContainText("Policy blocked — Directory is outside administrator-approved workspace roots.");
+  await expect(info).toContainText("Session path");
+});
+
+test("invalid public configuration fails conservatively without profile controls", async ({ page }) => {
+  await page.route("**/api/config", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ maxImages: 4 }),
+  }));
+  await page.goto("/");
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Add", exact: true })).toBeDisabled();
+  await expect(page.getByRole("form", { name: "Create workspace" })).toHaveCount(0);
+  await expect(page.getByRole("alert")).toContainText("invalid public configuration");
+});
+
+test("required authoritative mode fixes creation to Workspace sandbox", async ({ page }) => {
+  const sent = captureSent(page);
+  await page.route("**/api/config", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      maxImages: 4,
+      maxImageBytes: 2 * 1024 * 1024,
+      maxTotalImageBytes: 4 * 1024 * 1024,
+      sandbox: {
+        mode: "required",
+        selectableProfiles: ["workspace-sandboxed"],
+        remoteProviderWarning: "Workspace content may still be sent to the configured model provider.",
+        functionalProbeSucceeded: true,
+      },
+    }),
+  }));
+  await waitForConnected(page);
+  await openCreate(page, "Required mode project", "/tmp/chatwca-browser-required-mode");
+  await expect(page.getByText("The server requires Workspace sandbox for every runtime.")).toBeVisible();
+  const form = page.getByRole("form", { name: "Create workspace" });
+  await expect(form.locator("select")).toHaveCount(0);
+  await expect(form.getByLabel("Security profile", { exact: true })).toHaveText("Workspace sandbox");
+  await page.getByRole("button", { name: "Add workspace", exact: true }).click();
+  await expect.poll(() => sent.some(
+    (frame) => frame.type === "workspace.create" &&
+      frame.name === "Required mode project" &&
+      frame.securityProfile === "workspace-sandboxed",
+  )).toBe(true);
+});
+
+test("disabled authoritative mode fixes creation to Unrestricted", async ({ page }) => {
+  const sent = captureSent(page);
+  await page.route("**/api/config", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      maxImages: 4,
+      maxImageBytes: 2 * 1024 * 1024,
+      maxTotalImageBytes: 4 * 1024 * 1024,
+      sandbox: {
+        mode: "disabled",
+        selectableProfiles: ["unrestricted"],
+        remoteProviderWarning: "Workspace content may still be sent to the configured model provider.",
+        functionalProbeSucceeded: false,
+      },
+    }),
+  }));
+  await waitForConnected(page);
+  await openCreate(page, "Disabled mode project", "/tmp/chatwca-browser-disabled-mode");
+  const form = page.getByRole("form", { name: "Create workspace" });
+  await expect(form.getByLabel("Security profile", { exact: true })).toHaveText("Unrestricted");
+  await expect(form.locator("select")).toHaveCount(0);
+  await page.getByRole("button", { name: "Add workspace", exact: true }).click();
+  await expect.poll(() => sent.some(
+    (frame) => frame.type === "workspace.create" &&
+      frame.name === "Disabled mode project" &&
+      frame.securityProfile === "unrestricted",
+  )).toBe(true);
+});

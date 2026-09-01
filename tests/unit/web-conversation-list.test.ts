@@ -32,9 +32,15 @@ const workspace: WorkspaceSummary = {
   id: "workspace-one",
   name: "One",
   path: "/full/path/to/one",
+  sessionStorage: "pi-default",
+  sessionDirectory: null,
+  securityProfile: "unrestricted",
+  effectiveSecurityProfile: "unrestricted",
   createdAt: 1,
   updatedAt: 1,
   available: true,
+  usable: true,
+  policyIssue: null,
 };
 
 function renderList(overrides: Partial<Parameters<typeof ConversationList>[0]> = {}): string {
@@ -82,10 +88,26 @@ describe("conversation list", () => {
     expect(unselected).toContain("Select a workspace to load its conversations.");
     expect(unselected).toContain("disabled");
 
-    const unavailable = renderList({ workspace: { ...workspace, available: false } });
+    const unavailable = renderList({ workspace: { ...workspace, available: false, usable: false } });
     expect(unavailable).toContain("Workspace unavailable");
     expect(unavailable).toContain("/full/path/to/one");
     expect(unavailable).toContain("disabled");
+  });
+
+  it("keeps blocked history visible while disabling create and open", () => {
+    const html = renderList({
+      workspace: {
+        ...workspace,
+        usable: false,
+        effectiveSecurityProfile: null,
+        policyIssue: "sandbox_disabled",
+      },
+      conversations: [summary("blocked-history", workspace.id, 1)],
+    });
+    expect(html).toContain("Workspace blocked by policy");
+    expect(html).toContain("blocked-history");
+    expect(html).toMatch(/class="conversation-row"[^>]*disabled=""/);
+    expect(html).toMatch(/class="new-conversation-button"[^>]*disabled=""/);
   });
 
   it("provides a useful title for blank Pi session names", () => {

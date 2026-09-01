@@ -1,41 +1,76 @@
 import * as React from "react";
 import { useId, useState, type FormEvent } from "react";
 
-import type { WorkspaceSessionStorage } from "../../../shared/protocol.js";
+import type {
+  PublicSandboxConfig,
+  WorkspaceSecurityProfile,
+  WorkspaceSessionStorage,
+} from "../../../shared/protocol.js";
 
 export interface WorkspaceFormValues {
   readonly name: string;
   readonly path: string;
   readonly sessionStorage: WorkspaceSessionStorage;
+  readonly securityProfile: WorkspaceSecurityProfile;
+}
+
+export interface WorkspaceFormInitialValues extends WorkspaceFormValues {
+  readonly effectiveSecurityProfile: WorkspaceSecurityProfile | null;
 }
 
 export interface WorkspaceFormProps {
   readonly mode: "create" | "edit";
-  readonly initialValues?: WorkspaceFormValues;
+  readonly initialValues?: WorkspaceFormInitialValues;
+  readonly publicSandboxConfig: PublicSandboxConfig;
+  /** A live runtime makes path/profile changes server-invalid; name remains editable. */
+  readonly securityControlsLocked: boolean;
   readonly submitting: boolean;
   readonly error: string | null;
   readonly onSubmit: (values: WorkspaceFormValues) => Promise<void>;
   readonly onCancel: () => void;
 }
 
-/** Explicit name/path form shared by workspace creation and editing. */
+export function securityProfileLabel(profile: WorkspaceSecurityProfile): string {
+  return profile === "workspace-sandboxed" ? "Workspace sandbox" : "Unrestricted";
+}
+
+function createProfile(config: PublicSandboxConfig): WorkspaceSecurityProfile {
+  return config.mode === "required" ? "workspace-sandboxed" : "unrestricted";
+}
+
+/** Explicit name/path/security form shared by workspace creation and editing. */
 export function WorkspaceForm({
   mode,
   initialValues,
+  publicSandboxConfig,
+  securityControlsLocked,
   submitting,
   error,
   onSubmit,
   onCancel,
 }: WorkspaceFormProps) {
   const formId = useId().replaceAll(":", "");
+  const editing = mode === "edit";
   const [name, setName] = useState(initialValues?.name ?? "");
   const [path, setPath] = useState(initialValues?.path ?? "");
   const [sessionStorage, setSessionStorage] = useState<WorkspaceSessionStorage>(
     initialValues?.sessionStorage ?? "pi-default",
   );
+  const initialProfile = initialValues?.securityProfile ?? createProfile(publicSandboxConfig);
+  // Required mode overrides existing rows without rewriting their stored value.
+  // Disabled mode offers only unrestricted; saving a formerly sandboxed row is
+  // therefore an explicit, confirmed downgrade in the sidebar.
+  const [securityProfile, setSecurityProfile] = useState<WorkspaceSecurityProfile>(
+    publicSandboxConfig.mode === "disabled"
+      ? "unrestricted"
+      : publicSandboxConfig.mode === "required" && !editing
+        ? "workspace-sandboxed"
+        : initialProfile,
+  );
   const [validationError, setValidationError] = useState<string | null>(null);
   const visibleError = validationError ?? error;
-  const editing = mode === "edit";
+  const profileSelectable = publicSandboxConfig.mode === "optional";
+  const pathLocked = editing && securityControlsLocked;
 
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -43,6 +78,7 @@ export function WorkspaceForm({
       name: name.trim(),
       path: path.trim(),
       sessionStorage,
+      securityProfile,
     };
     if (values.name.length === 0) {
       setValidationError("Enter a workspace name.");
@@ -81,7 +117,7 @@ export function WorkspaceForm({
       <input
         id={`${formId}-path`}
         value={path}
-        disabled={submitting}
+        disabled={submitting || pathLocked}
         spellCheck={false}
         autoComplete="off"
         placeholder="/full/path/to/project"
@@ -93,8 +129,66 @@ export function WorkspaceForm({
         }}
       />
       <p className="workspace-form-help">
-        The server must be able to read and search this directory.
+        {pathLocked
+          ? "Close this workspace’s live conversations before changing its directory or security profile."
+          : "The server must be able to read and search this directory."}
       </p>
+
+      {profileSelectable ? (
+        <>
+          <label htmlFor={`${formId}-security`}>Security profile</label>
+          <select
+            id={`${formId}-security`}
+            value={securityProfile}
+            disabled={submitting || securityControlsLocked}
+            onChange={(event) => {
+              setSecurityProfile(event.target.value as WorkspaceSecurityProfile);
+              setValidationError(null);
+            }}
+          >
+            {publicSandboxConfig.selectableProfiles.map((profile) => (
+              <option key={profile} value={profile}>{securityProfileLabel(profile)}</option>
+            ))}
+          </select>
+        </>
+      ) : (
+        <>
+          <span className="workspace-field-label" id={`${formId}-security-label`}>Security profile</span>
+          <div
+            className="workspace-profile-fixed"
+            aria-labelledby={`${formId}-security-label`}
+          >
+            {securityProfileLabel(
+              publicSandboxConfig.mode === "required"
+                ? "workspace-sandboxed"
+                : securityProfile,
+            )}
+          </div>
+        </>
+      )}
+      {editing && initialValues !== undefined && (
+        <dl className="workspace-profile-summary">
+          <div>
+            <dt>Stored profile</dt>
+            <dd>{securityProfileLabel(initialValues.securityProfile)}</dd>
+          </div>
+          <div>
+            <dt>Effective profile</dt>
+            <dd>{initialValues.effectiveSecurityProfile === null
+              ? "None — policy blocked"
+              : securityProfileLabel(initialValues.effectiveSecurityProfile)}</dd>
+          </div>
+        </dl>
+      )}
+      {publicSandboxConfig.mode === "required" && (
+        <p className="workspace-form-help">The server requires Workspace sandbox for every runtime.</p>
+      )}
+      {publicSandboxConfig.mode === "disabled" && initialValues?.securityProfile === "workspace-sandboxed" && (
+        <p className="workspace-form-warning">
+          Sandboxing is disabled. Saving changes the stored profile to Unrestricted after confirmation.
+        </p>
+      )}
+
       {!editing && (
         <label className="workspace-storage-option" htmlFor={`${formId}-storage`}>
           <input

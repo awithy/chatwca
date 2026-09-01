@@ -1,9 +1,12 @@
+import { Value } from "@sinclair/typebox/value";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import type {
-  ConversationSummary,
-  UiImage,
-  WorkspaceSummary,
+import {
+  PublicConfigSchema,
+  type ConversationSummary,
+  type PublicConfig,
+  type UiImage,
+  type WorkspaceSummary,
 } from "../../shared/protocol.js";
 import { useChatSocket } from "./api/index.js";
 import { Composer } from "./components/Composer.js";
@@ -19,15 +22,10 @@ interface HealthResponse {
   readonly version: string;
 }
 
-interface BrowserConfig {
-  readonly maxImages: number;
-  readonly maxImageBytes: number;
-  readonly maxTotalImageBytes: number;
-}
-
 interface ServerStatus {
   readonly health?: HealthResponse;
-  readonly config?: BrowserConfig;
+  /** Set only after the authoritative public response passes its schema. */
+  readonly config?: PublicConfig;
   readonly error?: string;
 }
 
@@ -59,10 +57,12 @@ export function App() {
         if (!healthResponse.ok || !configResponse.ok) {
           throw new Error("The ChatWCA server returned an error.");
         }
-        setServer({
-          health: (await healthResponse.json()) as HealthResponse,
-          config: (await configResponse.json()) as BrowserConfig,
-        });
+        const health = (await healthResponse.json()) as HealthResponse;
+        const publicConfig: unknown = await configResponse.json();
+        if (!Value.Check(PublicConfigSchema, publicConfig)) {
+          throw new Error("The ChatWCA server returned invalid public configuration.");
+        }
+        setServer({ health, config: publicConfig });
       })
       .catch((error: unknown) => {
         if (!abortController.signal.aborted) {
@@ -83,12 +83,22 @@ export function App() {
     ),
     [chat.conversations],
   );
+  const liveWorkspaceIds = useMemo(
+    () => new Set(
+      Object.values(chat.conversations).map(
+        (projection) => projection.conversation.workspaceId,
+      ),
+    ),
+    [chat.conversations],
+  );
   const selectedWorkspace = chat.workspaces.find(
     (workspace) => workspace.id === chat.selectedWorkspaceId,
   );
   const selectedWorkspaceUnavailable = selectedWorkspace !== undefined && (
     !selectedWorkspace.available || chat.historyError?.code === "workspace_unavailable"
   );
+  const selectedWorkspaceBlocked = selectedWorkspace !== undefined &&
+    selectedWorkspace.available && !selectedWorkspace.usable;
   const selectedProjection = chat.selectedConversationId === null
     ? undefined
     : chat.conversations[chat.selectedConversationId];
@@ -134,9 +144,7 @@ export function App() {
       name: values.name,
       path: values.path,
       sessionStorage: values.sessionStorage,
-      // Phase 1 preserves the existing unrestricted browser behavior. Profile
-      // controls are introduced with the dedicated browser phase.
-      securityProfile: "unrestricted",
+      securityProfile: values.securityProfile,
     }));
     const created = result.workspaces.find((workspace) => !knownIds.has(workspace.id));
     if (created !== undefined) {
@@ -146,13 +154,24 @@ export function App() {
 
   async function updateWorkspace(
     workspaceId: string,
-    values: { readonly name: string; readonly path?: string },
+    values: {
+      readonly name: string;
+      readonly path?: string;
+      readonly securityProfile?: WorkspaceFormValues["securityProfile"];
+      readonly acknowledgeSecurityDowngrade?: true;
+    },
   ): Promise<void> {
     await runExclusive("workspace.update", () => client.send({
       type: "workspace.update",
       workspaceId,
       name: values.name,
       ...(values.path === undefined ? {} : { path: values.path }),
+      ...(values.securityProfile === undefined
+        ? {}
+        : { securityProfile: values.securityProfile }),
+      ...(values.acknowledgeSecurityDowngrade === true
+        ? { acknowledgeSecurityDowngrade: true as const }
+        : {}),
     }));
     if (values.path !== undefined && chat.selectedWorkspaceId === workspaceId) {
       await client.selectWorkspace(null);
@@ -172,8 +191,13 @@ export function App() {
 
   async function createConversation(): Promise<void> {
     const workspace = selectedWorkspace;
-    if (workspace === undefined || !workspace.available || selectedWorkspaceUnavailable) {
-      setConversationError("Select an available workspace before creating a conversation.");
+    if (
+      workspace === undefined ||
+      !workspace.available ||
+      !workspace.usable ||
+      selectedWorkspaceUnavailable
+    ) {
+      setConversationError("Select a usable workspace before creating a conversation.");
       return;
     }
     setConversationError(null);
@@ -207,6 +231,13 @@ export function App() {
   }
 
   function selectConversation(summary: ConversationSummary): void {
+    const authoritativeWorkspace = client.getState().workspaces.find(
+      (workspace) => workspace.id === summary.workspaceId,
+    );
+    if (authoritativeWorkspace?.usable !== true) {
+      setConversationError("This workspace is blocked by server policy.");
+      return;
+    }
     client.selectConversation(summary.id);
     setSidebarOpen(false);
     setConversationError(null);
@@ -284,7 +315,8 @@ export function App() {
       selectedConversation.status !== "idle" ||
       branchAction !== null ||
       pendingActionRef.current !== null ||
-      selectedWorkspaceUnavailable
+      selectedWorkspaceUnavailable ||
+      selectedWorkspaceBlocked
     ) return;
 
     const conversationId = selectedConversation.id;
@@ -306,7 +338,8 @@ export function App() {
       selectedConversation.status !== "idle" ||
       branchAction !== null ||
       pendingActionRef.current !== null ||
-      selectedWorkspaceUnavailable
+      selectedWorkspaceUnavailable ||
+      selectedWorkspaceBlocked
     ) return;
 
     const title = selectedConversation.title.trim() || "Untitled conversation";
@@ -395,6 +428,7 @@ export function App() {
         selectedWorkspaceId={chat.selectedWorkspaceId}
         conversations={chat.historyWorkspaceId === chat.selectedWorkspaceId ? chat.history : []}
         liveStatuses={liveStatuses}
+        liveWorkspaceIds={liveWorkspaceIds}
         selectedConversationId={chat.selectedConversationId}
         connected={connected}
         historyPending={chat.pendingHistoryWorkspaceId === chat.selectedWorkspaceId}
@@ -402,6 +436,7 @@ export function App() {
           ? chat.historyError.message
           : null}
         actionPending={pendingAction !== null}
+        publicSandboxConfig={server.config?.sandbox}
         open={sidebarOpen}
         onDismiss={() => setSidebarOpen(false)}
         onSelectWorkspace={(workspaceId) => {
@@ -449,7 +484,9 @@ export function App() {
                   ? "Select a workspace"
                   : selectedWorkspaceUnavailable
                     ? "Workspace unavailable"
-                    : `Start in ${selectedWorkspace.name}`}
+                    : selectedWorkspaceBlocked
+                      ? "Workspace blocked by policy"
+                      : `Start in ${selectedWorkspace.name}`}
             </h1>
             <p>
               {chat.workspaces.length === 0
@@ -458,7 +495,9 @@ export function App() {
                   ? "Choose a workspace to load only its Pi conversation history."
                   : selectedWorkspaceUnavailable
                     ? `Restore the directory at ${selectedWorkspace.path} before loading or creating conversations.`
-                    : "Create a new conversation, or choose one from this workspace's history."}
+                    : selectedWorkspaceBlocked
+                      ? "Conversation history and Workspace Info remain available, but server policy prevents starting or reopening runtimes."
+                      : "Create a new conversation, or choose one from this workspace's history."}
             </p>
             <button
               className="primary-button welcome-create"
@@ -526,7 +565,7 @@ export function App() {
                     queue={selectedConversation.queue}
                     streaming={selectedConversation.status === "streaming"}
                     cwd={selectedConversation.cwd}
-                    canFork={connected && !selectedWorkspaceUnavailable && pendingAction === null && selectedConversation.status === "idle"}
+                    canFork={connected && !selectedWorkspaceUnavailable && !selectedWorkspaceBlocked && pendingAction === null && selectedConversation.status === "idle"}
                     forkingEntryId={branchAction?.kind === "fork" && branchAction.conversationId === selectedConversation.id
                       ? branchAction.entryId
                       : null}

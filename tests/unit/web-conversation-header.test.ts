@@ -15,9 +15,13 @@ const workspace: WorkspaceSummary = {
   path: "/workspace",
   sessionStorage: "pi-default",
   sessionDirectory: null,
+  securityProfile: "unrestricted",
+  effectiveSecurityProfile: "unrestricted",
   createdAt: 1,
   updatedAt: 1,
   available: true,
+  usable: true,
+  policyIssue: null,
 };
 
 const summary: ConversationSummary = {
@@ -52,6 +56,7 @@ function conversation(contextUsage: ConversationState["contextUsage"]): Conversa
     contextUsage,
     messages: [],
     queue: { steering: [], followUp: [] },
+    securityProfile: "unrestricted",
   };
 }
 
@@ -70,6 +75,26 @@ function renderHeader(contextUsage: ConversationState["contextUsage"]): string {
 }
 
 describe("conversation header context usage", () => {
+  it("shows an always-visible badge sourced from immutable conversation state", () => {
+    const unrestricted = renderHeader(null);
+    expect(unrestricted).toContain("Unrestricted");
+    expect(unrestricted).toContain('aria-label="Conversation security profile: Unrestricted"');
+
+    const sandboxed = renderToStaticMarkup(createElement(ConversationHeader, {
+      conversation: { ...conversation(null), securityProfile: "workspace-sandboxed" },
+      summary,
+      workspace: { ...workspace, securityProfile: "unrestricted" },
+      loading: false,
+      connected: true,
+      actionPending: null,
+      onRename: async () => undefined,
+      onClose: () => undefined,
+      onDelete: () => undefined,
+    }));
+    expect(sandboxed).toContain(">Sandboxed</span>");
+    expect(sandboxed).not.toContain("Conversation security profile: Unrestricted");
+  });
+
   it("shows Pi-style percentage and compact context-window metrics", () => {
     const html = renderHeader({
       tokens: 14_144,

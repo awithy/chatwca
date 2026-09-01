@@ -4,6 +4,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   ConversationSummary,
   LiveConversationStatus,
+  PublicSandboxConfig,
+  WorkspacePolicyIssue,
+  WorkspaceSecurityProfile,
   WorkspaceSummary,
 } from "../../../shared/protocol.js";
 import { ConversationList } from "./ConversationList.js";
@@ -12,6 +15,8 @@ import { WorkspaceForm, type WorkspaceFormValues } from "./WorkspaceForm.js";
 interface WorkspaceUpdateValues {
   readonly name: string;
   readonly path?: string;
+  readonly securityProfile?: WorkspaceSecurityProfile;
+  readonly acknowledgeSecurityDowngrade?: true;
 }
 
 export interface WorkspaceSidebarProps {
@@ -19,11 +24,13 @@ export interface WorkspaceSidebarProps {
   readonly selectedWorkspaceId: string | null;
   readonly conversations: readonly ConversationSummary[];
   readonly liveStatuses: Readonly<Record<string, LiveConversationStatus>>;
+  readonly liveWorkspaceIds: ReadonlySet<string>;
   readonly selectedConversationId: string | null;
   readonly connected: boolean;
   readonly historyPending: boolean;
   readonly historyError: string | null;
   readonly actionPending: boolean;
+  readonly publicSandboxConfig: PublicSandboxConfig | undefined;
   readonly open: boolean;
   readonly onDismiss: () => void;
   readonly onSelectWorkspace: (workspaceId: string) => void;
@@ -47,6 +54,23 @@ function storageLabel(workspace: WorkspaceSummary): string {
 
 function messageOf(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
+}
+
+export function workspacePolicyIssueLabel(issue: WorkspacePolicyIssue): string {
+  switch (issue) {
+    case "sandbox_disabled":
+      return "Workspace sandbox is disabled by the administrator.";
+    case "outside_workspace_roots":
+      return "Directory is outside administrator-approved workspace roots.";
+    case "protected_path_overlap":
+      return "Directory overlaps a protected server or runtime location.";
+    case null:
+      return "No policy issue";
+  }
+}
+
+export function securityDowngradeConfirmation(workspace: WorkspaceSummary): string {
+  return `Change “${workspace.name}” from Workspace sandbox to Unrestricted? The model’s tools and commands will run with the full permissions of the ChatWCA server. This reduces protection.`;
 }
 
 export function workspaceRemovalConfirmation(workspace: WorkspaceSummary): string {
@@ -80,11 +104,13 @@ export function WorkspaceSidebar({
   selectedWorkspaceId,
   conversations,
   liveStatuses,
+  liveWorkspaceIds,
   selectedConversationId,
   connected,
   historyPending,
   historyError,
   actionPending,
+  publicSandboxConfig,
   open,
   onDismiss,
   onSelectWorkspace,
@@ -180,9 +206,18 @@ export function WorkspaceSidebar({
       if (formMode.type === "create") {
         await onCreateWorkspace(values);
       } else if (formMode.type === "edit") {
+        const profileChanged = values.securityProfile !== formMode.workspace.securityProfile;
+        const downgrade = profileChanged &&
+          formMode.workspace.securityProfile === "workspace-sandboxed" &&
+          values.securityProfile === "unrestricted";
+        if (downgrade && !window.confirm(securityDowngradeConfirmation(formMode.workspace))) {
+          return;
+        }
         await onUpdateWorkspace(formMode.workspace.id, {
           name: values.name,
           ...(values.path === formMode.workspace.path ? {} : { path: values.path }),
+          ...(profileChanged ? { securityProfile: values.securityProfile } : {}),
+          ...(downgrade ? { acknowledgeSecurityDowngrade: true } : {}),
         });
       }
       setFormMode(null);
@@ -242,7 +277,7 @@ export function WorkspaceSidebar({
           <button
             className="workspace-add-button"
             type="button"
-            disabled={!connected || actionPending || submitting || removingId !== null}
+            disabled={!connected || publicSandboxConfig === undefined || actionPending || submitting || removingId !== null}
             aria-expanded={formMode?.type === "create"}
             onClick={(event) => {
               formReturnFocus.current = event.currentTarget;
@@ -254,7 +289,7 @@ export function WorkspaceSidebar({
           </button>
         </div>
 
-        {formMode !== null && formMode.type !== "info" && (
+        {formMode !== null && formMode.type !== "info" && publicSandboxConfig !== undefined && (
           <WorkspaceForm
             key={formMode.type === "create" ? "create" : formMode.workspace.id}
             mode={formMode.type}
@@ -263,8 +298,12 @@ export function WorkspaceSidebar({
                 name: formMode.workspace.name,
                 path: formMode.workspace.path,
                 sessionStorage: formMode.workspace.sessionStorage,
+                securityProfile: formMode.workspace.securityProfile,
+                effectiveSecurityProfile: formMode.workspace.effectiveSecurityProfile,
               },
             } : {})}
+            publicSandboxConfig={publicSandboxConfig}
+            securityControlsLocked={formMode.type === "edit" && liveWorkspaceIds.has(formMode.workspace.id)}
             submitting={submitting}
             error={workspaceError}
             onSubmit={submitWorkspace}
@@ -291,20 +330,63 @@ export function WorkspaceSidebar({
                 <dd><code>{formMode.workspace.path}</code></dd>
               </div>
               <div>
-                <dt>Availability</dt>
-                <dd>{formMode.workspace.available ? "Available" : "Unavailable"}</dd>
+                <dt>Usability</dt>
+                <dd>{!formMode.workspace.available
+                  ? "Unavailable directory"
+                  : formMode.workspace.usable
+                    ? "Usable"
+                    : `Policy blocked — ${workspacePolicyIssueLabel(formMode.workspace.policyIssue)}`}</dd>
+              </div>
+              <div>
+                <dt>Stored profile</dt>
+                <dd>{formMode.workspace.securityProfile === "workspace-sandboxed" ? "Workspace sandbox" : "Unrestricted"}</dd>
+              </div>
+              <div>
+                <dt>Effective profile</dt>
+                <dd>{formMode.workspace.effectiveSecurityProfile === null
+                  ? "None — policy blocked"
+                  : formMode.workspace.effectiveSecurityProfile === "workspace-sandboxed"
+                    ? "Workspace sandbox"
+                    : "Unrestricted"}</dd>
+              </div>
+              <div>
+                <dt>Server mode</dt>
+                <dd>{publicSandboxConfig === undefined
+                  ? "Configuration unavailable"
+                  : publicSandboxConfig.mode === "required"
+                    ? "Required — sandboxing is required"
+                    : publicSandboxConfig.mode === "optional"
+                      ? "Optional — sandboxing is not required"
+                      : "Disabled — sandboxing is unavailable"}</dd>
               </div>
               <div>
                 <dt>Session storage</dt>
                 <dd>{storageLabel(formMode.workspace)}</dd>
               </div>
-              {formMode.workspace.sessionDirectory !== null && (
-                <div>
-                  <dt>Session directory</dt>
-                  <dd><code>{formMode.workspace.sessionDirectory}</code></dd>
-                </div>
-              )}
+              <div>
+                <dt>Session path</dt>
+                <dd>{formMode.workspace.sessionDirectory === null
+                  ? "Pi default server-managed directory"
+                  : <code>{formMode.workspace.sessionDirectory}</code>}</dd>
+              </div>
+              <div>
+                <dt>Sandbox network</dt>
+                <dd>{formMode.workspace.effectiveSecurityProfile === "workspace-sandboxed"
+                  ? "No network access. Model-provider requests still run outside the sandbox."
+                  : formMode.workspace.effectiveSecurityProfile === "unrestricted"
+                    ? "Not isolated — Unrestricted runtimes retain the ChatWCA server’s network access."
+                    : "No runtime can start while policy blocked. Workspace sandbox would have no network access."}</dd>
+              </div>
+              <div>
+                <dt>Sandbox runtime</dt>
+                <dd><code>/usr</code> and any administrator-approved runtime mounts are read-only when Workspace sandbox is effective. Host mount paths are not disclosed.</dd>
+              </div>
             </dl>
+            <div className="workspace-disclosures" role="note" aria-label="Workspace sandbox limitations">
+              <p><strong>Writable workspace:</strong> The workspace, including <code>.git</code>, is writable. Sandboxing does not prevent harmful project edits, hooks, or build scripts.</p>
+              <p><strong>Remote model:</strong> {publicSandboxConfig?.remoteProviderWarning ?? "Workspace content may be sent to the configured model provider."}</p>
+              <p><strong>No resource quotas:</strong> The sandbox does not isolate CPU, memory, or disk denial-of-service.</p>
+            </div>
             <div className="form-actions">
               <button
                 type="button"
@@ -352,7 +434,13 @@ export function WorkspaceSidebar({
                   >
                     <span className="workspace-name">
                       <strong>{workspace.name}</strong>
-                      {!workspace.available && <span className="workspace-unavailable">Unavailable</span>}
+                      {!workspace.available ? (
+                        <span className="workspace-unavailable">Unavailable</span>
+                      ) : !workspace.usable ? (
+                        <span className="workspace-policy-blocked" title={workspacePolicyIssueLabel(workspace.policyIssue)}>Policy blocked</span>
+                      ) : (
+                        <span className="workspace-usable">Usable</span>
+                      )}
                     </span>
                     <code title={workspace.path}>{workspace.path}</code>
                   </button>
@@ -396,7 +484,7 @@ export function WorkspaceSidebar({
                       </button>
                       <button
                         type="button"
-                        disabled={!connected || busy}
+                        disabled={!connected || publicSandboxConfig === undefined || busy}
                         aria-label={`Edit workspace ${workspace.name}`}
                         onClick={() => {
                           formReturnFocus.current = openMenuTrigger.current;

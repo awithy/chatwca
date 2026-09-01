@@ -89,7 +89,9 @@ function model() {
 function emptyState(
   id: string,
   title: string,
-  workspace: Pick<WorkspaceSummary, "id" | "path"> = WORKSPACE,
+  workspace: Pick<WorkspaceSummary, "id" | "path"> & {
+    readonly securityProfile?: ConversationState["securityProfile"];
+  } = WORKSPACE,
 ): ConversationState {
   const now = nextTime();
   return {
@@ -107,7 +109,7 @@ function emptyState(
     contextUsage: { tokens: 14_144, contextWindow: 272_000, percent: 5.2 },
     messages: [],
     queue: { steering: [], followUp: [] },
-    securityProfile: "unrestricted",
+    securityProfile: workspace.securityProfile ?? "unrestricted",
   };
 }
 
@@ -405,6 +407,7 @@ const registry: ProtocolRegistry = {
     addFixture(emptyState(id, "Untitled conversation", {
       id: workspace.workspaceId,
       path: workspace.cwd,
+      securityProfile: workspace.securityProfile,
     }));
     return { id };
   },
@@ -419,6 +422,7 @@ const registry: ProtocolRegistry = {
     fixture.state = {
       ...fixture.state,
       workspaceId: workspace.workspaceId,
+      securityProfile: workspace.securityProfile,
       status: "idle",
       lastActiveAt: nextTime(),
     };
@@ -467,6 +471,7 @@ const registry: ProtocolRegistry = {
     const fork = emptyState(id, `Fork of ${source.state.title}`, {
       id: source.state.workspaceId,
       path: source.state.cwd,
+      securityProfile: source.state.securityProfile,
     });
     const forkState: ConversationState = {
       ...fork,
@@ -584,8 +589,11 @@ const workspaces: ProtocolWorkspaceRepository = {
       createdAt: nextTime(),
       updatedAt: nextTime(),
       available: !input.path.includes("fixture-unavailable"),
-      usable: !input.path.includes("fixture-unavailable"),
-      policyIssue: null,
+      usable: !input.path.includes("fixture-unavailable") &&
+        !input.path.includes("fixture-policy-blocked"),
+      policyIssue: input.path.includes("fixture-policy-blocked")
+        ? "outside_workspace_roots"
+        : null,
     };
     workspaceRows = [...workspaceRows, workspace];
     return workspace;
@@ -605,9 +613,24 @@ const workspaces: ProtocolWorkspaceRepository = {
                 ? `${changes.path.trim()}/.chatwca/sessions`
                 : null,
           }),
+      ...(changes.securityProfile === undefined
+        ? {}
+        : {
+            securityProfile: changes.securityProfile,
+            effectiveSecurityProfile: changes.securityProfile,
+          }),
       available: changes.path === undefined
         ? current.available
         : !changes.path.includes("fixture-unavailable"),
+      usable: changes.path === undefined
+        ? current.usable
+        : !changes.path.includes("fixture-unavailable") &&
+          !changes.path.includes("fixture-policy-blocked"),
+      policyIssue: changes.path === undefined
+        ? current.policyIssue
+        : changes.path.includes("fixture-policy-blocked")
+          ? "outside_workspace_roots"
+          : null,
       updatedAt: nextTime(),
     };
     workspaceRows = workspaceRows.map((item) => item.id === workspaceId ? updated : item);
@@ -639,6 +662,7 @@ const config = loadConfig(
     CHATWCA_MAX_IMAGES: String(IMAGE_LIMITS.maxImages),
     CHATWCA_MAX_IMAGE_BYTES: String(IMAGE_LIMITS.maxImageBytes),
     CHATWCA_MAX_TOTAL_IMAGE_BYTES: String(IMAGE_LIMITS.maxTotalImageBytes),
+    CHATWCA_SANDBOX_MODE: "optional",
   },
   CWD,
 );
@@ -648,6 +672,7 @@ server = createChatWcaServer(config, "browser-fixture", {
   history,
   images,
   workspaces,
+  sandboxFunctionalProbeSucceeded: true,
   onInternalError(error) {
     if (error !== null && error !== undefined) {
       console.error("Browser fixture protocol error", error);

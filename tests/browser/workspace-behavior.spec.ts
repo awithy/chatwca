@@ -225,11 +225,10 @@ test("busy workspace mutation is rejected and removal retains closed sessions", 
 
   await page.getByRole("button", { name: `Workspace actions for ${workspaceName}` }).click();
   await page.getByRole("button", { name: `Edit workspace ${workspaceName}` }).click();
-  await page.getByLabel("Directory path").fill(`${workspacePath}-changed`);
-  await page.getByRole("button", { name: "Save changes" }).click();
-  await expect(page.getByRole("alert")).toContainText(
-    "Close the workspace's live conversations before changing its path, security profile, or removing it.",
-  );
+  await expect(page.getByLabel("Name")).toBeEnabled();
+  await expect(page.getByLabel("Directory path")).toBeDisabled();
+  await expect(page.getByLabel("Security profile", { exact: true })).toBeDisabled();
+  await expect(page.getByText("Close this workspace’s live conversations")).toBeVisible();
   await page.getByRole("button", { name: "Cancel" }).click();
 
   page.once("dialog", (dialog) => dialog.accept());

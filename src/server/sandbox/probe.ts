@@ -22,6 +22,7 @@ import {
   SANDBOX_PROTOCOL_VERSION,
   SANDBOX_STDIO_COUNT,
   SANDBOX_WORKER_VERSION,
+  type BwrapLaunchSpecification,
   type SandboxWorkerArtifact,
   type ValidatedSandboxHost,
 } from "./bwrap.js";
@@ -244,6 +245,33 @@ async function namespaceLinks(): Promise<Record<(typeof NAMESPACES)[number], str
   ]))) as Record<(typeof NAMESPACES)[number], string>;
 }
 
+/** Build the trusted expectations used by every nonce-bound worker handshake. */
+export async function buildSandboxProbeContext(input: {
+  readonly config: Readonly<SandboxConfig>;
+  readonly worker: Readonly<SandboxWorkerArtifact>;
+  readonly workspace: string;
+  readonly hiddenPaths: readonly string[];
+  readonly nonce: string;
+  readonly specification: Readonly<BwrapLaunchSpecification>;
+}): Promise<Readonly<SandboxProbeContext>> {
+  const workspaceMetadata = await stat(input.workspace, { bigint: true });
+  const mounts = Object.fromEntries(await Promise.all(input.config.readOnlyMounts.map(async (mount) => {
+    const metadata = await stat(mount.source, { bigint: true });
+    return [mount.destination, { dev: String(metadata.dev), ino: String(metadata.ino) }];
+  })));
+  return Object.freeze({
+    nonce: input.nonce,
+    artifact: input.worker,
+    parentNamespaces: await namespaceLinks(),
+    expectedRootEntries: input.specification.expectedRootEntries,
+    expectedEnvironment: { ...SANDBOX_EXPECTED_ENVIRONMENT_WITH_PWD, PATH: input.config.guestPath },
+    workspaceDevice: String(workspaceMetadata.dev),
+    workspaceInode: String(workspaceMetadata.ino),
+    hiddenPathCount: input.hiddenPaths.length,
+    mounts,
+  });
+}
+
 /** Launch the real profile and perform a nonce-bound worker handshake. */
 export async function runSandboxWorkerProbe(input: {
   readonly config: Readonly<SandboxConfig>;
@@ -254,25 +282,9 @@ export async function runSandboxWorkerProbe(input: {
 }): Promise<void> {
   const specification = buildBwrapLaunchSpecification(input);
   const nonce = randomBytes(24).toString("hex");
-  const workspaceMetadata = await stat(input.workspace, { bigint: true });
-  const mounts = Object.fromEntries(await Promise.all(input.config.readOnlyMounts.map(async (mount) => {
-    const metadata = await stat(mount.source, { bigint: true });
-    return [mount.destination, { dev: String(metadata.dev), ino: String(metadata.ino) }];
-  })));
-  const context: SandboxProbeContext = {
-    nonce,
-    artifact: input.worker,
-    parentNamespaces: await namespaceLinks(),
-    expectedRootEntries: specification.expectedRootEntries,
-    expectedEnvironment: {
-      ...SANDBOX_EXPECTED_ENVIRONMENT_WITH_PWD,
-      PATH: input.config.guestPath,
-    },
-    workspaceDevice: String(workspaceMetadata.dev),
-    workspaceInode: String(workspaceMetadata.ino),
-    hiddenPathCount: input.hiddenPaths.length,
-    mounts,
-  };
+  const context = await buildSandboxProbeContext({
+    ...input, nonce, specification,
+  });
   const stdio = Array.from({ length: SANDBOX_STDIO_COUNT }, (_, fd) =>
     fd === 0 || fd === 1 ? "ignore" : "pipe"
   ) as ("ignore" | "pipe")[];

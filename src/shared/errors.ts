@@ -14,6 +14,13 @@ export const ERROR_CODES = {
   DUPLICATE_WORKSPACE_PATH: "duplicate_workspace_path",
   WORKSPACE_UNAVAILABLE: "workspace_unavailable",
   WORKSPACE_BUSY: "workspace_busy",
+  SANDBOX_DISABLED: "sandbox_disabled",
+  SANDBOX_CONFIGURATION_ERROR: "sandbox_configuration_error",
+  SANDBOX_UNAVAILABLE: "sandbox_unavailable",
+  SANDBOX_WORKSPACE_REJECTED: "sandbox_workspace_rejected",
+  SANDBOX_WORKER_START_FAILED: "sandbox_worker_start_failed",
+  SANDBOX_WORKER_FAILED: "sandbox_worker_failed",
+  SANDBOX_OPERATION_FAILED: "sandbox_operation_failed",
   DATABASE_ERROR: "database_error",
   MODEL_UNAVAILABLE: "model_unavailable",
   MODEL_FAILED: "model_failed",
@@ -56,7 +63,14 @@ const DEFAULT_MESSAGES: Readonly<Record<ErrorCode, string>> = {
   invalid_workspace_path: "The workspace path must be an existing accessible directory.",
   duplicate_workspace_path: "That workspace path is already registered.",
   workspace_unavailable: "The workspace directory is unavailable.",
-  workspace_busy: "Close the workspace's live conversations before changing its path or removing it.",
+  workspace_busy: "Close the workspace's live conversations before changing its path, security profile, or removing it.",
+  sandbox_disabled: "Workspace sandboxing is disabled by the server.",
+  sandbox_configuration_error: "The server sandbox configuration is invalid.",
+  sandbox_unavailable: "Workspace sandboxing is unavailable.",
+  sandbox_workspace_rejected: "The workspace does not satisfy the sandbox policy.",
+  sandbox_worker_start_failed: "The workspace sandbox could not be started.",
+  sandbox_worker_failed: "The workspace sandbox failed.",
+  sandbox_operation_failed: "The sandboxed operation failed.",
   database_error: "The workspace database operation failed.",
   model_unavailable: "No model is configured or available.",
   model_failed: "The model failed while processing the prompt.",
@@ -122,6 +136,16 @@ export type ErrorContext =
         | "busy";
     }
   | { readonly source: "database" }
+  | {
+      readonly source: "sandbox";
+      readonly phase:
+        | "configuration"
+        | "startup"
+        | "workspace-admission"
+        | "worker-startup"
+        | "fatal-worker"
+        | "operation";
+    }
   | {
       readonly source: "registry";
       readonly issue:
@@ -207,6 +231,21 @@ function contextCode(error: unknown, context: ErrorContext): ErrorCode {
       }
     case "database":
       return ERROR_CODES.DATABASE_ERROR;
+    case "sandbox":
+      switch (context.phase) {
+        case "configuration":
+          return ERROR_CODES.SANDBOX_CONFIGURATION_ERROR;
+        case "startup":
+          return ERROR_CODES.SANDBOX_UNAVAILABLE;
+        case "workspace-admission":
+          return ERROR_CODES.SANDBOX_WORKSPACE_REJECTED;
+        case "worker-startup":
+          return ERROR_CODES.SANDBOX_WORKER_START_FAILED;
+        case "fatal-worker":
+          return ERROR_CODES.SANDBOX_WORKER_FAILED;
+        case "operation":
+          return ERROR_CODES.SANDBOX_OPERATION_FAILED;
+      }
     case "registry":
       switch (context.issue) {
         case "missing":

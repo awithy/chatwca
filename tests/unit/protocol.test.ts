@@ -20,6 +20,7 @@ const commands = [
     name: "Example",
     path: "/workspace",
     sessionStorage: "pi-default",
+    securityProfile: "unrestricted",
   },
   {
     type: "workspace.update",
@@ -150,6 +151,7 @@ const conversationState = {
     },
   ],
   queue: { steering: [], followUp: [] },
+  securityProfile: "unrestricted",
 } as const;
 
 describe("ClientCommandSchema", () => {
@@ -185,7 +187,7 @@ describe("ClientCommandSchema", () => {
     })).toBe(false);
   });
 
-  it("requires storage policy at creation and keeps it out of updates", () => {
+  it("requires storage and security policy at creation and closes update variants", () => {
     expect(
       Value.Check(ClientCommandSchema, {
         type: "workspace.create",
@@ -196,13 +198,38 @@ describe("ClientCommandSchema", () => {
     ).toBe(false);
     expect(
       Value.Check(ClientCommandSchema, {
-        type: "workspace.update",
+        type: "workspace.create",
         requestId,
-        workspaceId: "workspace-1",
-        name: "Renamed",
+        name: "Missing security profile",
+        path: "/workspace",
         sessionStorage: "workspace",
       }),
     ).toBe(false);
+    expect(Value.Check(ClientCommandSchema, {
+      type: "workspace.update",
+      requestId,
+      workspaceId: "workspace-1",
+      securityProfile: "workspace-sandboxed",
+    })).toBe(true);
+    expect(Value.Check(ClientCommandSchema, {
+      type: "workspace.update",
+      requestId,
+      workspaceId: "workspace-1",
+      securityProfile: "unrestricted",
+      acknowledgeSecurityDowngrade: true,
+    })).toBe(true);
+    for (const smuggled of [
+      { name: "Renamed", acknowledgeSecurityDowngrade: true },
+      { securityProfile: "workspace-sandboxed", acknowledgeSecurityDowngrade: true },
+      { name: "Renamed", sessionStorage: "workspace" },
+    ]) {
+      expect(Value.Check(ClientCommandSchema, {
+        type: "workspace.update",
+        requestId,
+        workspaceId: "workspace-1",
+        ...smuggled,
+      })).toBe(false);
+    }
   });
 
   it("requires at least one workspace update field", () => {
@@ -278,6 +305,7 @@ describe("workspace schemas", () => {
     path: "/workspace",
     sessionStorage: "pi-default",
     sessionDirectory: null,
+    securityProfile: "unrestricted",
     createdAt: 10,
     updatedAt: 20,
   } as const;
@@ -285,12 +313,21 @@ describe("workspace schemas", () => {
   it("defines closed workspace records and availability summaries", () => {
     expect(Value.Check(WorkspaceSchema, workspace)).toBe(true);
     expect(
-      Value.Check(WorkspaceSummarySchema, { ...workspace, available: true }),
+      Value.Check(WorkspaceSummarySchema, {
+        ...workspace,
+        available: true,
+        effectiveSecurityProfile: "unrestricted",
+        usable: true,
+        policyIssue: null,
+      }),
     ).toBe(true);
     expect(
       Value.Check(WorkspaceSummarySchema, {
         ...workspace,
         available: true,
+        effectiveSecurityProfile: "unrestricted",
+        usable: true,
+        policyIssue: null,
         privateMetadata: "no",
       }),
     ).toBe(false);
@@ -300,7 +337,13 @@ describe("workspace schemas", () => {
     const listResponse = {
       type: "workspaces",
       requestId,
-      workspaces: [{ ...workspace, available: true }],
+      workspaces: [{
+        ...workspace,
+        available: true,
+        effectiveSecurityProfile: "unrestricted",
+        usable: true,
+        policyIssue: null,
+      }],
     } satisfies CommandSuccessByType["workspace.list"];
     const createResponse = listResponse satisfies CommandSuccessByType["workspace.create"];
     const updateResponse = listResponse satisfies CommandSuccessByType["workspace.update"];
@@ -373,9 +416,13 @@ describe("ServerMessageSchema", () => {
             path: "/workspace",
             sessionStorage: "workspace",
             sessionDirectory: "/workspace/.chatwca/sessions",
+            securityProfile: "workspace-sandboxed",
+            effectiveSecurityProfile: "workspace-sandboxed",
             createdAt: 1,
             updatedAt: 2,
             available: true,
+            usable: true,
+            policyIssue: null,
           },
         ],
       },

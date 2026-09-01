@@ -196,12 +196,52 @@ export type WorkspaceSessionStorage = Static<
   typeof WorkspaceSessionStorageSchema
 >;
 
+export const WorkspaceSecurityProfileSchema = Type.Union([
+  Type.Literal("unrestricted"),
+  Type.Literal("workspace-sandboxed"),
+]);
+export type WorkspaceSecurityProfile = Static<
+  typeof WorkspaceSecurityProfileSchema
+>;
+
+export const SandboxModeSchema = Type.Union([
+  Type.Literal("disabled"),
+  Type.Literal("optional"),
+  Type.Literal("required"),
+]);
+export type SandboxMode = Static<typeof SandboxModeSchema>;
+
+export const WorkspacePolicyIssueSchema = Type.Union([
+  Type.Literal("sandbox_disabled"),
+  Type.Literal("outside_workspace_roots"),
+  Type.Literal("protected_path_overlap"),
+  Type.Null(),
+]);
+export type WorkspacePolicyIssue = Static<typeof WorkspacePolicyIssueSchema>;
+
+export const PublicSandboxConfigSchema = strictObject({
+  mode: SandboxModeSchema,
+  selectableProfiles: Type.Array(WorkspaceSecurityProfileSchema),
+  remoteProviderWarning: NonEmptyStringSchema,
+  functionalProbeSucceeded: Type.Boolean(),
+});
+export type PublicSandboxConfig = Static<typeof PublicSandboxConfigSchema>;
+
+export const PublicConfigSchema = strictObject({
+  maxImages: Type.Integer({ minimum: 1 }),
+  maxImageBytes: Type.Integer({ minimum: 1 }),
+  maxTotalImageBytes: Type.Integer({ minimum: 1 }),
+  sandbox: PublicSandboxConfigSchema,
+});
+export type PublicConfig = Static<typeof PublicConfigSchema>;
+
 export const WorkspaceSchema = strictObject({
   id: IdentifierSchema,
   name: NonEmptyStringSchema,
   path: NonEmptyStringSchema,
   sessionStorage: WorkspaceSessionStorageSchema,
   sessionDirectory: Type.Union([NonEmptyStringSchema, Type.Null()]),
+  securityProfile: WorkspaceSecurityProfileSchema,
   createdAt: Type.Number({ minimum: 0 }),
   updatedAt: Type.Number({ minimum: 0 }),
 });
@@ -213,9 +253,16 @@ export const WorkspaceSummarySchema = strictObject({
   path: NonEmptyStringSchema,
   sessionStorage: WorkspaceSessionStorageSchema,
   sessionDirectory: Type.Union([NonEmptyStringSchema, Type.Null()]),
+  securityProfile: WorkspaceSecurityProfileSchema,
+  effectiveSecurityProfile: Type.Union([
+    WorkspaceSecurityProfileSchema,
+    Type.Null(),
+  ]),
   createdAt: Type.Number({ minimum: 0 }),
   updatedAt: Type.Number({ minimum: 0 }),
   available: Type.Boolean(),
+  usable: Type.Boolean(),
+  policyIssue: WorkspacePolicyIssueSchema,
 });
 export type WorkspaceSummary = Static<typeof WorkspaceSummarySchema>;
 
@@ -273,6 +320,7 @@ export const ConversationStateSchema = strictObject({
   contextUsage: Type.Union([ContextUsageSchema, Type.Null()]),
   messages: Type.Array(NormalizedMessageSchema),
   queue: QueueStateSchema,
+  securityProfile: WorkspaceSecurityProfileSchema,
 });
 export type ConversationState = Static<typeof ConversationStateSchema>;
 
@@ -286,6 +334,7 @@ export const WorkspaceCreateCommandSchema = strictObject({
   name: NonEmptyStringSchema,
   path: NonEmptyStringSchema,
   sessionStorage: WorkspaceSessionStorageSchema,
+  securityProfile: WorkspaceSecurityProfileSchema,
 });
 const WorkspaceUpdateWithNameSchema = strictObject({
   type: Type.Literal("workspace.update"),
@@ -301,9 +350,26 @@ const WorkspaceUpdateWithPathSchema = strictObject({
   name: Type.Optional(NonEmptyStringSchema),
   path: NonEmptyStringSchema,
 });
+const workspaceProfileUpdate = <TProfile extends WorkspaceSecurityProfile>(
+  securityProfile: TProfile,
+  acknowledgeSecurityDowngrade: boolean,
+) => strictObject({
+  type: Type.Literal("workspace.update"),
+  requestId: RequestIdSchema,
+  workspaceId: IdentifierSchema,
+  name: Type.Optional(NonEmptyStringSchema),
+  path: Type.Optional(NonEmptyStringSchema),
+  securityProfile: Type.Literal(securityProfile),
+  ...(acknowledgeSecurityDowngrade
+    ? { acknowledgeSecurityDowngrade: Type.Literal(true) }
+    : {}),
+});
 export const WorkspaceUpdateCommandSchema = Type.Union([
   WorkspaceUpdateWithNameSchema,
   WorkspaceUpdateWithPathSchema,
+  workspaceProfileUpdate("workspace-sandboxed", false),
+  workspaceProfileUpdate("unrestricted", false),
+  workspaceProfileUpdate("unrestricted", true),
 ]);
 export const WorkspaceDeleteCommandSchema = strictObject({
   type: Type.Literal("workspace.delete"),

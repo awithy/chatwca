@@ -286,6 +286,12 @@ describe("conversation fork integration", () => {
       workspaces: {
         list: () => [],
         requireAvailable: (workspaceId) => ({ id: workspaceId, path: cwd }),
+        requireUsable: (workspaceId) => ({
+          workspaceId,
+          cwd,
+          sessionDirectory: null,
+          securityProfile: "unrestricted",
+        }),
         create: () => { throw new Error("Unexpected workspace create"); },
         update: () => { throw new Error("Unexpected workspace update"); },
         delete: () => { throw new Error("Unexpected workspace delete"); },

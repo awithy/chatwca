@@ -76,9 +76,13 @@ describe("WorkspaceRepository CRUD", () => {
       path: realpathSync(firstPath),
       sessionStorage: "pi-default",
       sessionDirectory: null,
+      securityProfile: "unrestricted",
+      effectiveSecurityProfile: "unrestricted",
       createdAt: 10,
       updatedAt: 10,
       available: true,
+      usable: true,
+      policyIssue: null,
     });
     expect(repository.get(created.id)).toEqual(created);
 
@@ -130,9 +134,13 @@ describe("WorkspaceRepository CRUD", () => {
         path: realpathSync(workspacePath),
         sessionStorage: "pi-default",
         sessionDirectory: null,
+        securityProfile: "unrestricted",
+        effectiveSecurityProfile: "unrestricted",
         createdAt: 123,
         updatedAt: 123,
         available: true,
+        usable: true,
+        policyIssue: null,
       },
     ]);
   });

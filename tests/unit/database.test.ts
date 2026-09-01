@@ -28,7 +28,7 @@ afterEach(() => {
 });
 
 describe("openDatabase", () => {
-  it("creates nested storage and initializes the version-two schema", () => {
+  it("creates nested storage and initializes the version-three schema", () => {
     const dataDir = path.join(temporaryDirectory(), "nested", "data");
     const database = openDatabase(dataDir);
 
@@ -54,6 +54,7 @@ describe("openDatabase", () => {
       expect.objectContaining({ name: "name", notnull: 1, pk: 0 }),
       expect.objectContaining({ name: "path", notnull: 1, pk: 0 }),
       expect.objectContaining({ name: "session_storage", notnull: 1, pk: 0 }),
+      expect.objectContaining({ name: "security_profile", notnull: 1, pk: 0 }),
       expect.objectContaining({ name: "created_at", notnull: 1, pk: 0 }),
       expect.objectContaining({ name: "updated_at", notnull: 1, pk: 0 }),
     ]);
@@ -61,7 +62,7 @@ describe("openDatabase", () => {
     database.close();
   });
 
-  it("accepts and preserves an existing version-two database", () => {
+  it("accepts and preserves an existing version-three database", () => {
     const dataDir = temporaryDirectory();
     const first = openDatabase(dataDir);
     first.connection
@@ -79,6 +80,7 @@ describe("openDatabase", () => {
       name: "Example",
       path: "/work/example",
       session_storage: "pi-default",
+      security_profile: "unrestricted",
       created_at: 10,
       updated_at: 20,
     });
@@ -113,11 +115,76 @@ describe("openDatabase", () => {
       created_at: 1,
       updated_at: 2,
       session_storage: "pi-default",
+      security_profile: "unrestricted",
     });
     expect(
       migrated.connection.pragma("user_version", { simple: true }),
     ).toBe(DATABASE_SCHEMA_VERSION);
     migrated.close();
+  });
+
+  it("migrates version-two rows to unrestricted security", () => {
+    const dataDir = temporaryDirectory();
+    const filename = path.join(dataDir, DATABASE_FILENAME);
+    const legacy = new Database(filename);
+    legacy.exec(`
+      CREATE TABLE workspaces (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        path TEXT NOT NULL UNIQUE,
+        session_storage TEXT NOT NULL DEFAULT 'pi-default'
+          CHECK (session_storage IN ('pi-default', 'workspace')),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      INSERT INTO workspaces VALUES
+        ('version-2', 'Version 2', '/work/version-2', 'workspace', 3, 4);
+      PRAGMA user_version = 2;
+    `);
+    legacy.close();
+
+    const migrated = openDatabase(dataDir);
+    expect(migrated.connection.prepare(
+      "SELECT security_profile FROM workspaces WHERE id = 'version-2'",
+    ).get()).toEqual({ security_profile: "unrestricted" });
+    expect(migrated.connection.pragma("user_version", { simple: true })).toBe(3);
+    migrated.close();
+  });
+
+  it("enforces valid stored security profiles", () => {
+    const database = openDatabase(temporaryDirectory(), ":memory:");
+    expect(() => database.connection.prepare(`
+      INSERT INTO workspaces
+        (id, name, path, security_profile, created_at, updated_at)
+      VALUES ('bad', 'Bad', '/bad', 'invalid', 1, 1)
+    `).run()).toThrow(/CHECK constraint failed/);
+    database.close();
+  });
+
+  it("rolls back a failed 2-to-3 migration without advancing user_version", () => {
+    const dataDir = temporaryDirectory();
+    const filename = path.join(dataDir, DATABASE_FILENAME);
+    const broken = new Database(filename);
+    broken.exec(`
+      CREATE TABLE workspaces (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        path TEXT NOT NULL UNIQUE,
+        session_storage TEXT NOT NULL DEFAULT 'pi-default',
+        security_profile TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      PRAGMA user_version = 2;
+    `);
+    broken.close();
+
+    expect(() => openDatabase(dataDir)).toThrow(/duplicate column name/);
+    const inspected = new Database(filename);
+    expect(inspected.pragma("user_version", { simple: true })).toBe(2);
+    expect((inspected.prepare("PRAGMA table_info(workspaces)").all() as Array<{ name: string }>)
+      .filter(({ name }) => name === "security_profile")).toHaveLength(1);
+    inspected.close();
   });
 
   it("supports an in-memory database for focused consumers", () => {
@@ -136,14 +203,14 @@ describe("openDatabase", () => {
     const dataDir = temporaryDirectory();
     const filename = path.join(dataDir, DATABASE_FILENAME);
     const unsupported = new Database(filename);
-    unsupported.pragma("user_version = 3");
+    unsupported.pragma("user_version = 4");
     unsupported.close();
 
     expect(() => openDatabase(dataDir)).toThrow(
       UnsupportedDatabaseVersionError,
     );
     expect(() => openDatabase(dataDir)).toThrow(
-      /schema version 3; expected 2/,
+      /schema version 4; expected 3/,
     );
 
     const afterFailure = new Database(filename);

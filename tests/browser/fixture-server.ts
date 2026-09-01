@@ -42,9 +42,13 @@ const WORKSPACE: WorkspaceSummary = {
   path: CWD,
   sessionStorage: "pi-default",
   sessionDirectory: null,
+  securityProfile: "unrestricted",
+  effectiveSecurityProfile: "unrestricted",
   createdAt: 1,
   updatedAt: 1,
   available: true,
+  usable: true,
+  policyIssue: null,
 };
 let workspaceSequence = 0;
 let workspaceRows: WorkspaceSummary[] = [WORKSPACE];
@@ -103,6 +107,7 @@ function emptyState(
     contextUsage: { tokens: 14_144, contextWindow: 272_000, percent: 5.2 },
     messages: [],
     queue: { steering: [], followUp: [] },
+    securityProfile: "unrestricted",
   };
 }
 
@@ -548,6 +553,18 @@ const workspaces: ProtocolWorkspaceRepository = {
     if (workspace === undefined || !workspace.available) throw new Error("Unknown fixture workspace");
     return workspace;
   },
+  requireUsable: (workspaceId) => {
+    const workspace = workspaceRows.find((item) => item.id === workspaceId);
+    if (workspace === undefined || !workspace.usable || workspace.effectiveSecurityProfile === null) {
+      throw new Error("Unusable fixture workspace");
+    }
+    return {
+      workspaceId: workspace.id,
+      cwd: workspace.path,
+      sessionDirectory: workspace.sessionDirectory,
+      securityProfile: workspace.effectiveSecurityProfile,
+    };
+  },
   create: (input) => {
     workspaceSequence += 1;
     const workspace: WorkspaceSummary = {
@@ -559,9 +576,13 @@ const workspaces: ProtocolWorkspaceRepository = {
         input.sessionStorage === "workspace"
           ? `${input.path.trim()}/.chatwca/sessions`
           : null,
+      securityProfile: input.securityProfile,
+      effectiveSecurityProfile: input.securityProfile,
       createdAt: nextTime(),
       updatedAt: nextTime(),
       available: !input.path.includes("fixture-unavailable"),
+      usable: !input.path.includes("fixture-unavailable"),
+      policyIssue: null,
     };
     workspaceRows = [...workspaceRows, workspace];
     return workspace;

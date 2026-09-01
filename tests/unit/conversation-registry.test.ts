@@ -704,9 +704,13 @@ describe("ConversationRegistry", () => {
     const eventTypes: string[] = [];
     registry.subscribe((event) => eventTypes.push(event.type));
 
-    await registry.create(ownership(cwd));
+    await registry.create({
+      ...ownership(cwd),
+      securityProfile: "workspace-sandboxed",
+    });
     await expect(registry.getState("state")).resolves.toMatchObject({
       id: "state",
+      securityProfile: "workspace-sandboxed",
       title: "Snapshot prompt",
       durable: false,
       revision: 0,

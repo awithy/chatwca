@@ -123,6 +123,7 @@ describe("workspace startup, persistence, and availability integration", () => {
       name: "Local workspace",
       path: workspacePath,
       sessionStorage: "workspace",
+      securityProfile: "unrestricted",
     });
     expect(created).toMatchObject({
       type: "workspaces",
@@ -200,6 +201,7 @@ describe("workspace startup, persistence, and availability integration", () => {
       name: "Persistent workspace",
       path: workspacePath,
       sessionStorage: "pi-default",
+      securityProfile: "unrestricted",
     });
     expect(created).toMatchObject({
       type: "workspaces",

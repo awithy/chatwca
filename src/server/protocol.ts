@@ -22,7 +22,10 @@ import {
   WEBSOCKET_RESTART_CLOSE_REASON,
 } from "./shutdown.js";
 import type { SessionHistoryWorkspace } from "./session-history.js";
-import type { UpdateWorkspaceInput } from "./workspace-repository.js";
+import type {
+  RuntimeWorkspacePolicy,
+  UpdateWorkspaceInput,
+} from "./workspace-repository.js";
 
 export const DEFAULT_MAX_INBOUND_MESSAGE_BYTES = 40 * 1024 * 1024;
 
@@ -66,10 +69,12 @@ export interface ProtocolHistory {
 export interface ProtocolWorkspaceRepository {
   list(): WorkspaceSummary[];
   requireAvailable(workspaceId: string): SessionHistoryWorkspace;
+  requireUsable(workspaceId: string): RuntimeWorkspacePolicy;
   create(input: {
     readonly name: string;
     readonly path: string;
     readonly sessionStorage: WorkspaceSummary["sessionStorage"];
+    readonly securityProfile: WorkspaceSummary["securityProfile"];
   }): WorkspaceSummary;
   update(workspaceId: string, changes: UpdateWorkspaceInput): WorkspaceSummary;
   delete(workspaceId: string): void;
@@ -144,6 +149,17 @@ export function decodeClientCommand(
   return value;
 }
 
+function runtimeWorkspace(
+  policy: RuntimeWorkspacePolicy,
+): SessionHistoryWorkspace & { readonly securityProfile: WorkspaceSummary["securityProfile"] } {
+  return {
+    id: policy.workspaceId,
+    path: policy.cwd,
+    sessionDirectory: policy.sessionDirectory,
+    securityProfile: policy.securityProfile,
+  };
+}
+
 export async function dispatchClientCommand(
   command: ClientCommand,
   registry: ProtocolRegistry,
@@ -165,6 +181,7 @@ export async function dispatchClientCommand(
         name: command.name,
         path: command.path,
         sessionStorage: command.sessionStorage,
+        securityProfile: command.securityProfile,
       });
       const authoritative = workspaces.list();
       return {
@@ -173,12 +190,24 @@ export async function dispatchClientCommand(
       };
     }
     case "workspace.update": {
-      if (command.path !== undefined && registry.hasLiveWorkspace(command.workspaceId)) {
+      const securityProfile = "securityProfile" in command
+        ? command.securityProfile
+        : undefined;
+      if (
+        (command.path !== undefined || securityProfile !== undefined) &&
+        registry.hasLiveWorkspace(command.workspaceId)
+      ) {
         throw new AppError(ERROR_CODES.WORKSPACE_BUSY);
       }
       workspaces.update(command.workspaceId, {
         ...(command.name === undefined ? {} : { name: command.name }),
         ...(command.path === undefined ? {} : { path: command.path }),
+        ...(securityProfile === undefined
+          ? {}
+          : { securityProfile }),
+        ...("acknowledgeSecurityDowngrade" in command
+          ? { acknowledgeSecurityDowngrade: command.acknowledgeSecurityDowngrade }
+          : {}),
       });
       const authoritative = workspaces.list();
       return {
@@ -209,7 +238,7 @@ export async function dispatchClientCommand(
       };
     }
     case "conversation.create": {
-      const workspace = workspaces.requireAvailable(command.workspaceId);
+      const workspace = runtimeWorkspace(workspaces.requireUsable(command.workspaceId));
       const record = await registry.create(workspace);
       return {
         response: {
@@ -221,8 +250,9 @@ export async function dispatchClientCommand(
       };
     }
     case "conversation.open": {
-      const workspace = workspaces.requireAvailable(command.workspaceId);
-      const listed = await history.resolve(workspace, command.conversationId);
+      const availableWorkspace = workspaces.requireAvailable(command.workspaceId);
+      const listed = await history.resolve(availableWorkspace, command.conversationId);
+      const workspace = runtimeWorkspace(workspaces.requireUsable(command.workspaceId));
       const record = await registry.open(workspace, listed.summary.sessionFile);
       return {
         response: {
@@ -288,6 +318,8 @@ export async function dispatchClientCommand(
       await registry.abort(command.conversationId);
       return { response: { type: "ack", requestId: command.requestId, command: command.type } };
     case "conversation.fork": {
+      const source = await registry.getState(command.conversationId);
+      workspaces.requireUsable(source.workspaceId);
       const fork = await registry.fork(command.conversationId, command.entryId);
       return {
         response: {
@@ -306,6 +338,7 @@ export async function dispatchClientCommand(
       const source = await registry.getState(command.conversationId);
       const workspace = workspaces.requireAvailable(source.workspaceId);
       await history.resolve(workspace, source.id);
+      workspaces.requireUsable(source.workspaceId);
       const fork = await registry.fork(command.conversationId, command.entryId);
       await registry.close(source.id);
       const conversations = await history.delete(workspace, source.id);

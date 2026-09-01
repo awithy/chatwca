@@ -56,9 +56,13 @@ const workspace = {
   path: "/workspace",
   sessionStorage: "pi-default",
   sessionDirectory: null,
+  securityProfile: "unrestricted",
+  effectiveSecurityProfile: "unrestricted",
   createdAt: 1,
   updatedAt: 1,
   available: true,
+  usable: true,
+  policyIssue: null,
 } as const;
 
 function conversation(revision = 0): ConversationState {
@@ -77,6 +81,7 @@ function conversation(revision = 0): ConversationState {
     contextUsage: null,
     messages: [],
     queue: { steering: [], followUp: [] },
+    securityProfile: "unrestricted",
   };
 }
 

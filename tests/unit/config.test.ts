@@ -15,6 +15,7 @@ import {
   MAX_SHUTDOWN_GRACE_MS,
   loadConfig,
 } from "../../src/server/config.js";
+import { loadSandboxConfig } from "../../src/server/sandbox/config.js";
 
 describe("loadConfig", () => {
   it("applies defaults", () => {
@@ -31,6 +32,7 @@ describe("loadConfig", () => {
       shutdownGraceMs: DEFAULT_SHUTDOWN_GRACE_MS,
       piCodingAgentDir: undefined,
       piOffline: false,
+      sandbox: loadSandboxConfig({}),
     });
   });
 
@@ -63,6 +65,7 @@ describe("loadConfig", () => {
       shutdownGraceMs: 2500,
       piCodingAgentDir: "/tmp/pi-agent",
       piOffline: true,
+      sandbox: loadSandboxConfig({}),
     });
     expect(Object.isFrozen(config)).toBe(true);
   });

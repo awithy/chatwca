@@ -111,6 +111,13 @@ describe("server shell", () => {
       maxImages: 3,
       maxImageBytes: 1024,
       maxTotalImageBytes: 2048,
+      sandbox: {
+        mode: "disabled",
+        selectableProfiles: ["unrestricted"],
+        remoteProviderWarning:
+          "Workspace content may still be sent to the configured model provider.",
+        functionalProbeSucceeded: false,
+      },
     });
     expect(JSON.stringify(body)).not.toContain("/private/pi-data");
     expect(JSON.stringify(body)).not.toContain("/tmp/chatwca-smoke-data");

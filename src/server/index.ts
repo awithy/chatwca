@@ -1,6 +1,7 @@
 import express from "express";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { createServer as createHttpServer, type Server } from "node:http";
+import { homedir } from "node:os";
 import path from "node:path";
 import { loadEnvFile } from "node:process";
 import { fileURLToPath } from "node:url";
@@ -41,6 +42,7 @@ import {
 } from "./shutdown.js";
 import { serveWebApp } from "./static.js";
 import { hasAllowedWebSocketOrigin } from "./websocket-boundary.js";
+import { publicSandboxConfig } from "./sandbox/config.js";
 import { WorkspaceRepository } from "./workspace-repository.js";
 
 interface PackageMetadata {
@@ -174,6 +176,7 @@ export function createChatWcaServer(
       maxImages: config.maxImages,
       maxImageBytes: config.maxImageBytes,
       maxTotalImageBytes: config.maxTotalImageBytes,
+      sandbox: publicSandboxConfig(config.sandbox),
     });
   });
 
@@ -362,6 +365,7 @@ export interface ChatWcaStartupOptions {
   readonly openDatabase?: (dataDir: string) => ChatWcaDatabase;
   readonly createWorkspaceRepository?: (
     connection: ChatWcaDatabase["connection"],
+    config: Readonly<ServerConfig>,
   ) => ProtocolWorkspaceRepository;
   readonly createRuntimeFactory?: (
     config: Readonly<ServerConfig>,
@@ -401,6 +405,18 @@ function listen(
   });
 }
 
+function canonicalPathIfPresent(target: string): string {
+  try {
+    return realpathSync(target);
+  } catch (error) {
+    const code = typeof error === "object" && error !== null && "code" in error
+      ? (error as { readonly code?: unknown }).code
+      : undefined;
+    if (code !== "ENOENT") throw error;
+    return path.resolve(target);
+  }
+}
+
 /**
  * Initialize process-owned services in dependency order and bind listeners last.
  * Any failure after SQLite opens unwinds all ownership before rejecting.
@@ -418,8 +434,18 @@ export async function startChatWcaServer(
     database = (options.openDatabase ?? openDatabase)(config.dataDir);
     const workspaces = (
       options.createWorkspaceRepository ??
-      ((connection) => new WorkspaceRepository(connection))
-    )(database.connection);
+      ((connection, loadedConfig) => new WorkspaceRepository(connection, {
+        policy: {
+          mode: loadedConfig.sandbox.mode,
+          workspaceRoots: loadedConfig.sandbox.workspaceRoots,
+          dataDirectory: realpathSync(loadedConfig.dataDir),
+          piAgentDirectory: canonicalPathIfPresent(
+            loadedConfig.piCodingAgentDir ?? path.join(homedir(), ".pi", "agent"),
+          ),
+          readOnlyMounts: loadedConfig.sandbox.readOnlyMounts.map((mount) => mount.source),
+        },
+      }))
+    )(database.connection, config);
     const runtimeFactory = await (
       options.createRuntimeFactory ??
       ((loadedConfig) => PiRuntimeFactory.create({

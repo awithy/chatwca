@@ -38,14 +38,21 @@ const state: ConversationState = {
   contextUsage: null,
   messages: [],
   queue: { steering: [], followUp: [] },
+  securityProfile: "unrestricted",
 };
 const defaultWorkspace: WorkspaceSummary = {
   id: WORKSPACE_ID,
   name: "Workspace",
   path: state.cwd,
+  sessionStorage: "pi-default",
+  sessionDirectory: null,
+  securityProfile: "unrestricted",
+  effectiveSecurityProfile: "unrestricted",
   createdAt: 1,
   updatedAt: 1,
   available: true,
+  usable: true,
+  policyIssue: null,
 };
 
 function fixedWorkspaces(
@@ -60,6 +67,16 @@ function fixedWorkspaces(
       const workspace = rows.find(({ id }) => id === workspaceId);
       if (workspace === undefined) throw new Error("Unknown test workspace");
       return workspace;
+    },
+    requireUsable: (workspaceId) => {
+      const workspace = rows.find(({ id }) => id === workspaceId);
+      if (workspace === undefined) throw new Error("Unknown test workspace");
+      return {
+        workspaceId: workspace.id,
+        cwd: workspace.path,
+        sessionDirectory: workspace.sessionDirectory,
+        securityProfile: workspace.effectiveSecurityProfile ?? "unrestricted",
+      };
     },
     create: () => { throw new Error("Unexpected workspace create"); },
     update: () => { throw new Error("Unexpected workspace update"); },
@@ -429,25 +446,32 @@ describe("WebSocket command server", () => {
       delete: vi.fn(async () => []),
     };
     const workspaceA: WorkspaceSummary = {
+      ...defaultWorkspace,
       id: "workspace-a",
       name: "A",
       path: "/canonical/a",
-      createdAt: 1,
-      updatedAt: 1,
-      available: true,
     };
     const workspaceB: WorkspaceSummary = {
+      ...defaultWorkspace,
       id: "workspace-b",
       name: "B",
       path: "/canonical/b",
       createdAt: 2,
       updatedAt: 2,
-      available: true,
     };
     const rows = [workspaceA, workspaceB];
     const workspaces = {
       list: () => rows,
       requireAvailable: (workspaceId: string) => rows.find(({ id }) => id === workspaceId)!,
+      requireUsable: (workspaceId: string) => {
+        const workspace = rows.find(({ id }) => id === workspaceId)!;
+        return {
+          workspaceId: workspace.id,
+          cwd: workspace.path,
+          sessionDirectory: workspace.sessionDirectory,
+          securityProfile: "unrestricted" as const,
+        };
+      },
       create: () => workspaceA,
       update: () => workspaceA,
       delete: () => undefined,
@@ -523,16 +547,7 @@ describe("WebSocket command server", () => {
       delete: vi.fn(async () => []),
     };
     let rows: WorkspaceSummary[] = [];
-    const created: WorkspaceSummary = {
-      id: WORKSPACE_ID,
-      name: "Workspace",
-      path: "/workspace",
-      sessionStorage: "pi-default",
-      sessionDirectory: null,
-      createdAt: 1,
-      updatedAt: 1,
-      available: true,
-    };
+    const created: WorkspaceSummary = { ...defaultWorkspace };
     const createWorkspace = vi.fn(
       (input: { readonly sessionStorage: "pi-default" | "workspace" }) => {
         rows = [created];
@@ -542,6 +557,12 @@ describe("WebSocket command server", () => {
     const workspaces = {
       list: () => [...rows],
       requireAvailable: () => created,
+      requireUsable: () => ({
+        workspaceId: created.id,
+        cwd: created.path,
+        sessionDirectory: null,
+        securityProfile: "unrestricted" as const,
+      }),
       create: createWorkspace,
       update: () => created,
       delete: () => { rows = []; },
@@ -582,6 +603,7 @@ describe("WebSocket command server", () => {
       name: "Workspace",
       path: "/workspace",
       sessionStorage: "pi-default",
+      securityProfile: "unrestricted",
     }));
     await expect(Promise.all([correlatedCreate, createBroadcast])).resolves.toEqual([
       { type: "workspaces", requestId: "create-workspace", workspaces: [created] },
@@ -591,6 +613,7 @@ describe("WebSocket command server", () => {
       name: "Workspace",
       path: "/workspace",
       sessionStorage: "pi-default",
+      securityProfile: "unrestricted",
     });
 
     const correlatedUpdate = nextMessage(first);
@@ -656,6 +679,12 @@ describe("WebSocket command server", () => {
     const workspaces: ProtocolWorkspaceRepository = {
       list: () => [row],
       requireAvailable: () => row,
+      requireUsable: () => ({
+        workspaceId: row.id,
+        cwd: row.path,
+        sessionDirectory: row.sessionDirectory,
+        securityProfile: "unrestricted",
+      }),
       create: () => row,
       update: (workspaceId, changes) => {
         update(workspaceId, changes);

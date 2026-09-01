@@ -21,9 +21,15 @@ const workspace: WorkspaceSummary = {
   id: "workspace-1",
   name: "Workspace",
   path: "/workspace",
+  sessionStorage: "pi-default",
+  sessionDirectory: null,
+  securityProfile: "unrestricted",
+  effectiveSecurityProfile: "unrestricted",
   createdAt: 1,
   updatedAt: 1,
   available: true,
+  usable: true,
+  policyIssue: null,
 };
 const state: ConversationState = {
   id: "conversation-1",
@@ -40,6 +46,7 @@ const state: ConversationState = {
   contextUsage: null,
   messages: [],
   queue: { steering: [], followUp: [] },
+  securityProfile: "unrestricted",
 };
 const summary: ConversationSummary = {
   id: state.id,
@@ -90,6 +97,12 @@ function services() {
   const workspaces: ProtocolWorkspaceRepository = {
     list: vi.fn(() => authoritative),
     requireAvailable: vi.fn(() => workspace),
+    requireUsable: vi.fn(() => ({
+      workspaceId: workspace.id,
+      cwd: workspace.path,
+      sessionDirectory: workspace.sessionDirectory,
+      securityProfile: "unrestricted",
+    })),
     create: vi.fn((input) => {
       authoritative = [{ ...workspace, name: input.name, path: input.path }];
       return authoritative[0]!;
@@ -161,7 +174,12 @@ describe("server WebSocket protocol", () => {
       response: { type: "state", requestId: "create", conversation: state },
       affectedWorkspaceId: workspace.id,
     });
-    expect(calls.create).toHaveBeenCalledWith(workspace);
+    expect(calls.create).toHaveBeenCalledWith({
+      id: workspace.id,
+      path: workspace.path,
+      sessionDirectory: null,
+      securityProfile: "unrestricted",
+    });
 
     await dispatchClientCommand(command({
       type: "conversation.open",
@@ -170,7 +188,12 @@ describe("server WebSocket protocol", () => {
       conversationId: state.id,
     }), registry, history, workspaces);
     expect(history.resolve).toHaveBeenCalledWith(workspace, state.id);
-    expect(calls.open).toHaveBeenCalledWith(workspace, state.sessionFile);
+    expect(calls.open).toHaveBeenCalledWith({
+      id: workspace.id,
+      path: workspace.path,
+      sessionDirectory: null,
+      securityProfile: "unrestricted",
+    }, state.sessionFile);
 
     await expect(dispatchClientCommand(command({
       type: "conversation.rename",
@@ -225,6 +248,12 @@ describe("server WebSocket protocol", () => {
       requestId: "path",
       workspaceId: workspace.id,
       path: "/other",
+    }), registry, history, workspaces)).rejects.toMatchObject({ code: ERROR_CODES.WORKSPACE_BUSY });
+    await expect(dispatchClientCommand(command({
+      type: "workspace.update",
+      requestId: "profile",
+      workspaceId: workspace.id,
+      securityProfile: "workspace-sandboxed",
     }), registry, history, workspaces)).rejects.toMatchObject({ code: ERROR_CODES.WORKSPACE_BUSY });
     await expect(dispatchClientCommand(command({
       type: "workspace.delete",

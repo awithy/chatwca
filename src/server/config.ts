@@ -1,5 +1,13 @@
 import path from "node:path";
 
+import {
+  ConfigurationError,
+  loadSandboxConfig,
+  type SandboxConfig,
+} from "./sandbox/config.js";
+
+export { ConfigurationError } from "./sandbox/config.js";
+
 export const DEFAULT_HOST = "0.0.0.0";
 export const DEFAULT_PORT = 8787;
 export const DEFAULT_DATA_DIR = "./data";
@@ -25,10 +33,8 @@ export interface ServerConfig {
   readonly piCodingAgentDir: string | undefined;
   /** Pi 0.84.3 enables offline mode when PI_OFFLINE is present, regardless of its value. */
   readonly piOffline: boolean;
-}
-
-export class ConfigurationError extends Error {
-  override readonly name = "ConfigurationError";
+  /** Complete server-only sandbox policy and runtime configuration. */
+  readonly sandbox: Readonly<SandboxConfig>;
 }
 
 function optionalNonEmpty(
@@ -127,5 +133,6 @@ export function loadConfig(
     shutdownGraceMs,
     piCodingAgentDir: optionalNonEmpty(environment, "PI_CODING_AGENT_DIR"),
     piOffline: environment.PI_OFFLINE !== undefined,
+    sandbox: loadSandboxConfig(environment),
   });
 }

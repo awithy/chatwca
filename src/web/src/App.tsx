@@ -134,6 +134,9 @@ export function App() {
       name: values.name,
       path: values.path,
       sessionStorage: values.sessionStorage,
+      // Phase 1 preserves the existing unrestricted browser behavior. Profile
+      // controls are introduced with the dedicated browser phase.
+      securityProfile: "unrestricted",
     }));
     const created = result.workspaces.find((workspace) => !knownIds.has(workspace.id));
     if (created !== undefined) {

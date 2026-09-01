@@ -23,6 +23,7 @@ import type {
   ModelInfo,
   QueueState,
   UiImage,
+  WorkspaceSecurityProfile,
 } from "../shared/protocol.js";
 import {
   PiEventNormalizer,
@@ -57,6 +58,7 @@ export interface ConversationWorkspace {
   readonly id: string;
   readonly path: string;
   readonly sessionDirectory?: string | null;
+  readonly securityProfile?: WorkspaceSecurityProfile;
 }
 
 /**
@@ -85,6 +87,7 @@ export interface ConversationRecord {
   /** Immutable ChatWCA ownership, independent of replaceable Pi identity. */
   readonly workspaceId: string;
   readonly workspacePath: string;
+  readonly securityProfile: WorkspaceSecurityProfile;
   sessionFile: string;
   cwd: string;
   title: string;
@@ -462,6 +465,7 @@ export class ConversationRegistry {
           conversationImageUrl(record.id, entryId, imageIndex),
       }),
       queue: queueOf(record.session),
+      securityProfile: record.securityProfile,
     };
   }
 
@@ -801,7 +805,11 @@ export class ConversationRegistry {
 
       registered = await this.#register(
         temporary,
-        { id: source.workspaceId, path: source.workspacePath },
+        {
+          id: source.workspaceId,
+          path: source.workspacePath,
+          securityProfile: source.securityProfile,
+        },
         "fork",
         reservation.promote,
       );
@@ -1028,6 +1036,7 @@ export class ConversationRegistry {
       id: identity.sessionId,
       workspaceId: workspace.id,
       workspacePath: workspace.path,
+      securityProfile: workspace.securityProfile ?? "unrestricted",
       sessionFile,
       cwd: workspace.path,
       title: titleOf(runtime.session),
@@ -1097,6 +1106,13 @@ export class ConversationRegistry {
     }
     const workspacePath = path.resolve(workspace.path);
     if (
+      workspace.securityProfile !== undefined &&
+      workspace.securityProfile !== "unrestricted" &&
+      workspace.securityProfile !== "workspace-sandboxed"
+    ) {
+      throw new AppError(ERROR_CODES.WORKSPACE_UNAVAILABLE);
+    }
+    if (
       workspace.sessionDirectory !== undefined &&
       workspace.sessionDirectory !== null &&
       !path.isAbsolute(workspace.sessionDirectory)
@@ -1106,6 +1122,9 @@ export class ConversationRegistry {
     return {
       id: workspace.id,
       path: workspacePath,
+      ...(workspace.securityProfile === undefined
+        ? {}
+        : { securityProfile: workspace.securityProfile }),
       ...(workspace.sessionDirectory === undefined
         ? {}
         : {
@@ -1123,7 +1142,9 @@ export class ConversationRegistry {
   ): void {
     if (
       record.workspaceId !== workspace.id ||
-      record.workspacePath !== workspace.path
+      record.workspacePath !== workspace.path ||
+      (workspace.securityProfile !== undefined &&
+        record.securityProfile !== workspace.securityProfile)
     ) {
       throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
     }

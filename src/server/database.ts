@@ -4,7 +4,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 
 export const DATABASE_FILENAME = "chatwca.sqlite";
-export const DATABASE_SCHEMA_VERSION = 2;
+export const DATABASE_SCHEMA_VERSION = 3;
 export const DATABASE_BUSY_TIMEOUT_MS = 5_000;
 
 const INITIAL_SCHEMA = `
@@ -14,6 +14,8 @@ const INITIAL_SCHEMA = `
     path       TEXT NOT NULL UNIQUE,
     session_storage TEXT NOT NULL DEFAULT 'pi-default'
       CHECK (session_storage IN ('pi-default', 'workspace')),
+    security_profile TEXT NOT NULL DEFAULT 'unrestricted'
+      CHECK (security_profile IN ('unrestricted', 'workspace-sandboxed')),
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
   );
@@ -74,7 +76,20 @@ function migrateVersionOne(connection: Database.Database): void {
       ADD COLUMN session_storage TEXT NOT NULL DEFAULT 'pi-default'
         CHECK (session_storage IN ('pi-default', 'workspace'));
     `);
-    connection.pragma(`user_version = ${String(DATABASE_SCHEMA_VERSION)}`);
+    // Advance only this completed step. A following migration may fail and
+    // must never leave user_version claiming work that was rolled back.
+    connection.pragma("user_version = 2");
+  })();
+}
+
+function migrateVersionTwo(connection: Database.Database): void {
+  connection.transaction(() => {
+    connection.exec(`
+      ALTER TABLE workspaces
+      ADD COLUMN security_profile TEXT NOT NULL DEFAULT 'unrestricted'
+        CHECK (security_profile IN ('unrestricted', 'workspace-sandboxed'));
+    `);
+    connection.pragma("user_version = 3");
   })();
 }
 
@@ -104,6 +119,9 @@ export function openDatabase(
       initializeSchema(connection);
     } else if (version === 1) {
       migrateVersionOne(connection);
+      migrateVersionTwo(connection);
+    } else if (version === 2) {
+      migrateVersionTwo(connection);
     } else if (version !== DATABASE_SCHEMA_VERSION) {
       throw new UnsupportedDatabaseVersionError(version);
     }

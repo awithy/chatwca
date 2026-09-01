@@ -15,7 +15,10 @@ import {
   toAppError,
 } from "../shared/errors.js";
 import type {
+  SandboxMode,
   Workspace,
+  WorkspacePolicyIssue,
+  WorkspaceSecurityProfile,
   WorkspaceSessionStorage,
   WorkspaceSummary,
 } from "../shared/protocol.js";
@@ -25,6 +28,7 @@ interface WorkspaceRow {
   readonly name: string;
   readonly path: string;
   readonly session_storage: WorkspaceSessionStorage;
+  readonly security_profile: WorkspaceSecurityProfile;
   readonly created_at: number;
   readonly updated_at: number;
 }
@@ -52,32 +56,82 @@ const nodeFileSystem: WorkspaceFileSystem = {
   access: (target, mode) => accessSync(target, mode),
 };
 
+export interface WorkspacePolicyInputs {
+  readonly mode: SandboxMode;
+  /** Canonical existing directories. */
+  readonly workspaceRoots: readonly string[];
+  readonly dataDirectory: string;
+  readonly piAgentDirectory: string;
+  /** Canonical read-only mount source paths. */
+  readonly readOnlyMounts: readonly string[];
+}
+
+const DEFAULT_POLICY: WorkspacePolicyInputs = Object.freeze({
+  mode: "disabled",
+  workspaceRoots: Object.freeze([]),
+  // In disabled mode these inert sentinels can never reject unrestricted rows.
+  dataDirectory: path.parse(process.cwd()).root,
+  piAgentDirectory: path.parse(process.cwd()).root,
+  readOnlyMounts: Object.freeze([]),
+});
+
 export interface WorkspaceRepositoryOptions {
   /** Stable process base for resolving relative workspace paths. */
   readonly cwd?: string;
   readonly uuid?: () => string;
   readonly clock?: () => number;
   readonly fileSystem?: WorkspaceFileSystem;
+  readonly policy?: Readonly<WorkspacePolicyInputs>;
+}
+
+export interface RuntimeWorkspacePolicy {
+  readonly workspaceId: string;
+  readonly cwd: string;
+  readonly sessionDirectory: string | null;
+  readonly securityProfile: WorkspaceSecurityProfile;
 }
 
 export interface CreateWorkspaceInput {
   readonly name: string;
   readonly path: string;
   readonly sessionStorage?: WorkspaceSessionStorage;
+  readonly securityProfile: WorkspaceSecurityProfile;
 }
 
 export interface UpdateWorkspaceInput {
   readonly name?: string;
   readonly path?: string;
+  readonly securityProfile?: WorkspaceSecurityProfile;
+  readonly acknowledgeSecurityDowngrade?: true;
+}
+
+function isPathContained(parent: string, child: string): boolean {
+  const relative = path.relative(parent, child);
+  return relative === "" || (
+    relative !== ".." &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
+}
+
+function pathsOverlap(left: string, right: string): boolean {
+  return isPathContained(left, right) || isPathContained(right, left);
 }
 
 function workspaceFromRow(row: WorkspaceRow): Workspace {
+  if (
+    row.security_profile !== "unrestricted" &&
+    row.security_profile !== "workspace-sandboxed"
+  ) {
+    throw new AppError(ERROR_CODES.DATABASE_ERROR);
+  }
   return {
     id: row.id,
     name: row.name,
     path: row.path,
     sessionStorage: row.session_storage,
     sessionDirectory: workspaceSessionDirectory(row.path, row.session_storage),
+    securityProfile: row.security_profile,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -118,15 +172,14 @@ export class WorkspaceRepository {
   readonly #uuid: () => string;
   readonly #clock: () => number;
   readonly #fileSystem: WorkspaceFileSystem;
+  readonly #policy: Readonly<WorkspacePolicyInputs>;
   readonly #listStatement: Database.Statement<[], WorkspaceRow>;
   readonly #getStatement: Database.Statement<[string], WorkspaceRow>;
   readonly #insertStatement: Database.Statement<
-    [string, string, string, WorkspaceSessionStorage, number, number]
+    [string, string, string, WorkspaceSessionStorage, WorkspaceSecurityProfile, number, number]
   >;
-  readonly #updateNameStatement: Database.Statement<[string, number, string]>;
-  readonly #updatePathStatement: Database.Statement<[string, number, string]>;
-  readonly #updateNameAndPathStatement: Database.Statement<
-    [string, string, number, string]
+  readonly #updateStatement: Database.Statement<
+    [string, string, WorkspaceSecurityProfile, number, string]
   >;
   readonly #deleteStatement: Database.Statement<[string]>;
 
@@ -138,29 +191,29 @@ export class WorkspaceRepository {
     this.#uuid = options.uuid ?? randomUUID;
     this.#clock = options.clock ?? Date.now;
     this.#fileSystem = options.fileSystem ?? nodeFileSystem;
+    const suppliedPolicy = options.policy ?? DEFAULT_POLICY;
+    this.#policy = Object.freeze({
+      ...suppliedPolicy,
+      workspaceRoots: Object.freeze([...suppliedPolicy.workspaceRoots]),
+      readOnlyMounts: Object.freeze([...suppliedPolicy.readOnlyMounts]),
+    });
 
     try {
       this.#listStatement = connection.prepare<[], WorkspaceRow>(
-        "SELECT id, name, path, session_storage, created_at, updated_at FROM workspaces",
+        "SELECT id, name, path, session_storage, security_profile, created_at, updated_at FROM workspaces",
       );
       this.#getStatement = connection.prepare<[string], WorkspaceRow>(
-        "SELECT id, name, path, session_storage, created_at, updated_at FROM workspaces WHERE id = ?",
+        "SELECT id, name, path, session_storage, security_profile, created_at, updated_at FROM workspaces WHERE id = ?",
       );
       this.#insertStatement = connection.prepare<
-        [string, string, string, WorkspaceSessionStorage, number, number]
+        [string, string, string, WorkspaceSessionStorage, WorkspaceSecurityProfile, number, number]
       >(
-        "INSERT INTO workspaces (id, name, path, session_storage, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO workspaces (id, name, path, session_storage, security_profile, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
       );
-      this.#updateNameStatement = connection.prepare<[string, number, string]>(
-        "UPDATE workspaces SET name = ?, updated_at = ? WHERE id = ?",
-      );
-      this.#updatePathStatement = connection.prepare<[string, number, string]>(
-        "UPDATE workspaces SET path = ?, updated_at = ? WHERE id = ?",
-      );
-      this.#updateNameAndPathStatement = connection.prepare<
-        [string, string, number, string]
+      this.#updateStatement = connection.prepare<
+        [string, string, WorkspaceSecurityProfile, number, string]
       >(
-        "UPDATE workspaces SET name = ?, path = ?, updated_at = ? WHERE id = ?",
+        "UPDATE workspaces SET name = ?, path = ?, security_profile = ?, updated_at = ? WHERE id = ?",
       );
       this.#deleteStatement = connection.prepare<[string]>(
         "DELETE FROM workspaces WHERE id = ?",
@@ -171,10 +224,9 @@ export class WorkspaceRepository {
   }
 
   list(): WorkspaceSummary[] {
-    const rows = this.#database(() => this.#listStatement.all());
-    return rows
+    return this.#database(() => this.#listStatement.all()
       .map((row) => this.#summary(workspaceFromRow(row)))
-      .sort(compareWorkspaces);
+      .sort(compareWorkspaces));
   }
 
   get(workspaceId: string): WorkspaceSummary {
@@ -182,7 +234,7 @@ export class WorkspaceRepository {
     return this.#summary(workspace);
   }
 
-  /** Resolve a row for an operation that requires its directory right now. */
+  /** Resolve a row for scoped history/filesystem operations that start no tools. */
   requireAvailable(workspaceId: string): Workspace {
     const workspace = this.#getStored(workspaceId);
     if (!this.#isAvailable(workspace)) {
@@ -191,11 +243,49 @@ export class WorkspaceRepository {
     return workspace;
   }
 
+  /** Freshly resolve all policy needed to construct a conversation runtime. */
+  requireUsable(workspaceId: string): RuntimeWorkspacePolicy {
+    const workspace = this.requireAvailable(workspaceId);
+    const evaluation = this.#evaluatePolicy(workspace);
+    if (!evaluation.usable || evaluation.effectiveSecurityProfile === null) {
+      if (evaluation.policyIssue === "sandbox_disabled") {
+        throw new AppError(ERROR_CODES.SANDBOX_DISABLED);
+      }
+      throw new AppError(ERROR_CODES.SANDBOX_WORKSPACE_REJECTED);
+    }
+
+    // Availability verifies canonical identity. Sandboxed tools additionally
+    // require mutation access; Phase 2 extends this boundary with mask/socket
+    // admission immediately before worker construction.
+    if (evaluation.effectiveSecurityProfile === "workspace-sandboxed") {
+      try {
+        this.#fileSystem.access(
+          workspace.path,
+          fsConstants.R_OK | fsConstants.W_OK | fsConstants.X_OK,
+        );
+      } catch (error) {
+        throw new AppError(ERROR_CODES.SANDBOX_WORKSPACE_REJECTED, { cause: error });
+      }
+    }
+    return Object.freeze({
+      workspaceId: workspace.id,
+      cwd: workspace.path,
+      sessionDirectory: workspace.sessionDirectory,
+      securityProfile: evaluation.effectiveSecurityProfile,
+    });
+  }
+
   create(input: CreateWorkspaceInput): WorkspaceSummary {
     const name = this.#validName(input.name);
     const sessionStorage = this.#validSessionStorage(
       input.sessionStorage ?? "pi-default",
     );
+    // The wire protocol requires this field. The fallback keeps trusted legacy
+    // server callers source-compatible while preserving disabled-mode behavior.
+    const securityProfile = this.#validSecurityProfile(
+      input.securityProfile ?? "unrestricted",
+    );
+    this.#assertCreateProfileAllowed(securityProfile);
     const canonicalPath = this.#canonicalDirectory(
       input.path,
       sessionStorage === "workspace",
@@ -210,6 +300,7 @@ export class WorkspaceRepository {
     ) {
       throw new AppError(ERROR_CODES.INVALID_WORKSPACE_PATH);
     }
+    this.#assertPathPolicy(canonicalPath, securityProfile);
     const id = this.#uuid();
     const now = this.#clock();
 
@@ -220,6 +311,7 @@ export class WorkspaceRepository {
           name,
           canonicalPath,
           sessionStorage,
+          securityProfile,
           now,
           now,
         );
@@ -240,6 +332,7 @@ export class WorkspaceRepository {
       path: canonicalPath,
       sessionStorage,
       sessionDirectory,
+      securityProfile,
       createdAt: now,
       updatedAt: now,
     });
@@ -250,8 +343,39 @@ export class WorkspaceRepository {
     changes: UpdateWorkspaceInput,
   ): WorkspaceSummary {
     const current = this.#getStored(workspaceId);
-    if (changes.name === undefined && changes.path === undefined) {
+    if (
+      changes.name === undefined &&
+      changes.path === undefined &&
+      changes.securityProfile === undefined
+    ) {
       throw new AppError(ERROR_CODES.INVALID_COMMAND);
+    }
+
+    const securityProfile = changes.securityProfile === undefined
+      ? current.securityProfile
+      : this.#validSecurityProfile(changes.securityProfile);
+    const isDowngrade =
+      current.securityProfile === "workspace-sandboxed" &&
+      securityProfile === "unrestricted";
+    if (changes.acknowledgeSecurityDowngrade === true && !isDowngrade) {
+      throw new AppError(ERROR_CODES.INVALID_COMMAND);
+    }
+    if (isDowngrade && changes.acknowledgeSecurityDowngrade !== true) {
+      throw new AppError(ERROR_CODES.INVALID_COMMAND);
+    }
+    if (
+      changes.securityProfile !== undefined &&
+      this.#policy.mode === "disabled" &&
+      securityProfile === "workspace-sandboxed"
+    ) {
+      throw new AppError(ERROR_CODES.SANDBOX_DISABLED);
+    }
+    if (
+      changes.securityProfile !== undefined &&
+      this.#policy.mode === "required" &&
+      securityProfile !== "workspace-sandboxed"
+    ) {
+      throw new AppError(ERROR_CODES.SANDBOX_WORKSPACE_REJECTED);
     }
 
     // A name-only update deliberately does not touch the filesystem. This lets
@@ -276,21 +400,20 @@ export class WorkspaceRepository {
     ) {
       throw new AppError(ERROR_CODES.INVALID_WORKSPACE_PATH);
     }
+    if (changes.path !== undefined || changes.securityProfile !== undefined) {
+      this.#assertPathPolicy(canonicalPath, securityProfile);
+    }
     const now = this.#clock();
 
     this.#database(() => {
       try {
-        const result =
-          changes.name !== undefined && changes.path !== undefined
-            ? this.#updateNameAndPathStatement.run(
-                name,
-                canonicalPath,
-                now,
-                workspaceId,
-              )
-            : changes.name !== undefined
-              ? this.#updateNameStatement.run(name, now, workspaceId)
-              : this.#updatePathStatement.run(canonicalPath, now, workspaceId);
+        const result = this.#updateStatement.run(
+          name,
+          canonicalPath,
+          securityProfile,
+          now,
+          workspaceId,
+        );
         if (result.changes !== 1) {
           throw new AppError(ERROR_CODES.WORKSPACE_NOT_FOUND);
         }
@@ -310,6 +433,7 @@ export class WorkspaceRepository {
       name,
       path: canonicalPath,
       sessionDirectory,
+      securityProfile,
       updatedAt: now,
     });
   }
@@ -349,6 +473,43 @@ export class WorkspaceRepository {
     return input;
   }
 
+  #validSecurityProfile(input: unknown): WorkspaceSecurityProfile {
+    if (input !== "unrestricted" && input !== "workspace-sandboxed") {
+      throw new AppError(ERROR_CODES.INVALID_COMMAND);
+    }
+    return input;
+  }
+
+  #assertCreateProfileAllowed(profile: WorkspaceSecurityProfile): void {
+    if (this.#policy.mode === "disabled" && profile === "workspace-sandboxed") {
+      throw new AppError(ERROR_CODES.SANDBOX_DISABLED);
+    }
+    if (this.#policy.mode === "required" && profile !== "workspace-sandboxed") {
+      throw new AppError(ERROR_CODES.SANDBOX_WORKSPACE_REJECTED);
+    }
+  }
+
+  #assertPathPolicy(
+    canonicalPath: string,
+    storedProfile: WorkspaceSecurityProfile,
+  ): void {
+    const workspace: Workspace = {
+      id: "policy-candidate",
+      name: "policy-candidate",
+      path: canonicalPath,
+      sessionStorage: "pi-default",
+      sessionDirectory: null,
+      securityProfile: storedProfile,
+      createdAt: 0,
+      updatedAt: 0,
+    };
+    const evaluation = this.#evaluatePolicy(workspace, true);
+    if (evaluation.policyIssue === "outside_workspace_roots" ||
+        evaluation.policyIssue === "protected_path_overlap") {
+      throw new AppError(ERROR_CODES.SANDBOX_WORKSPACE_REJECTED);
+    }
+  }
+
   #canonicalDirectory(input: string, requireWrite = false): string {
     if (typeof input !== "string" || input.length === 0) {
       throw new AppError(ERROR_CODES.INVALID_WORKSPACE_PATH);
@@ -377,7 +538,9 @@ export class WorkspaceRepository {
 
   #isAvailable(workspace: Workspace): boolean {
     try {
-      if (!this.#fileSystem.stat(workspace.path).isDirectory()) return false;
+      const canonical = path.normalize(this.#fileSystem.realpath(workspace.path));
+      if (canonical !== path.normalize(workspace.path)) return false;
+      if (!this.#fileSystem.stat(canonical).isDirectory()) return false;
       this.#fileSystem.access(
         workspace.path,
         fsConstants.R_OK |
@@ -430,8 +593,57 @@ export class WorkspaceRepository {
     return true;
   }
 
+  #evaluatePolicy(
+    workspace: Workspace,
+    ignoreDisabledRequest = false,
+  ): Pick<WorkspaceSummary,
+    "effectiveSecurityProfile" | "usable" | "policyIssue"
+  > {
+    let effectiveSecurityProfile: WorkspaceSecurityProfile | null;
+    let policyIssue: WorkspacePolicyIssue = null;
+    if (this.#policy.mode === "disabled") {
+      if (workspace.securityProfile === "workspace-sandboxed") {
+        effectiveSecurityProfile = null;
+        if (!ignoreDisabledRequest) policyIssue = "sandbox_disabled";
+      } else {
+        effectiveSecurityProfile = "unrestricted";
+      }
+    } else if (this.#policy.mode === "required") {
+      effectiveSecurityProfile = "workspace-sandboxed";
+    } else {
+      effectiveSecurityProfile = workspace.securityProfile;
+    }
+
+    if (
+      policyIssue === null &&
+      this.#policy.workspaceRoots.length > 0 &&
+      !this.#policy.workspaceRoots.some((root) => isPathContained(root, workspace.path))
+    ) {
+      policyIssue = "outside_workspace_roots";
+    }
+
+    if (policyIssue === null && effectiveSecurityProfile === "workspace-sandboxed") {
+      const protectedPaths = [
+        this.#policy.dataDirectory,
+        this.#policy.piAgentDirectory,
+        ...this.#policy.readOnlyMounts,
+      ];
+      if (protectedPaths.some((protectedPath) => pathsOverlap(workspace.path, protectedPath))) {
+        policyIssue = "protected_path_overlap";
+      }
+    }
+
+    return {
+      effectiveSecurityProfile,
+      usable: effectiveSecurityProfile !== null && policyIssue === null && this.#isAvailable(workspace),
+      policyIssue,
+    };
+  }
+
   #summary(workspace: Workspace): WorkspaceSummary {
-    return { ...workspace, available: this.#isAvailable(workspace) };
+    const available = this.#isAvailable(workspace);
+    const evaluation = this.#evaluatePolicy(workspace);
+    return { ...workspace, available, ...evaluation, usable: available && evaluation.usable };
   }
 
   #database<T>(operation: () => T): T {

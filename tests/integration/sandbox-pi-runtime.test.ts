@@ -76,8 +76,11 @@ describe.skipIf(process.env.CHATWCA_SANDBOX_CAPABLE !== "1")("profile-selected s
 
     try {
       expect(runtime.securityProfile).toBe("workspace-sandboxed");
+      expect(runtime.identity.cwd).toBe(workspace);
+      expect(runtime.session.sessionManager.getCwd()).toBe(workspace);
       expect(runtime.sandboxFileReader).toBeDefined();
       expect(runtime.session.agent.state.tools.map((tool) => tool.name)).toEqual(SANDBOX_TOOL_NAMES);
+      expect(runtime.session.agent.state.systemPrompt).toContain("Current working directory: /workspace");
       expect(runtime.session.agent.state.systemPrompt).not.toContain(workspace);
       await runtime.prompt("Read the workspace file.");
       const toolResult = runtime.session.messages.find((message) => message.role === "toolResult");

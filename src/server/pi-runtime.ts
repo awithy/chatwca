@@ -686,9 +686,19 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
           sessionManager: runtimeSessionManager,
           ...(sessionStartEvent === undefined ? {} : { sessionStartEvent }),
         };
+        const created = await createAgentSessionFromServices(sessionCreationOptions);
+        // A sandboxed AgentSession must see only the guest CWD so Pi appends
+        // `/workspace` to the model-facing system prompt. AgentSessionRuntime,
+        // however, owns host-side session replacement and must retain the
+        // canonical host CWD; otherwise registry ownership checks reject a new
+        // session and Pi creates first-message forks with `/workspace` in their
+        // persisted session header.
+        const runtimeServices = policy.securityProfile === "workspace-sandboxed"
+          ? { ...services, cwd: runtimeCwd }
+          : services;
         return {
-          ...(await createAgentSessionFromServices(sessionCreationOptions)),
-          services,
+          ...created,
+          services: runtimeServices,
           diagnostics: services.diagnostics,
         };
       };

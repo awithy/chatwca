@@ -31,7 +31,7 @@ Destination filtering, traffic inspection, quotas, stable guest addresses, proxy
 7. Bubblewrap and slirp4netns are one failure domain. Startup or runtime failure never falls back to isolation, host networking, or unrestricted Pi tools.
 8. slirp4netns receives only its namespace, ready, exit, and diagnostic descriptors; it receives no worker IPC, workspace mount, database handle, provider secret, or control socket.
 9. The sidecar argv is shell-free and never contains `--api-socket` or a forwarding operation. `--disable-host-loopback` is defense in depth, not a destination boundary.
-10. Abort, timeout, fatal exit, close, eviction, failed fork, failed startup, and shutdown dispose both processes and all inherited descriptors.
+10. Abort, timeout, fatal exit, close, eviction, failed fork, failed startup, and shutdown dispose both processes and all inherited descriptors. Before the startup gate is intentionally released, cleanup must keep the gate writer open until Bubblewrap has exited; Bubblewrap 0.6.1 treats gate EOF as release, not cancellation.
 11. Public errors and `/api/config` expose no executable path, PID, namespace path, guest address, resolver detail, CA path, argv, or stderr.
 12. UI and prompt text say **Unrestricted egress** and explicitly mention reachable private, LAN, VPN, link-local, and metadata services.
 
@@ -95,15 +95,19 @@ Complete a focused Linux spike before changing persistence or UI. Add it to `scr
 
 ### T0.1 Bubblewrap startup gate and info pipe
 
-Using Node `spawn()` and dedicated `stdio` entries, prove that Bubblewrap 0.6.1:
+Using Node `spawn()` and dedicated `stdio` entries, prove and document that Bubblewrap 0.6.1:
 
 - emits one bounded JSON object through `--info-fd` containing `child-pid`;
-- remains blocked at `--block-fd` before the worker command executes;
-- releases only after the parent writes the documented gate byte;
-- closes or otherwise delimits the info object without requiring Bubblewrap to exit; and
-- fails cleanly if the parent closes the gate during startup.
+- remains blocked at `--block-fd` before the worker command executes while the parent retains an open gate writer;
+- releases after the parent writes exactly one documented gate byte;
+- also releases on gate EOF, making descriptor close unsafe as a startup-cancellation mechanism;
+- closes or otherwise delimits the info object without requiring Bubblewrap to exit;
+- can be cancelled fail-closed by retaining the gate writer, terminating and reaping Bubblewrap, and only then closing the gate descriptor; and
+- does not execute the payload during parent-death cleanup with the existing `--die-with-parent` behavior and the supplied systemd control-group settings.
 
-The production parser must accept one UTF-8 JSON object within a small fixed limit, reject missing/duplicate/trailing data, and enforce the existing start timeout.
+The spike must include a marker-based regression test that distinguishes intentional one-byte release from EOF and proves that terminate/reap-before-close leaves the marker absent. The production parser must accept one UTF-8 JSON object within a small fixed limit, reject missing/duplicate/trailing data, and enforce the existing start timeout.
+
+Production code must model the startup gate as stateful rather than as an ordinary descriptor in a generic close-all list. Before intentional release, it must never close the last gate writer while Bubblewrap may still be alive. On cancellation it sends `SIGTERM` and then `SIGKILL` as needed while retaining the writer, confirms Bubblewrap exit, and closes the writer afterward. If Bubblewrap cannot be confirmed dead, retain the gate and escalate to startup-fatal server shutdown rather than releasing or abandoning the blocked worker.
 
 ### T0.2 Race-safe namespace attachment
 
@@ -135,7 +139,7 @@ Prove `--ready-fd`, `--exit-fd`, `--configure`, `--disable-host-loopback`, `--en
 
 ### Phase 0 exit criterion
 
-Do not proceed unless path-mode namespace pinning, startup ordering, sidecar sandbox/seccomp flags, and complete cleanup work both directly and under `systemd/chatwca.service`.
+Do not proceed unless path-mode namespace pinning, startup ordering, terminate/reap-before-gate-close cancellation, parent-death cleanup, sidecar sandbox/seccomp flags, and complete cleanup work both directly and under `systemd/chatwca.service`. Gate EOF must have an explicit regression test demonstrating that it releases Bubblewrap and therefore is never used as cancellation.
 
 ## 6. Phase 1 — Configuration and host validation
 
@@ -330,7 +334,7 @@ For unrestricted egress it must:
 8. allow `SandboxWorkerClient` to perform the normal nonce/policy handshake; and
 9. publish the composite runtime only after all stages succeed.
 
-Any failure closes the gate, ready, exit, info, and namespace descriptors; terminates both processes; waits boundedly; and throws `sandbox_network_start_failed` for network startup phases or the existing worker-start error for worker phases.
+Failure cleanup is phase-aware. Before intentional gate release, it retains the gate writer, stops the sidecar, terminates Bubblewrap, escalates to `SIGKILL` if needed, confirms Bubblewrap exit, and only then closes the gate writer and remaining ready, exit, info, and namespace descriptors. It must never use gate EOF as cancellation. If Bubblewrap cannot be confirmed dead, it retains the writer and escalates to startup-fatal server shutdown. After intentional gate release, ordinary composite termination may close the already-released gate with the other descriptors. Startup failures throw `sandbox_network_start_failed` for network startup phases or the existing worker-start error for worker phases.
 
 ### T4.2 Refactor `worker-client.ts`
 
@@ -453,7 +457,7 @@ Update/add focused tests for:
 - bounded Bubblewrap info JSON parsing;
 - descendant, PID start-time, namespace inode, and reused-PID rejection;
 - FD allocation and descriptor allowlists for both child processes;
-- startup gate ordering and failure cleanup;
+- startup gate ordering, explicit EOF-releases regression behavior, terminate/reap-before-close cancellation, unkillable-child fatal escalation, parent-death cleanup, and descriptor cleanup;
 - policy-specific bwrap argv, `/etc`, environment, worker protocol, and probes;
 - composite close/invalidate/escalation/idempotency and crossed worker/sidecar exits;
 - no fallback after startup, handshake, restart, or active-sidecar failure;

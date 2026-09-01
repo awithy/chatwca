@@ -402,20 +402,23 @@ const registry: ProtocolRegistry = {
   async create(workspace) {
     conversationSequence += 1;
     const id = `browser-created-${String(conversationSequence)}`;
-    addFixture(emptyState(id, "Untitled conversation", workspace));
+    addFixture(emptyState(id, "Untitled conversation", {
+      id: workspace.workspaceId,
+      path: workspace.cwd,
+    }));
     return { id };
   },
   async open(workspace, sessionFile) {
     const fixture = [...conversations.values()].find(
       (candidate) => candidate.state.sessionFile === sessionFile,
     );
-    if (fixture === undefined || fixture.state.cwd !== workspace.path) {
+    if (fixture === undefined || fixture.state.cwd !== workspace.cwd) {
       throw new Error("Unknown fixture session file");
     }
     fixture.closed = false;
     fixture.state = {
       ...fixture.state,
-      workspaceId: workspace.id,
+      workspaceId: workspace.workspaceId,
       status: "idle",
       lastActiveAt: nextTime(),
     };

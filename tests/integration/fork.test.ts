@@ -39,6 +39,7 @@ import {
   type PiForkResult,
   type PiModelCapability,
   type PiRuntimeFactoryPort,
+  type PiRuntimeFatalFailureListener,
   type PiRuntimeIdentity,
   type PiRuntimeReplacementListener,
 } from "../../src/server/pi-runtime.js";
@@ -117,6 +118,15 @@ async function waitForIdle(record: ConversationRegistry["records"][number]) {
   });
 }
 
+function policy(cwd: string) {
+  return {
+    workspaceId: cwd,
+    cwd,
+    sessionDirectory: null,
+    securityProfile: "unrestricted" as const,
+  };
+}
+
 class TrackingRuntime implements PiConversationRuntimePort {
   readonly eventSubscriptions = new Set<AgentSessionEventListener>();
   readonly replacementSubscriptions = new Set<PiRuntimeReplacementListener>();
@@ -152,6 +162,10 @@ class TrackingRuntime implements PiConversationRuntimePort {
     return this.inner.disposed;
   }
 
+  get teardownComplete(): boolean {
+    return this.inner.teardownComplete;
+  }
+
   subscribe(listener: AgentSessionEventListener): () => void {
     this.eventSubscriptions.add(listener);
     const unsubscribe = this.inner.subscribe(listener);
@@ -174,6 +188,10 @@ class TrackingRuntime implements PiConversationRuntimePort {
       this.replacementSubscriptions.delete(listener);
       unsubscribe();
     };
+  }
+
+  onFatalFailure(listener: PiRuntimeFatalFailureListener): () => void {
+    return this.inner.onFatalFailure(listener);
   }
 
   prompt(text: string, options?: PromptOptions): Promise<void> {
@@ -267,7 +285,7 @@ describe("conversation fork integration", () => {
     });
     registries.push(registry);
 
-    const source = await registry.create({ id: cwd, path: cwd });
+    const source = await registry.create(policy(cwd));
     await registry.prompt(source.id, "Keep this earlier turn.", []);
     await vi.waitFor(() => expect(messageEntries(source.session)).toHaveLength(2));
     await waitForIdle(source);
@@ -405,7 +423,7 @@ describe("conversation fork integration", () => {
     });
     registries.push(registry);
 
-    const source = await registry.create({ id: cwd, path: cwd });
+    const source = await registry.create(policy(cwd));
     await registry.prompt(source.id, "Root user prompt", []);
     await vi.waitFor(() => expect(messageEntries(source.session)).toHaveLength(2));
     await waitForIdle(source);
@@ -436,7 +454,7 @@ describe("conversation fork integration", () => {
     const sourceIdentity = source.runtime.identity;
     const sourceBytes = await readFile(source.sessionFile);
     for (const entryId of [firstAssistant!.id, abandonedUser!.id]) {
-      await expect(registry.fork(source.id, entryId)).rejects.toMatchObject({
+      await expect(registry.fork(source.id, entryId, policy(cwd))).rejects.toMatchObject({
         code: ERROR_CODES.INVALID_FORK_TARGET,
       });
     }
@@ -467,7 +485,7 @@ describe("conversation fork integration", () => {
     });
     registries.push(registry);
 
-    const source = await registry.create({ id: cwd, path: cwd });
+    const source = await registry.create(policy(cwd));
     await registry.prompt(source.id, "Do not fork during this run", []);
     await vi.waitFor(() => {
       expect(source.status).toBe("streaming");
@@ -475,7 +493,7 @@ describe("conversation fork integration", () => {
     });
     const userEntry = messageEntries(source.session)[0];
 
-    await expect(registry.fork(source.id, userEntry!.id)).rejects.toMatchObject({
+    await expect(registry.fork(source.id, userEntry!.id, policy(cwd))).rejects.toMatchObject({
       code: ERROR_CODES.FORK_SOURCE_BUSY,
     });
     expect(trackingFactory.opened).toHaveLength(0);
@@ -495,7 +513,7 @@ describe("conversation fork integration", () => {
     });
     registries.push(registry);
 
-    const source = await registry.create({ id: cwd, path: cwd });
+    const source = await registry.create(policy(cwd));
     await registry.prompt(source.id, "Fork target", []);
     await vi.waitFor(() => expect(messageEntries(source.session)).toHaveLength(2));
     await waitForIdle(source);
@@ -507,7 +525,7 @@ describe("conversation fork integration", () => {
 
     const sourceIdentity = source.runtime.identity;
     const sourceBytes = await readFile(source.sessionFile);
-    await expect(registry.fork(source.id, userEntry!.id)).rejects.toMatchObject({
+    await expect(registry.fork(source.id, userEntry!.id, policy(cwd))).rejects.toMatchObject({
       code: ERROR_CODES.PI_RUNTIME_REPLACE_FAILED,
     });
 

@@ -1,6 +1,8 @@
+import type { AgentSessionRuntime } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 
 import { AppError, ERROR_CODES } from "../../src/shared/errors.js";
+import { PiConversationRuntime } from "../../src/server/pi-runtime.js";
 import {
   SandboxController,
   type SandboxControllerWorkerPort,
@@ -12,7 +14,7 @@ function worker(overrides: Partial<SandboxControllerWorkerPort> = {}): SandboxCo
   return {
     readFile: failed, writeFile: failed, editFile: failed, listDirectory: failed,
     grep: failed, find: failed, exec: failed, health: async () => ({ healthy: true }),
-    invalidate: vi.fn(async () => undefined), ...overrides,
+    close: vi.fn(async () => undefined), invalidate: vi.fn(async () => undefined), ...overrides,
   } as SandboxControllerWorkerPort;
 }
 function deferred(): { promise: Promise<void>; resolve: () => void } {
@@ -24,6 +26,24 @@ const failure: SandboxWorkerFatal = {
 };
 
 describe("SandboxController fail-closed lifecycle", () => {
+  it("tears down a worker that reports fatal failure during startup", async () => {
+    const active = worker();
+    const createWorker = vi.fn(async (onFatal: (value: SandboxWorkerFatal) => void) => {
+      onFatal(failure);
+      return active;
+    });
+
+    await expect(SandboxController.start({
+      createWorker,
+      commandTimeoutMs: 1_000,
+      abortActiveRun: vi.fn(),
+      waitForPiIdle: vi.fn(),
+      onFatal: vi.fn(),
+    })).rejects.toMatchObject({ code: ERROR_CODES.SANDBOX_WORKER_START_FAILED });
+    expect(active.invalidate).toHaveBeenCalledOnce();
+    expect(createWorker).toHaveBeenCalledOnce();
+  });
+
   it("keeps healthy operation failures on the same worker", async () => {
     const operationError = new SandboxWorkerOperationError("not_found");
     const first = worker({ readFile: vi.fn(async () => { throw operationError; }) });
@@ -82,6 +102,75 @@ describe("SandboxController fail-closed lifecycle", () => {
     idle.resolve(); await vi.waitFor(() => expect(onFatal).toHaveBeenCalledTimes(1));
     expect(onFatal).toHaveBeenCalledWith(failure);
     await controller.close();
+  });
+
+  it("rejects prompts during replacement and coalesces runtime aborts", async () => {
+    const first = worker();
+    const replacement = worker();
+    const idle = deferred();
+    const createWorker = vi.fn()
+      .mockResolvedValueOnce(first)
+      .mockResolvedValueOnce(replacement);
+    const controller = await SandboxController.start({
+      createWorker,
+      commandTimeoutMs: 1_000,
+      abortActiveRun: vi.fn(),
+      waitForPiIdle: () => idle.promise,
+      onFatal: vi.fn(),
+    });
+    const prompt = vi.fn(async () => undefined);
+    const sdkRuntime = {
+      session: { prompt },
+      setBeforeSessionInvalidate: vi.fn(),
+      setRebindSession: vi.fn(),
+      dispose: vi.fn(async () => undefined),
+    } as unknown as AgentSessionRuntime;
+    const runtime = new PiConversationRuntime(
+      sdkRuntime,
+      "workspace-sandboxed",
+      controller,
+    );
+
+    const firstAbort = runtime.abort();
+    const repeatedAbort = runtime.abort();
+    await expect(runtime.prompt("blocked while replacing")).rejects.toMatchObject({
+      code: ERROR_CODES.SANDBOX_WORKER_FAILED,
+    });
+    expect(prompt).not.toHaveBeenCalled();
+    idle.resolve();
+    await Promise.all([firstAbort, repeatedAbort]);
+    expect(createWorker).toHaveBeenCalledTimes(2);
+    await expect(runtime.prompt("ready again")).resolves.toBeUndefined();
+    await runtime.dispose();
+    expect(replacement.close).toHaveBeenCalledOnce();
+  });
+
+  it("starts worker teardown even when Pi disposal fails", async () => {
+    const active = worker();
+    const controller = await SandboxController.start({
+      createWorker: async () => active,
+      commandTimeoutMs: 1_000,
+      abortActiveRun: vi.fn(),
+      waitForPiIdle: vi.fn(),
+      onFatal: vi.fn(),
+    });
+    const piFailure = new Error("Pi disposal failed");
+    const sdkRuntime = {
+      session: {},
+      setBeforeSessionInvalidate: vi.fn(),
+      setRebindSession: vi.fn(),
+      dispose: vi.fn(async () => { throw piFailure; }),
+    } as unknown as AgentSessionRuntime;
+    const runtime = new PiConversationRuntime(
+      sdkRuntime,
+      "workspace-sandboxed",
+      controller,
+    );
+
+    await expect(runtime.dispose()).rejects.toBe(piFailure);
+    expect(active.close).toHaveBeenCalledOnce();
+    expect(runtime.disposed).toBe(true);
+    expect(runtime.teardownComplete).toBe(true);
   });
 
   it("transitions to error when replacement handshake fails and does not fallback", async () => {

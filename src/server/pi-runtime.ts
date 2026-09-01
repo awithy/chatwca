@@ -73,6 +73,8 @@ export type PiRuntimeReplacementListener = (
   replacement: PiRuntimeReplacement,
 ) => void;
 
+export type PiRuntimeFatalFailureListener = (error: AppError) => void;
+
 /** Options that may vary with each CWD-bound service reconstruction. */
 export type PiServiceOptions = Omit<
   CreateAgentSessionServicesOptions,
@@ -103,10 +105,13 @@ export interface PiConversationRuntimePort {
   readonly model: PiModelCapability | undefined;
   readonly supportsImages: boolean;
   readonly disposed: boolean;
+  /** True only after Pi and worker teardown promises have both settled. */
+  readonly teardownComplete: boolean;
   /** Present only when model-directed workspace reads cross a sandbox worker. */
   readonly sandboxFileReader?: SandboxWorkspaceFileReaderPort;
   subscribe(listener: AgentSessionEventListener): () => void;
   onSessionReplaced(listener: PiRuntimeReplacementListener): () => void;
+  onFatalFailure(listener: PiRuntimeFatalFailureListener): () => void;
   prompt(text: string, options?: PromptOptions): Promise<void>;
   abort(): Promise<void>;
   fork(entryId: string, options?: PiForkOptions): Promise<PiForkResult>;
@@ -219,9 +224,14 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
   readonly #sandboxController: SandboxController | undefined;
   readonly #eventListeners = new Set<AgentSessionEventListener>();
   readonly #replacementListeners = new Set<PiRuntimeReplacementListener>();
+  readonly #fatalListeners = new Set<PiRuntimeFatalFailureListener>();
   #unsubscribeSession: (() => void) | undefined;
+  #unsubscribeControllerFatal: (() => void) | undefined;
   #replacementSource: PiRuntimeIdentity | undefined;
+  #fatalFailure: AppError | undefined;
   #disposed = false;
+  #teardownComplete = false;
+  #disposePromise: Promise<void> | undefined;
 
   constructor(
     runtime: AgentSessionRuntime,
@@ -236,6 +246,9 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
         value: sandboxController,
         enumerable: true,
       });
+      this.#unsubscribeControllerFatal = sandboxController.onFatalFailure(
+        (failure) => this.#notifyFatalFailure(failure.error),
+      );
     }
 
     runtime.setBeforeSessionInvalidate(() => {
@@ -281,6 +294,10 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
     return this.#disposed;
   }
 
+  get teardownComplete(): boolean {
+    return this.#teardownComplete;
+  }
+
   subscribe(listener: AgentSessionEventListener): () => void {
     this.#assertUsable();
     this.#eventListeners.add(listener);
@@ -300,6 +317,13 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
     };
   }
 
+  onFatalFailure(listener: PiRuntimeFatalFailureListener): () => void {
+    if (this.#disposed) throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
+    this.#fatalListeners.add(listener);
+    if (this.#fatalFailure !== undefined) listener(this.#fatalFailure);
+    return () => this.#fatalListeners.delete(listener);
+  }
+
   async prompt(text: string, options?: PromptOptions): Promise<void> {
     this.#assertUsable();
     try {
@@ -314,9 +338,10 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
   }
 
   async abort(): Promise<void> {
-    this.#assertUsable();
+    if (this.#disposed) throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
     try {
       if (this.#sandboxController !== undefined) {
+        // Controller aborts coalesce while replacement is pending.
         await this.#sandboxController.abort();
       } else {
         await this.session.abort();
@@ -362,19 +387,40 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
     }
   }
 
-  async dispose(): Promise<void> {
-    if (this.#disposed) return;
+  dispose(): Promise<void> {
+    this.#disposePromise ??= this.#disposeOnce();
+    return this.#disposePromise;
+  }
+
+  async #disposeOnce(): Promise<void> {
     this.#disposed = true;
     this.#detachSession();
     this.#eventListeners.clear();
     this.#replacementListeners.clear();
+    this.#fatalListeners.clear();
+    this.#unsubscribeControllerFatal?.();
+    this.#unsubscribeControllerFatal = undefined;
     this.#runtime.setBeforeSessionInvalidate(undefined);
     this.#runtime.setRebindSession(undefined);
+
+    // Start both teardown paths before awaiting either one. A stalled SDK
+    // disposal must never keep a Bubblewrap namespace alive past shutdown.
+    let piDisposal: Promise<void>;
+    let workerDisposal: Promise<void>;
     try {
-      await this.#runtime.dispose();
-    } finally {
-      await this.#sandboxController?.close();
+      piDisposal = this.#runtime.dispose();
+    } catch (error) {
+      piDisposal = Promise.reject(error);
     }
+    try {
+      workerDisposal = this.#sandboxController?.close() ?? Promise.resolve();
+    } catch (error) {
+      workerDisposal = Promise.reject(error);
+    }
+    const [piResult, workerResult] = await Promise.allSettled([piDisposal, workerDisposal]);
+    this.#teardownComplete = true;
+    if (workerResult.status === "rejected") throw workerResult.reason;
+    if (piResult.status === "rejected") throw piResult.reason;
   }
 
   #attachSession(): void {
@@ -387,8 +433,28 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
     }
 
     this.#unsubscribeSession = this.session.subscribe((event) => {
-      for (const listener of this.#eventListeners) listener(event);
+      const controller = this.#sandboxController;
+      if (
+        controller !== undefined &&
+        controller.state !== "healthy" &&
+        event.type === "agent_end"
+      ) {
+        // Pi settles before a replacement worker can handshake. Do not expose
+        // idle to the registry during that fail-closed gap; fatal transitions
+        // deliberately drop this normalizer event and publish terminal error.
+        void controller.waitUntilReady().then(
+          () => this.#dispatchSessionEvent(event),
+          () => undefined,
+        );
+        return;
+      }
+      this.#dispatchSessionEvent(event);
     });
+  }
+
+  #dispatchSessionEvent(event: Parameters<AgentSessionEventListener>[0]): void {
+    if (this.#disposed) return;
+    for (const listener of this.#eventListeners) listener(event);
   }
 
   #detachSession(): void {
@@ -396,9 +462,21 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
     this.#unsubscribeSession = undefined;
   }
 
+  #notifyFatalFailure(error: AppError): void {
+    if (this.#fatalFailure !== undefined || this.#disposed) return;
+    this.#fatalFailure = error;
+    for (const listener of this.#fatalListeners) listener(error);
+  }
+
   #assertUsable(): void {
     if (this.#disposed) {
       throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
+    }
+    if (
+      this.#sandboxController !== undefined &&
+      this.#sandboxController.state !== "healthy"
+    ) {
+      throw new AppError(ERROR_CODES.SANDBOX_WORKER_FAILED);
     }
   }
 }
@@ -560,8 +638,8 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
           commandTimeoutMs: sandbox.config.commandTimeoutMs,
           abortActiveRun: () => sdkRuntime?.session.abort(),
           waitForPiIdle: () => sdkRuntime?.session.agent.waitForIdle(),
-          // Phase 7 attaches the registry-facing terminal failure observer. The
-          // controller still fails closed and aborts Pi without one.
+          // The controller retains terminal failure state; the runtime subscribes
+          // immediately after SDK construction and replays any raced failure.
           onFatal: () => undefined,
         });
       }

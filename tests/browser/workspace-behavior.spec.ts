@@ -228,7 +228,7 @@ test("busy workspace mutation is rejected and removal retains closed sessions", 
   await page.getByLabel("Directory path").fill(`${workspacePath}-changed`);
   await page.getByRole("button", { name: "Save changes" }).click();
   await expect(page.getByRole("alert")).toContainText(
-    "Close the workspace's live conversations before changing its path or removing it.",
+    "Close the workspace's live conversations before changing its path, security profile, or removing it.",
   );
   await page.getByRole("button", { name: "Cancel" }).click();
 

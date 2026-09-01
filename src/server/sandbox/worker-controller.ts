@@ -32,6 +32,9 @@ export interface SandboxControllerWorkerPort {
   find(arguments_: Readonly<FindArguments>, options?: SandboxCallOptions): Promise<FindResult>;
   exec(arguments_: Readonly<ExecArguments>, options?: SandboxExecOptions): Promise<ExecResult>;
   health(options?: SandboxCallOptions): Promise<HealthResult>;
+  /** Bounded graceful shutdown followed by forced namespace teardown. */
+  close(): Promise<void>;
+  /** Immediate namespace teardown for abort, timeout, and fatal failure. */
   invalidate(): Promise<void>;
 }
 export type SandboxControllerWorkerFactory = (
@@ -58,7 +61,9 @@ export class SandboxController {
   #worker: SandboxControllerWorkerPort;
   #state: SandboxControllerState = "healthy";
   #transition: Promise<void> | undefined;
-  #fatalNotified = false;
+  #closePromise: Promise<void> | undefined;
+  #fatalFailure: Readonly<SandboxWorkerFatal> | undefined;
+  readonly #fatalListeners = new Set<(failure: Readonly<SandboxWorkerFatal>) => void>();
 
   private constructor(options: SandboxControllerOptions, worker: SandboxControllerWorkerPort) {
     this.#options = options; this.#worker = worker;
@@ -80,6 +85,18 @@ export class SandboxController {
   }
 
   get state(): SandboxControllerState { return this.#state; }
+
+  /** Resolves only when a replacement worker has completed its handshake. */
+  async waitUntilReady(): Promise<void> {
+    await this.#current();
+  }
+
+  /** Fatal notifications are terminal and replayed to late runtime subscribers. */
+  onFatalFailure(listener: (failure: Readonly<SandboxWorkerFatal>) => void): () => void {
+    this.#fatalListeners.add(listener);
+    if (this.#fatalFailure !== undefined) listener(this.#fatalFailure);
+    return () => this.#fatalListeners.delete(listener);
+  }
 
   async readFile(arguments_: Readonly<ReadFileArguments>, options?: SandboxCallOptions): Promise<ReadFileResult> {
     return (await this.#current()).readFile(arguments_, options);
@@ -136,11 +153,32 @@ export class SandboxController {
   /** Conversation abort: namespace first, Pi abort/settle second, replacement last. */
   abort(): Promise<void> { return this.#plannedRestart(); }
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    this.#closePromise ??= this.#closeOnce();
+    return this.#closePromise;
+  }
+
+  async #closeOnce(): Promise<void> {
     if (this.#state === "closed") return;
-    const transition = this.#transition; if (transition !== undefined) await transition.catch(() => undefined);
+    // Close admission before the first await. If a restart is already settling
+    // Pi, its old namespace begins teardown here and any later replacement is
+    // immediately invalidated by the closed-state check below.
     this.#state = "closed";
-    await this.#worker.invalidate();
+    const worker = this.#worker;
+    const transition = this.#transition;
+    try {
+      await worker.close();
+    } catch (closeError) {
+      try {
+        await worker.invalidate();
+      } catch (invalidateError) {
+        throw new AppError(ERROR_CODES.SANDBOX_WORKER_FAILED, {
+          cause: { closeError, invalidateError },
+        });
+      }
+    }
+    if (transition !== undefined) await transition.catch(() => undefined);
+    this.#fatalListeners.clear();
   }
 
   async #current(): Promise<SandboxControllerWorkerPort> {
@@ -156,11 +194,13 @@ export class SandboxController {
     this.#state = "restarting";
     const previous = this.#worker;
     const transition = (async () => {
-      // Never trust process-group cleanup on timeout/abort.
-      await previous.invalidate();
-      await this.#options.abortActiveRun();
-      await this.#options.waitForPiIdle();
       try {
+        // Never trust process-group cleanup on timeout/abort.
+        await previous.invalidate();
+        await this.#options.abortActiveRun();
+        await this.#options.waitForPiIdle();
+        if (this.#state === "closed") return;
+
         let replacementFatal: Readonly<SandboxWorkerFatal> | undefined;
         const replacement = await this.#options.createWorker((failure) => {
           replacementFatal = failure;
@@ -170,11 +210,19 @@ export class SandboxController {
           await replacement.invalidate().catch(() => undefined);
           throw replacementFatal.error;
         }
-        if (this.#state === "closed") { await replacement.invalidate(); return; }
-        this.#worker = replacement; this.#state = "healthy";
+        if (this.state === "closed") {
+          await replacement.invalidate();
+          return;
+        }
+        this.#worker = replacement;
+        this.#state = "healthy";
       } catch (cause) {
+        if (this.#state === "closed") return;
         this.#state = "error";
-        const failure = { error: new AppError(ERROR_CODES.SANDBOX_WORKER_START_FAILED, { cause }), diagnostic: "" };
+        const failure = {
+          error: new AppError(ERROR_CODES.SANDBOX_WORKER_START_FAILED, { cause }),
+          diagnostic: "",
+        };
         this.#notifyFatal(failure);
         throw failure.error;
       }
@@ -196,8 +244,11 @@ export class SandboxController {
   }
 
   #notifyFatal(failure: Readonly<SandboxWorkerFatal>): void {
-    if (this.#fatalNotified) return;
-    this.#fatalNotified = true;
+    if (this.#fatalFailure !== undefined || this.#state === "closed") return;
+    this.#fatalFailure = failure;
     try { this.#options.onFatal(failure); } catch { /* observers have no authority */ }
+    for (const listener of this.#fatalListeners) {
+      try { listener(failure); } catch { /* observers have no authority */ }
+    }
   }
 }

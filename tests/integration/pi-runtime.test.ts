@@ -162,7 +162,7 @@ describe("PiRuntimeFactory", () => {
     let reopened: PiConversationRuntime | undefined;
 
     try {
-      const record = await registry.create({ id: cwd, path: cwd });
+      const record = await registry.create(policy(cwd));
       const identity = record.runtime.identity;
       const data = Buffer.from([
         0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
@@ -208,7 +208,7 @@ describe("PiRuntimeFactory", () => {
     });
 
     try {
-      const source = await registry.create({ id: cwd, path: cwd });
+      const source = await registry.create(policy(cwd));
       await registry.prompt(source.id, "Keep this earlier turn.", []);
       await vi.waitFor(() => {
         expect(source.status).toBe("idle");
@@ -240,7 +240,7 @@ describe("PiRuntimeFactory", () => {
         )[1];
       expect(target).toBeDefined();
 
-      const result = await registry.fork(source.id, target!.id);
+      const result = await registry.fork(source.id, target!.id, policy(cwd));
 
       expect(result.editorText).toBe("Copy this prompt into the editor.");
       expect(result.conversation).toMatchObject({

@@ -55,12 +55,7 @@ const UNTITLED_CONVERSATION = "Untitled conversation";
 export type ConversationRegistrationSource = "create" | "open" | "fork";
 
 /** Repository-resolved, canonical ownership supplied by trusted server code. */
-export interface ConversationWorkspace {
-  readonly id: string;
-  readonly path: string;
-  readonly sessionDirectory?: string | null;
-  readonly securityProfile?: WorkspaceSecurityProfile;
-}
+export type ConversationWorkspace = Readonly<RuntimeWorkspacePolicy>;
 
 /**
  * A slot held for T9.2's source-preserving fork construction. The caller must
@@ -88,7 +83,10 @@ export interface ConversationRecord {
   /** Immutable ChatWCA ownership, independent of replaceable Pi identity. */
   readonly workspaceId: string;
   readonly workspacePath: string;
+  readonly sessionDirectory: string | null;
   readonly securityProfile: WorkspaceSecurityProfile;
+  /** Locks terminal runtime failures against later Pi idle events. */
+  runtimeFailureTerminal: boolean;
   sessionFile: string;
   cwd: string;
   title: string;
@@ -219,15 +217,6 @@ function queueOf(session: AgentSession): QueueState {
   };
 }
 
-function runtimePolicy(workspace: ConversationWorkspace): RuntimeWorkspacePolicy {
-  return {
-    workspaceId: workspace.id,
-    cwd: workspace.path,
-    sessionDirectory: workspace.sessionDirectory ?? null,
-    securityProfile: workspace.securityProfile ?? "unrestricted",
-  };
-}
-
 function isBusy(record: ConversationRecord): boolean {
   return (
     record.status === "streaming" ||
@@ -287,6 +276,7 @@ export class ConversationRegistry {
     ConversationRecord,
     () => void
   >();
+  readonly #fatalUnsubscribes = new WeakMap<ConversationRecord, () => void>();
   readonly #normalizers = new WeakMap<ConversationRecord, PiEventNormalizer>();
   #capacityReservations = 0;
   #capacityTail = Promise.resolve();
@@ -365,17 +355,19 @@ export class ConversationRegistry {
 
   async create(workspace: ConversationWorkspace): Promise<ConversationRecord> {
     this.#assertAcceptingWork();
-    const ownership = this.#normalizeWorkspace(workspace);
+    const ownership = this.#normalizePolicy(workspace);
     const releaseCapacity = await this.#reserveCapacity();
     let runtime: PiConversationRuntimePort | undefined;
     try {
-      runtime = await this.#runtimeFactory.createPersistent(runtimePolicy(ownership));
+      runtime = await this.#runtimeFactory.createPersistent(ownership);
       this.#assertAcceptingWork();
       const record = await this.#register(runtime, ownership, "create");
       await this.#refreshHistory(record.workspaceId);
       return record;
     } catch (error) {
-      await runtime?.dispose().catch(() => undefined);
+      if (runtime !== undefined) {
+        await this.#disposeRuntime(runtime).catch(() => undefined);
+      }
       throw error;
     } finally {
       releaseCapacity();
@@ -387,7 +379,7 @@ export class ConversationRegistry {
     sessionFile: string,
   ): Promise<ConversationRecord> {
     this.#assertAcceptingWork();
-    const ownership = this.#normalizeWorkspace(workspace);
+    const ownership = this.#normalizePolicy(workspace);
     let canonical: string;
     try {
       canonical = await canonicalFile(sessionFile);
@@ -396,7 +388,7 @@ export class ConversationRegistry {
         error instanceof AppError &&
         error.code === ERROR_CODES.SESSION_FILE_MISSING
       ) {
-        await this.#refreshHistory(ownership.id);
+        await this.#refreshHistory(ownership.workspaceId);
       }
       throw error;
     }
@@ -433,7 +425,7 @@ export class ConversationRegistry {
         error instanceof AppError &&
         error.code === ERROR_CODES.SESSION_FILE_MISSING
       ) {
-        await this.#refreshHistory(ownership.id);
+        await this.#refreshHistory(ownership.workspaceId);
       }
       throw error;
     } finally {
@@ -796,9 +788,14 @@ export class ConversationRegistry {
   async fork(
     conversationId: string,
     entryId: string,
+    policy: ConversationWorkspace,
   ): Promise<ForkConversationResult> {
+    const forkPolicy = this.#normalizePolicy(policy);
+    const ownedSource = this.#required(conversationId);
+    this.#assertWorkspaceOwner(ownedSource, forkPolicy);
     const reservation = await this.reserveFork(conversationId, entryId);
     const source = this.#required(reservation.sourceConversationId);
+    this.#assertWorkspaceOwner(source, forkPolicy);
     let temporary: PiConversationRuntimePort | undefined;
     let registered: ConversationRecord | undefined;
     let promoted = false;
@@ -806,17 +803,13 @@ export class ConversationRegistry {
 
     try {
       temporary = await this.#runtimeFactory.openPersistent(
-        {
-          workspaceId: source.workspaceId,
-          cwd: source.workspacePath,
-          sessionDirectory: null,
-          securityProfile: source.securityProfile,
-        },
+        forkPolicy,
         reservation.sourceSessionFile,
       );
       this.#temporaryRuntimes.add(temporary);
       this.#assertAcceptingWork();
       if (
+        temporary.securityProfile !== forkPolicy.securityProfile ||
         path.resolve(temporary.identity.sessionFile) !==
           reservation.sourceSessionFile ||
         path.resolve(temporary.identity.cwd) !== reservation.sourceCwd
@@ -844,11 +837,7 @@ export class ConversationRegistry {
 
       registered = await this.#register(
         temporary,
-        {
-          id: source.workspaceId,
-          path: source.workspacePath,
-          securityProfile: source.securityProfile,
-        },
+        forkPolicy,
         "fork",
         reservation.promote,
       );
@@ -873,7 +862,7 @@ export class ConversationRegistry {
         await this.#disposeRecord(registered, "close").catch(() => undefined);
       }
       if (temporary !== undefined && !temporary.disposed) {
-        await temporary.dispose().catch(() => undefined);
+        await this.#disposeRuntime(temporary).catch(() => undefined);
       }
       await this.#cleanupFailedForkFile(
         failedForkFile,
@@ -946,7 +935,7 @@ export class ConversationRegistry {
         this.#disposeRecord(record, "dispose")
       );
       for (const runtime of this.#temporaryRuntimes) {
-        disposals.push(runtime.dispose());
+        disposals.push(this.#disposeRuntime(runtime));
       }
       this.#temporaryRuntimes.clear();
       // Runtime/replacement subscriptions were detached synchronously by
@@ -969,11 +958,13 @@ export class ConversationRegistry {
     const releaseCapacity = await this.#reserveCapacity();
     let runtime: PiConversationRuntimePort | undefined;
     try {
-      runtime = await this.#runtimeFactory.openPersistent(runtimePolicy(workspace), canonical);
+      runtime = await this.#runtimeFactory.openPersistent(workspace, canonical);
       this.#assertAcceptingWork();
       return await this.#register(runtime, workspace, "open");
     } catch (error) {
-      await runtime?.dispose().catch(() => undefined);
+      if (runtime !== undefined) {
+        await this.#disposeRuntime(runtime).catch(() => undefined);
+      }
       throw error;
     } finally {
       releaseCapacity();
@@ -1059,7 +1050,7 @@ export class ConversationRegistry {
     this.#assertAcceptingWork();
     const identity = runtime.identity;
     this.#assertIdentityInWorkspace(identity, workspace);
-    if (runtime.securityProfile !== (workspace.securityProfile ?? "unrestricted")) {
+    if (runtime.securityProfile !== workspace.securityProfile) {
       throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
     }
     const sessionFile = await canonicalFile(identity.sessionFile);
@@ -1067,7 +1058,7 @@ export class ConversationRegistry {
     const duplicate =
       this.#byId.get(identity.sessionId) ?? this.#bySessionFile.get(sessionFile);
     if (duplicate !== undefined) {
-      await runtime.dispose();
+      await this.#disposeRuntime(runtime);
       this.#assertWorkspaceOwner(duplicate, workspace);
       this.#touch(duplicate);
       return duplicate;
@@ -1076,11 +1067,13 @@ export class ConversationRegistry {
     const now = safeNow(this.#now);
     const record: ConversationRecord = {
       id: identity.sessionId,
-      workspaceId: workspace.id,
-      workspacePath: workspace.path,
-      securityProfile: workspace.securityProfile ?? "unrestricted",
+      workspaceId: workspace.workspaceId,
+      workspacePath: workspace.cwd,
+      sessionDirectory: workspace.sessionDirectory,
+      securityProfile: workspace.securityProfile,
+      runtimeFailureTerminal: false,
       sessionFile,
-      cwd: workspace.path,
+      cwd: workspace.cwd,
       title: titleOf(runtime.session),
       runtime,
       session: runtime.session,
@@ -1098,7 +1091,7 @@ export class ConversationRegistry {
     const raced =
       this.#byId.get(record.id) ?? this.#bySessionFile.get(record.sessionFile);
     if (raced !== undefined) {
-      await runtime.dispose();
+      await this.#disposeRuntime(runtime);
       this.#assertWorkspaceOwner(raced, workspace);
       this.#touch(raced);
       return raced;
@@ -1122,12 +1115,18 @@ export class ConversationRegistry {
           this.#replaceIdentity(record, replacement);
         }),
       );
+      this.#fatalUnsubscribes.set(
+        record,
+        runtime.onFatalFailure((error) => this.#handleRuntimeFailure(record, error)),
+      );
     } catch (error) {
       record.unsubscribe();
       this.#normalizers.get(record)?.dispose();
       this.#normalizers.delete(record);
       this.#replacementUnsubscribes.get(record)?.();
       this.#replacementUnsubscribes.delete(record);
+      this.#fatalUnsubscribes.get(record)?.();
+      this.#fatalUnsubscribes.delete(record);
       if (this.#byId.get(record.id) === record) this.#byId.delete(record.id);
       if (this.#bySessionFile.get(record.sessionFile) === record) {
         this.#bySessionFile.delete(record.sessionFile);
@@ -1142,40 +1141,28 @@ export class ConversationRegistry {
     return record;
   }
 
-  #normalizeWorkspace(workspace: ConversationWorkspace): ConversationWorkspace {
-    if (!workspace.id || !workspace.path || !path.isAbsolute(workspace.path)) {
-      throw new AppError(ERROR_CODES.WORKSPACE_UNAVAILABLE);
-    }
-    const workspacePath = path.resolve(workspace.path);
+  #normalizePolicy(policy: ConversationWorkspace): ConversationWorkspace {
     if (
-      workspace.securityProfile !== undefined &&
-      workspace.securityProfile !== "unrestricted" &&
-      workspace.securityProfile !== "workspace-sandboxed"
+      typeof policy.workspaceId !== "string" ||
+      policy.workspaceId.length === 0 ||
+      typeof policy.cwd !== "string" ||
+      !path.isAbsolute(policy.cwd) ||
+      (policy.securityProfile !== "unrestricted" &&
+        policy.securityProfile !== "workspace-sandboxed") ||
+      (policy.sessionDirectory !== null &&
+        (typeof policy.sessionDirectory !== "string" ||
+          !path.isAbsolute(policy.sessionDirectory)))
     ) {
       throw new AppError(ERROR_CODES.WORKSPACE_UNAVAILABLE);
     }
-    if (
-      workspace.sessionDirectory !== undefined &&
-      workspace.sessionDirectory !== null &&
-      !path.isAbsolute(workspace.sessionDirectory)
-    ) {
-      throw new AppError(ERROR_CODES.WORKSPACE_UNAVAILABLE);
-    }
-    return {
-      id: workspace.id,
-      path: workspacePath,
-      ...(workspace.securityProfile === undefined
-        ? {}
-        : { securityProfile: workspace.securityProfile }),
-      ...(workspace.sessionDirectory === undefined
-        ? {}
-        : {
-            sessionDirectory:
-              workspace.sessionDirectory === null
-                ? null
-                : path.resolve(workspace.sessionDirectory),
-          }),
-    };
+    return Object.freeze({
+      workspaceId: policy.workspaceId,
+      cwd: path.resolve(policy.cwd),
+      sessionDirectory: policy.sessionDirectory === null
+        ? null
+        : path.resolve(policy.sessionDirectory),
+      securityProfile: policy.securityProfile,
+    });
   }
 
   #assertWorkspaceOwner(
@@ -1183,10 +1170,10 @@ export class ConversationRegistry {
     workspace: ConversationWorkspace,
   ): void {
     if (
-      record.workspaceId !== workspace.id ||
-      record.workspacePath !== workspace.path ||
-      (workspace.securityProfile !== undefined &&
-        record.securityProfile !== workspace.securityProfile)
+      record.workspaceId !== workspace.workspaceId ||
+      record.workspacePath !== workspace.cwd ||
+      record.sessionDirectory !== workspace.sessionDirectory ||
+      record.securityProfile !== workspace.securityProfile
     ) {
       throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
     }
@@ -1196,7 +1183,7 @@ export class ConversationRegistry {
     identity: PiRuntimeIdentity,
     workspace: ConversationWorkspace,
   ): void {
-    if (path.resolve(identity.cwd) !== workspace.path) {
+    if (path.resolve(identity.cwd) !== workspace.cwd) {
       throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
     }
   }
@@ -1213,6 +1200,13 @@ export class ConversationRegistry {
       throw new AppError(ERROR_CODES.CONVERSATION_NOT_FOUND);
     }
     return record;
+  }
+
+  async #disposeRuntime(runtime: PiConversationRuntimePort): Promise<void> {
+    await runtime.dispose();
+    if (!runtime.teardownComplete) {
+      throw new AppError(ERROR_CODES.INTERNAL_ERROR);
+    }
   }
 
   #forkFileAfterReplacement(
@@ -1305,6 +1299,7 @@ export class ConversationRegistry {
     }
 
     if (!exists && record.durable) {
+      record.runtimeFailureTerminal = true;
       if (record.status !== "error") {
         record.status = "error";
         record.revision = nextRevision(record.revision);
@@ -1341,9 +1336,11 @@ export class ConversationRegistry {
       this.#normalizers.delete(record);
       this.#replacementUnsubscribes.get(record)?.();
       this.#replacementUnsubscribes.delete(record);
+      this.#fatalUnsubscribes.get(record)?.();
+      this.#fatalUnsubscribes.delete(record);
 
       try {
-        await record.runtime.dispose();
+        await this.#disposeRuntime(record.runtime);
       } catch (error) {
         disposalError = error;
       } finally {
@@ -1377,8 +1374,10 @@ export class ConversationRegistry {
   ): void {
     const current = record.runtime.identity;
     this.#assertIdentityInWorkspace(current, {
-      id: record.workspaceId,
-      path: record.workspacePath,
+      workspaceId: record.workspaceId,
+      cwd: record.workspacePath,
+      sessionDirectory: record.sessionDirectory,
+      securityProfile: record.securityProfile,
     });
     const sessionFile = path.resolve(current.sessionFile);
     const idOwner = this.#byId.get(current.sessionId);
@@ -1432,6 +1431,8 @@ export class ConversationRegistry {
     }
 
     if (event.type === "conversation.status") {
+      if (record.runtimeFailureTerminal && event.payload.status !== "error") return;
+      if (event.payload.status === "error") record.runtimeFailureTerminal = true;
       if (record.status === event.payload.status) return;
       record.status = event.payload.status;
     }
@@ -1483,7 +1484,9 @@ export class ConversationRegistry {
 
   #handleRuntimeFailure(record: ConversationRecord, error: unknown): void {
     this.#onListenerError(error);
-    if (record.status === "error" || this.#byId.get(record.id) !== record) return;
+    if (this.#byId.get(record.id) !== record) return;
+    record.runtimeFailureTerminal = true;
+    if (record.status === "error") return;
     this.#emitConversationEvent(record, {
       type: "conversation.status",
       payload: { status: "error" },

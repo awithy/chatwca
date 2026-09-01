@@ -54,7 +54,19 @@ interface RuntimeServices {
 }
 
 function historyWorkspace(cwd: string) {
-  return { id: cwd, path: cwd } as const;
+  return {
+    id: cwd,
+    path: cwd,
+    workspaceId: cwd,
+    cwd,
+    sessionStorage: "pi-default",
+    sessionDirectory: null,
+    securityProfile: "unrestricted",
+    effectiveSecurityProfile: "unrestricted",
+    available: true,
+    usable: true,
+    policyIssue: null,
+  } as const;
 }
 
 function fixedWorkspaceRepository(cwd: string): ProtocolWorkspaceRepository {
@@ -70,6 +82,15 @@ function fixedWorkspaceRepository(cwd: string): ProtocolWorkspaceRepository {
     requireAvailable: (workspaceId) => {
       if (workspaceId !== workspace.id) throw new Error("Unknown test workspace");
       return workspace;
+    },
+    requireUsable: (workspaceId) => {
+      if (workspaceId !== workspace.id) throw new Error("Unknown test workspace");
+      return {
+        workspaceId: workspace.id,
+        cwd: workspace.path,
+        sessionDirectory: null,
+        securityProfile: "unrestricted",
+      };
     },
     create: () => { throw new Error("Unexpected workspace create"); },
     update: () => { throw new Error("Unexpected workspace update"); },

@@ -37,6 +37,7 @@ const state: ConversationState = {
   contextUsage: null,
   messages: [],
   queue: { steering: [], followUp: [] },
+  securityProfile: "unrestricted",
 };
 
 async function listen(server: ChatWcaServer): Promise<number> {
@@ -131,7 +132,17 @@ describe("server graceful shutdown", () => {
       history,
       workspaces: {
         list: () => [],
-        requireAvailable: (workspaceId) => ({ id: workspaceId, path: "/tmp" }),
+        requireAvailable: (workspaceId) => ({
+          id: workspaceId,
+          path: "/tmp",
+          sessionDirectory: null,
+        }),
+        requireUsable: (workspaceId) => ({
+          workspaceId,
+          cwd: "/tmp",
+          sessionDirectory: null,
+          securityProfile: "unrestricted",
+        }),
         create: () => { throw new Error("Unexpected workspace create"); },
         update: () => { throw new Error("Unexpected workspace update"); },
         delete: () => { throw new Error("Unexpected workspace delete"); },

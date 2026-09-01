@@ -23,6 +23,7 @@ import type {
   PiForkResult,
   PiModelCapability,
   PiRuntimeFactoryPort,
+  PiRuntimeFatalFailureListener,
   PiRuntimeIdentity,
   PiRuntimeReplacementListener,
 } from "../../src/server/pi-runtime.js";
@@ -97,8 +98,10 @@ class FakeRuntime implements PiConversationRuntimePort {
   readonly securityProfile: "unrestricted" | "workspace-sandboxed";
   readonly supportsImages = false;
   disposed = false;
+  teardownComplete = false;
   readonly events = new Set<AgentSessionEventListener>();
   readonly replacements = new Set<PiRuntimeReplacementListener>();
+  readonly fatalFailures = new Set<PiRuntimeFatalFailureListener>();
   readonly promptSpy = vi.fn(
     async (_text: string, options?: PromptOptions) => {
       options?.preflightResult?.(true);
@@ -114,6 +117,8 @@ class FakeRuntime implements PiConversationRuntimePort {
     this.disposed = true;
     this.events.clear();
     this.replacements.clear();
+    this.fatalFailures.clear();
+    this.teardownComplete = true;
   });
 
   constructor(
@@ -135,6 +140,11 @@ class FakeRuntime implements PiConversationRuntimePort {
     return () => this.replacements.delete(listener);
   }
 
+  onFatalFailure(listener: PiRuntimeFatalFailureListener): () => void {
+    this.fatalFailures.add(listener);
+    return () => this.fatalFailures.delete(listener);
+  }
+
   prompt(text: string, options?: PromptOptions): Promise<void> {
     return this.promptSpy(text, options);
   }
@@ -153,6 +163,10 @@ class FakeRuntime implements PiConversationRuntimePort {
 
   emit(event: AgentSessionEvent): void {
     for (const listener of this.events) listener(event);
+  }
+
+  emitFatal(error = new AppError(ERROR_CODES.SANDBOX_WORKER_FAILED)): void {
+    for (const listener of this.fatalFailures) listener(error);
   }
 
   replace(identity: PiRuntimeIdentity): void {
@@ -181,7 +195,12 @@ function identity(id: string, sessionFile: string, cwd: string): PiRuntimeIdenti
 }
 
 function ownership(cwd: string, id = cwd) {
-  return { id, path: cwd } as const;
+  return {
+    workspaceId: id,
+    cwd,
+    sessionDirectory: null,
+    securityProfile: "unrestricted",
+  } as const;
 }
 
 describe("ConversationRegistry", () => {
@@ -622,6 +641,37 @@ describe("ConversationRegistry", () => {
     expect(record).toMatchObject({ status: "idle", revision: 2 });
   });
 
+  it("keeps a fatal runtime failure terminal after later Pi idle events", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessionFile = path.join(root, "sessions", "fatal.jsonl");
+    await Promise.all([mkdir(cwd), mkdir(path.dirname(sessionFile))]);
+
+    const runtime = new FakeRuntime(identity("fatal", sessionFile, cwd), {
+      securityProfile: "workspace-sandboxed",
+    });
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(runtime);
+    const onListenerError = vi.fn();
+    const registry = new ConversationRegistry({ runtimeFactory: factory, onListenerError });
+    const record = await registry.create({
+      ...ownership(cwd),
+      securityProfile: "workspace-sandboxed",
+    });
+    record.status = "streaming";
+
+    const failure = new AppError(ERROR_CODES.SANDBOX_WORKER_FAILED);
+    runtime.emitFatal(failure);
+    runtime.emit({ type: "agent_end", messages: [], willRetry: false });
+
+    expect(record.status).toBe("error");
+    expect(record.runtimeFailureTerminal).toBe(true);
+    expect(onListenerError).toHaveBeenCalledWith(failure);
+    await expect(registry.prompt(record.id, "must not run", [])).rejects.toMatchObject({
+      code: ERROR_CODES.CONVERSATION_BUSY,
+    });
+  });
+
   it("canonicalizes aliases and shares one in-flight open", async () => {
     const root = await temporaryRoot();
     const cwd = path.join(root, "workspace");
@@ -700,6 +750,7 @@ describe("ConversationRegistry", () => {
       securityProfile: "workspace-sandboxed",
     })).rejects.toMatchObject({ code: ERROR_CODES.SESSION_UNAVAILABLE });
     expect(runtime.disposeSpy).toHaveBeenCalledOnce();
+    expect(runtime.teardownComplete).toBe(true);
     expect(registry.size).toBe(0);
   });
 
@@ -827,8 +878,10 @@ describe("ConversationRegistry", () => {
     record.status = "idle";
     await registry.close("close");
     expect(runtime.disposeSpy).toHaveBeenCalledOnce();
+    expect(runtime.teardownComplete).toBe(true);
     expect(runtime.events.size).toBe(0);
     expect(runtime.replacements.size).toBe(0);
+    expect(runtime.fatalFailures.size).toBe(0);
     expect(registry.size).toBe(0);
     expect(registry.get("close")).toBeUndefined();
     expect(registry.getBySessionFile(sessionFile)).toBeUndefined();
@@ -888,7 +941,7 @@ describe("ConversationRegistry", () => {
       () => registry.create(ownership(cwd)),
       () => registry.open(ownership(cwd), sessionFile),
       () => registry.prompt(record.id, "new work", []),
-      () => registry.fork(record.id, "entry-1"),
+      () => registry.fork(record.id, "entry-1", ownership(cwd)),
     ]) {
       await expect(operation()).rejects.toMatchObject({
         code: ERROR_CODES.SHUTTING_DOWN,
@@ -1030,6 +1083,32 @@ describe("ConversationRegistry", () => {
     ).rejects.toMatchObject({ code: ERROR_CODES.FORK_SOURCE_BUSY });
   });
 
+  it("rejects a freshly resolved fork policy that differs from immutable source ownership", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessions = path.join(root, "sessions");
+    const sourceFile = path.join(sessions, "source.jsonl");
+    await Promise.all([mkdir(cwd), mkdir(sessions)]);
+    await writeFile(sourceFile, "source");
+    const branch = [{
+      type: "message",
+      id: "a1b2c3d4",
+      message: { role: "user", content: "fork" },
+    }];
+    const runtime = new FakeRuntime(identity("source", sourceFile, cwd), { branch });
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(runtime);
+    const registry = new ConversationRegistry({ runtimeFactory: factory, maxLiveConversations: 2 });
+    const source = await registry.create(ownership(cwd, "source-workspace"));
+
+    await expect(registry.fork(source.id, "a1b2c3d4", {
+      ...ownership(cwd, "source-workspace"),
+      securityProfile: "workspace-sandboxed",
+    })).rejects.toMatchObject({ code: ERROR_CODES.SESSION_UNAVAILABLE });
+    expect(factory.openPersistent).not.toHaveBeenCalled();
+    expect(runtime.disposed).toBe(false);
+  });
+
   it("promotes a successful temporary fork without replacing its source", async () => {
     const root = await temporaryRoot();
     const cwd = path.join(root, "workspace");
@@ -1087,7 +1166,11 @@ describe("ConversationRegistry", () => {
     const sourceSession = source.session;
     const sourceListenerCount = sourceRuntime.events.size;
 
-    const result = await registry.fork(source.id, "a1b2c3d4");
+    const result = await registry.fork(
+      source.id,
+      "a1b2c3d4",
+      ownership(cwd, "fork-workspace"),
+    );
 
     expect(factory.openPersistent).toHaveBeenCalledWith(
       expect.objectContaining({ cwd, securityProfile: "unrestricted" }),
@@ -1161,7 +1244,7 @@ describe("ConversationRegistry", () => {
       maxLiveConversations: 2,
     });
     const source = await registry.create(ownership(cwd));
-    const forking = registry.fork(source.id, "a1b2c3d4");
+    const forking = registry.fork(source.id, "a1b2c3d4", ownership(cwd));
     await vi.waitFor(() => expect(temporary.forkSpy).toHaveBeenCalledOnce());
 
     registry.beginShutdown();
@@ -1213,7 +1296,9 @@ describe("ConversationRegistry", () => {
     });
     const source = await registry.create(ownership(cwd));
 
-    await expect(registry.fork(source.id, "a1b2c3d4")).rejects.toMatchObject({
+    await expect(
+      registry.fork(source.id, "a1b2c3d4", ownership(cwd)),
+    ).rejects.toMatchObject({
       code: ERROR_CODES.PI_RUNTIME_REPLACE_FAILED,
     });
     expect(temporary.disposeSpy).toHaveBeenCalledOnce();

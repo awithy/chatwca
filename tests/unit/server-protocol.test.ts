@@ -101,7 +101,7 @@ function services() {
       workspaceId: workspace.id,
       cwd: workspace.path,
       sessionDirectory: workspace.sessionDirectory,
-      securityProfile: "unrestricted",
+      securityProfile: "unrestricted" as const,
     })),
     create: vi.fn((input) => {
       authoritative = [{ ...workspace, name: input.name, path: input.path }];
@@ -175,8 +175,8 @@ describe("server WebSocket protocol", () => {
       affectedWorkspaceId: workspace.id,
     });
     expect(calls.create).toHaveBeenCalledWith({
-      id: workspace.id,
-      path: workspace.path,
+      workspaceId: workspace.id,
+      cwd: workspace.path,
       sessionDirectory: null,
       securityProfile: "unrestricted",
     });
@@ -189,8 +189,8 @@ describe("server WebSocket protocol", () => {
     }), registry, history, workspaces);
     expect(history.resolve).toHaveBeenCalledWith(workspace, state.id);
     expect(calls.open).toHaveBeenCalledWith({
-      id: workspace.id,
-      path: workspace.path,
+      workspaceId: workspace.id,
+      cwd: workspace.path,
       sessionDirectory: null,
       securityProfile: "unrestricted",
     }, state.sessionFile);
@@ -327,6 +327,13 @@ describe("server WebSocket protocol", () => {
       },
       affectedWorkspaceId: workspace.id,
     });
+    expect(workspaces.requireUsable).toHaveBeenCalledWith(workspace.id);
+    expect(calls.fork).toHaveBeenCalledWith(state.id, "entry-1", {
+      workspaceId: workspace.id,
+      cwd: workspace.path,
+      sessionDirectory: null,
+      securityProfile: "unrestricted",
+    });
   });
 
   it("rewinds by creating a fork before closing and deleting its source", async () => {
@@ -366,7 +373,12 @@ describe("server WebSocket protocol", () => {
 
     expect(workspaces.requireAvailable).toHaveBeenCalledWith(workspace.id);
     expect(history.resolve).toHaveBeenCalledWith(workspace, state.id);
-    expect(calls.fork).toHaveBeenCalledWith(state.id, "entry-1");
+    expect(calls.fork).toHaveBeenCalledWith(state.id, "entry-1", {
+      workspaceId: workspace.id,
+      cwd: workspace.path,
+      sessionDirectory: null,
+      securityProfile: "unrestricted",
+    });
     expect(calls.close).toHaveBeenCalledWith(state.id);
     expect(calls.delete).toHaveBeenCalledWith(workspace, state.id);
     expect(calls.fork.mock.invocationCallOrder[0]).toBeLessThan(

@@ -30,15 +30,19 @@ import type {
 export const DEFAULT_MAX_INBOUND_MESSAGE_BYTES = 40 * 1024 * 1024;
 
 export interface ProtocolRegistry {
-  create(workspace: SessionHistoryWorkspace): Promise<{ readonly id: string }>;
+  create(policy: RuntimeWorkspacePolicy): Promise<{ readonly id: string }>;
   open(
-    workspace: SessionHistoryWorkspace,
+    policy: RuntimeWorkspacePolicy,
     sessionFile: string,
   ): Promise<{ readonly id: string }>;
   getState(conversationId: string): Promise<ConversationState>;
   rename(conversationId: string, title: string): Promise<ConversationState>;
   close(conversationId: string): Promise<void>;
-  fork(conversationId: string, entryId: string): Promise<{
+  fork(
+    conversationId: string,
+    entryId: string,
+    policy: RuntimeWorkspacePolicy,
+  ): Promise<{
     readonly conversation: ConversationState;
     readonly editorText: string;
   }>;
@@ -149,17 +153,6 @@ export function decodeClientCommand(
   return value;
 }
 
-function runtimeWorkspace(
-  policy: RuntimeWorkspacePolicy,
-): SessionHistoryWorkspace & { readonly securityProfile: WorkspaceSummary["securityProfile"] } {
-  return {
-    id: policy.workspaceId,
-    path: policy.cwd,
-    sessionDirectory: policy.sessionDirectory,
-    securityProfile: policy.securityProfile,
-  };
-}
-
 export async function dispatchClientCommand(
   command: ClientCommand,
   registry: ProtocolRegistry,
@@ -238,8 +231,8 @@ export async function dispatchClientCommand(
       };
     }
     case "conversation.create": {
-      const workspace = runtimeWorkspace(await workspaces.requireUsable(command.workspaceId));
-      const record = await registry.create(workspace);
+      const policy = await workspaces.requireUsable(command.workspaceId);
+      const record = await registry.create(policy);
       return {
         response: {
           type: "state",
@@ -252,8 +245,8 @@ export async function dispatchClientCommand(
     case "conversation.open": {
       const availableWorkspace = workspaces.requireAvailable(command.workspaceId);
       const listed = await history.resolve(availableWorkspace, command.conversationId);
-      const workspace = runtimeWorkspace(await workspaces.requireUsable(command.workspaceId));
-      const record = await registry.open(workspace, listed.summary.sessionFile);
+      const policy = await workspaces.requireUsable(command.workspaceId);
+      const record = await registry.open(policy, listed.summary.sessionFile);
       return {
         response: {
           type: "state",
@@ -319,8 +312,8 @@ export async function dispatchClientCommand(
       return { response: { type: "ack", requestId: command.requestId, command: command.type } };
     case "conversation.fork": {
       const source = await registry.getState(command.conversationId);
-      await workspaces.requireUsable(source.workspaceId);
-      const fork = await registry.fork(command.conversationId, command.entryId);
+      const policy = await workspaces.requireUsable(source.workspaceId);
+      const fork = await registry.fork(command.conversationId, command.entryId, policy);
       return {
         response: {
           type: "state",
@@ -338,8 +331,8 @@ export async function dispatchClientCommand(
       const source = await registry.getState(command.conversationId);
       const workspace = workspaces.requireAvailable(source.workspaceId);
       await history.resolve(workspace, source.id);
-      await workspaces.requireUsable(source.workspaceId);
-      const fork = await registry.fork(command.conversationId, command.entryId);
+      const policy = await workspaces.requireUsable(source.workspaceId);
+      const fork = await registry.fork(command.conversationId, command.entryId, policy);
       await registry.close(source.id);
       const conversations = await history.delete(workspace, source.id);
       return {

@@ -6,6 +6,7 @@ playwright-report/
 test-results/
 .playwright-cli/
 *.tsbuildinfo
+native/network-helper/target/
 .env
 .env.*
 !.env.example

@@ -132,6 +132,10 @@ class TrackingRuntime implements PiConversationRuntimePort {
     return this.inner.session;
   }
 
+  get securityProfile() {
+    return this.inner.securityProfile;
+  }
+
   get identity(): PiRuntimeIdentity {
     return this.inner.identity;
   }
@@ -205,22 +209,29 @@ class TrackingFactory implements PiRuntimeFactoryPort {
     return this.inner.modelRuntime;
   }
 
+  get strictModelRuntime(): ModelRuntime {
+    return this.inner.strictModelRuntime;
+  }
+
   listAvailableModels(): Promise<readonly PiModelCapability[]> {
     return this.inner.listAvailableModels();
   }
 
-  async createPersistent(cwd: string): Promise<TrackingRuntime> {
+  async createPersistent(policy: Parameters<PiRuntimeFactory["createPersistent"]>[0]): Promise<TrackingRuntime> {
     const runtime = new TrackingRuntime(
-      await this.inner.createPersistent(cwd),
+      await this.inner.createPersistent(policy),
       false,
     );
     this.created.push(runtime);
     return runtime;
   }
 
-  async openPersistent(sessionFile: string): Promise<TrackingRuntime> {
+  async openPersistent(
+    policy: Parameters<PiRuntimeFactory["openPersistent"]>[0],
+    sessionFile: string,
+  ): Promise<TrackingRuntime> {
     const runtime = new TrackingRuntime(
-      await this.inner.openPersistent(sessionFile),
+      await this.inner.openPersistent(policy, sessionFile),
       true,
     );
     this.opened.push(runtime);

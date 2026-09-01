@@ -48,6 +48,7 @@ interface FakeSessionOptions {
   readonly prompt?: string;
   readonly branch?: readonly unknown[];
   readonly sdkModel?: NonNullable<AgentSession["model"]>;
+  readonly securityProfile?: "unrestricted" | "workspace-sandboxed";
 }
 
 function fakeSession(
@@ -93,6 +94,7 @@ class FakeRuntime implements PiConversationRuntimePort {
   identity: PiRuntimeIdentity;
   session: AgentSession;
   readonly model: PiModelCapability | undefined = undefined;
+  readonly securityProfile: "unrestricted" | "workspace-sandboxed";
   readonly supportsImages = false;
   disposed = false;
   readonly events = new Set<AgentSessionEventListener>();
@@ -119,6 +121,7 @@ class FakeRuntime implements PiConversationRuntimePort {
     readonly sessionOptions: FakeSessionOptions = {},
   ) {
     this.identity = identity;
+    this.securityProfile = sessionOptions.securityProfile ?? "unrestricted";
     this.session = fakeSession(identity, sessionOptions);
   }
 
@@ -164,8 +167,9 @@ class FakeRuntime implements PiConversationRuntimePort {
 
 class FakeFactory implements PiRuntimeFactoryPort {
   readonly modelRuntime = null as unknown as ModelRuntime;
-  readonly createPersistent = vi.fn<(cwd: string) => Promise<PiConversationRuntimePort>>();
-  readonly openPersistent = vi.fn<(file: string) => Promise<PiConversationRuntimePort>>();
+  readonly strictModelRuntime = null as unknown as ModelRuntime;
+  readonly createPersistent = vi.fn<PiRuntimeFactoryPort["createPersistent"]>();
+  readonly openPersistent = vi.fn<PiRuntimeFactoryPort["openPersistent"]>();
 
   listAvailableModels(): Promise<readonly PiModelCapability[]> {
     return Promise.resolve([]);
@@ -475,7 +479,7 @@ describe("ConversationRegistry", () => {
     await Promise.all([mkdir(cwd), mkdir(path.dirname(sessionFile))]);
     const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     const reader = { readFile: vi.fn(async () => ({ data: bytes, mimeType: "image/png" as const })) };
-    const runtime = new FakeRuntime(identity("sandbox-image", sessionFile, cwd));
+    const runtime = new FakeRuntime(identity("sandbox-image", sessionFile, cwd), { securityProfile: "workspace-sandboxed" });
     Object.defineProperty(runtime, "sandboxFileReader", { value: reader });
     const factory = new FakeFactory();
     factory.createPersistent.mockResolvedValue(runtime);
@@ -489,7 +493,7 @@ describe("ConversationRegistry", () => {
       path: "../../parent-secret.png", maxBytes: 8 * 1024 * 1024, detectMime: true,
     });
 
-    const noWorker = new FakeRuntime(identity("sandbox-no-worker", path.join(root, "sessions", "none.jsonl"), cwd));
+    const noWorker = new FakeRuntime(identity("sandbox-no-worker", path.join(root, "sessions", "none.jsonl"), cwd), { securityProfile: "workspace-sandboxed" });
     factory.createPersistent.mockResolvedValue(noWorker);
     await registry.create({ ...ownership(cwd, "other"), securityProfile: "workspace-sandboxed" });
     expect(await registry.getWorkspaceImage("sandbox-no-worker", "generated.png")).toBeUndefined();
@@ -500,7 +504,7 @@ describe("ConversationRegistry", () => {
     const cwd = path.join(root, "workspace");
     const sessionFile = path.join(root, "sessions", "bad-sandbox-image.jsonl");
     await Promise.all([mkdir(cwd), mkdir(path.dirname(sessionFile))]);
-    const runtime = new FakeRuntime(identity("bad-sandbox-image", sessionFile, cwd));
+    const runtime = new FakeRuntime(identity("bad-sandbox-image", sessionFile, cwd), { securityProfile: "workspace-sandboxed" });
     Object.defineProperty(runtime, "sandboxFileReader", {
       value: { readFile: vi.fn(async () => ({ data: Buffer.from("not png"), mimeType: "image/png" })) },
     });
@@ -646,7 +650,10 @@ describe("ConversationRegistry", () => {
     const [firstRecord, secondRecord] = await Promise.all([first, second]);
     expect(firstRecord).toBe(secondRecord);
     expect(firstRecord.sessionFile).toBe(realFile);
-    expect(factory.openPersistent).toHaveBeenCalledWith(realFile);
+    expect(factory.openPersistent).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd, securityProfile: "unrestricted" }),
+      realFile,
+    );
 
     await expect(registry.open(ownership(cwd), alias)).resolves.toBe(firstRecord);
     expect(factory.openPersistent).toHaveBeenCalledTimes(1);
@@ -678,6 +685,24 @@ describe("ConversationRegistry", () => {
     expect(runtime.disposed).toBe(false);
   });
 
+  it("fails closed when a factory returns a runtime for the wrong security profile", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessionFile = path.join(root, "sessions", "wrong-profile.jsonl");
+    await Promise.all([mkdir(cwd), mkdir(path.dirname(sessionFile))]);
+    const runtime = new FakeRuntime(identity("wrong-profile", sessionFile, cwd));
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(runtime);
+    const registry = new ConversationRegistry({ runtimeFactory: factory });
+
+    await expect(registry.create({
+      ...ownership(cwd, "workspace-owner"),
+      securityProfile: "workspace-sandboxed",
+    })).rejects.toMatchObject({ code: ERROR_CODES.SESSION_UNAVAILABLE });
+    expect(runtime.disposeSpy).toHaveBeenCalledOnce();
+    expect(registry.size).toBe(0);
+  });
+
   it("rejects a factory runtime whose CWD does not match authoritative workspace ownership", async () => {
     const root = await temporaryRoot();
     const cwd = path.join(root, "workspace");
@@ -693,7 +718,9 @@ describe("ConversationRegistry", () => {
     await expect(
       registry.create(ownership(cwd, "workspace-owner")),
     ).rejects.toMatchObject({ code: ERROR_CODES.SESSION_UNAVAILABLE });
-    expect(factory.createPersistent).toHaveBeenCalledWith(cwd);
+    expect(factory.createPersistent).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd, securityProfile: "unrestricted" }),
+    );
     expect(runtime.disposeSpy).toHaveBeenCalledOnce();
     expect(registry.size).toBe(0);
     expect(registry.hasLiveWorkspace("workspace-owner")).toBe(false);
@@ -735,6 +762,7 @@ describe("ConversationRegistry", () => {
 
     const runtime = new FakeRuntime(identity("state", sessionFile, cwd), {
       prompt: "Snapshot prompt",
+      securityProfile: "workspace-sandboxed",
     });
     const factory = new FakeFactory();
     factory.createPersistent.mockResolvedValue(runtime);
@@ -1061,7 +1089,10 @@ describe("ConversationRegistry", () => {
 
     const result = await registry.fork(source.id, "a1b2c3d4");
 
-    expect(factory.openPersistent).toHaveBeenCalledWith(sourceFile);
+    expect(factory.openPersistent).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd, securityProfile: "unrestricted" }),
+      sourceFile,
+    );
     expect(temporary.forkSpy).toHaveBeenCalledWith("a1b2c3d4", {
       inheritModel: sourceModel,
     });

@@ -23,6 +23,10 @@ import {
 
 const temporaryRoots: string[] = [];
 
+function policy(cwd: string, sessionDirectory: string | null = null) {
+  return { workspaceId: cwd, cwd, sessionDirectory, securityProfile: "unrestricted" as const };
+}
+
 afterEach(async () => {
   await Promise.all(
     temporaryRoots.splice(0).map((root) =>
@@ -46,10 +50,18 @@ async function isolatedFactory() {
     modelsStorePath: path.join(root, "models-store.json"),
   });
   modelRuntime.registerNativeProvider(faux.provider);
+  const strictFaux = fauxProvider({ provider: "strict-faux", tokensPerSecond: 10_000 });
+  const strictModelRuntime = await ModelRuntime.create({
+    credentials: new InMemoryCredentialStore(),
+    modelsPath: null,
+    modelsStorePath: path.join(root, "strict-models-store.json"),
+  });
+  strictModelRuntime.registerNativeProvider(strictFaux.provider);
 
   const serviceCwds: string[] = [];
   const factory = await PiRuntimeFactory.create({
     modelRuntime,
+    strictModelRuntime,
     agentDir,
     sessionDir,
     serviceOptions: (runtimeCwd) => {
@@ -63,7 +75,7 @@ async function isolatedFactory() {
     sessionOptions: () => ({ model: faux.getModel(), noTools: "all" }),
   });
 
-  return { cwd, factory, faux, serviceCwds };
+  return { cwd, factory, faux, strictFaux, serviceCwds };
 }
 
 describe("PiRuntimeFactory", () => {
@@ -74,7 +86,7 @@ describe("PiRuntimeFactory", () => {
     let runtime: PiConversationRuntime | undefined;
     let reopened: PiConversationRuntime | undefined;
     try {
-      runtime = await factory.createPersistent(cwd);
+      runtime = await factory.createPersistent(policy(cwd));
       const initialIdentity = runtime.identity;
 
       expect(initialIdentity.cwd).toBe(cwd);
@@ -95,7 +107,7 @@ describe("PiRuntimeFactory", () => {
       await runtime.dispose();
       runtime = undefined;
 
-      reopened = await factory.openPersistent(initialIdentity.sessionFile);
+      reopened = await factory.openPersistent(policy(cwd), initialIdentity.sessionFile);
       expect(reopened.identity).toEqual(initialIdentity);
       expect(
         reopened.session.sessionManager
@@ -108,10 +120,22 @@ describe("PiRuntimeFactory", () => {
     }
   });
 
+  it("selects the isolated model catalog by effective profile", async () => {
+    const { factory } = await isolatedFactory();
+    await expect(factory.listAvailableModels("unrestricted")).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ provider: "faux" })]),
+    );
+    await expect(factory.listAvailableModels("workspace-sandboxed")).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ provider: "strict-faux" })]),
+    );
+    expect((await factory.listAvailableModels("workspace-sandboxed")).some((model) => model.provider === "faux")).toBe(false);
+    expect(factory.modelRuntime).not.toBe(factory.strictModelRuntime);
+  });
+
   it("uses a workspace-local session directory without creating ignore files", async () => {
     const { cwd, factory } = await isolatedFactory();
     const localSessionDirectory = path.join(cwd, ".chatwca", "sessions");
-    const runtime = await factory.createPersistent(cwd, localSessionDirectory);
+    const runtime = await factory.createPersistent(policy(cwd, localSessionDirectory));
 
     try {
       expect(path.dirname(runtime.identity.sessionFile)).toBe(localSessionDirectory);
@@ -152,7 +176,7 @@ describe("PiRuntimeFactory", () => {
       });
 
       await registry.dispose();
-      reopened = await factory.openPersistent(identity.sessionFile);
+      reopened = await factory.openPersistent(policy(cwd), identity.sessionFile);
       const userEntry = reopened.session.sessionManager
         .getBranch()
         .find(
@@ -256,7 +280,7 @@ describe("PiRuntimeFactory", () => {
       fauxAssistantMessage("Fork response"),
     ]);
 
-    const runtime = await factory.createPersistent(cwd);
+    const runtime = await factory.createPersistent(policy(cwd));
     const eventTypes: string[] = [];
     const replacements: PiRuntimeReplacement[] = [];
     const unsubscribe = runtime.subscribe((event) => {

@@ -48,6 +48,7 @@ import type {
   PiRuntimeIdentity,
   PiRuntimeReplacement,
 } from "./pi-runtime.js";
+import type { RuntimeWorkspacePolicy } from "./workspace-repository.js";
 
 const UNTITLED_CONVERSATION = "Untitled conversation";
 
@@ -218,6 +219,15 @@ function queueOf(session: AgentSession): QueueState {
   };
 }
 
+function runtimePolicy(workspace: ConversationWorkspace): RuntimeWorkspacePolicy {
+  return {
+    workspaceId: workspace.id,
+    cwd: workspace.path,
+    sessionDirectory: workspace.sessionDirectory ?? null,
+    securityProfile: workspace.securityProfile ?? "unrestricted",
+  };
+}
+
 function isBusy(record: ConversationRecord): boolean {
   return (
     record.status === "streaming" ||
@@ -359,12 +369,7 @@ export class ConversationRegistry {
     const releaseCapacity = await this.#reserveCapacity();
     let runtime: PiConversationRuntimePort | undefined;
     try {
-      runtime = ownership.sessionDirectory == null
-        ? await this.#runtimeFactory.createPersistent(ownership.path)
-        : await this.#runtimeFactory.createPersistent(
-            ownership.path,
-            ownership.sessionDirectory,
-          );
+      runtime = await this.#runtimeFactory.createPersistent(runtimePolicy(ownership));
       this.#assertAcceptingWork();
       const record = await this.#register(runtime, ownership, "create");
       await this.#refreshHistory(record.workspaceId);
@@ -801,6 +806,12 @@ export class ConversationRegistry {
 
     try {
       temporary = await this.#runtimeFactory.openPersistent(
+        {
+          workspaceId: source.workspaceId,
+          cwd: source.workspacePath,
+          sessionDirectory: null,
+          securityProfile: source.securityProfile,
+        },
         reservation.sourceSessionFile,
       );
       this.#temporaryRuntimes.add(temporary);
@@ -958,7 +969,7 @@ export class ConversationRegistry {
     const releaseCapacity = await this.#reserveCapacity();
     let runtime: PiConversationRuntimePort | undefined;
     try {
-      runtime = await this.#runtimeFactory.openPersistent(canonical);
+      runtime = await this.#runtimeFactory.openPersistent(runtimePolicy(workspace), canonical);
       this.#assertAcceptingWork();
       return await this.#register(runtime, workspace, "open");
     } catch (error) {
@@ -1048,6 +1059,9 @@ export class ConversationRegistry {
     this.#assertAcceptingWork();
     const identity = runtime.identity;
     this.#assertIdentityInWorkspace(identity, workspace);
+    if (runtime.securityProfile !== (workspace.securityProfile ?? "unrestricted")) {
+      throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
+    }
     const sessionFile = await canonicalFile(identity.sessionFile);
     this.#assertAcceptingWork();
     const duplicate =

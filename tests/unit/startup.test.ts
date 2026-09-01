@@ -57,6 +57,7 @@ const validatedHost: ValidatedSandboxHost = {
 function fakeRuntimeFactory(): PiRuntimeFactoryPort {
   return {
     modelRuntime: {} as PiRuntimeFactoryPort["modelRuntime"],
+    strictModelRuntime: {} as PiRuntimeFactoryPort["strictModelRuntime"],
     listAvailableModels: vi.fn(async () => []),
     createPersistent: vi.fn(async () => {
       throw new Error("Unexpected runtime creation during startup");

@@ -21,6 +21,7 @@ const servers: ChatWcaServer[] = [];
 function fakeRuntimeFactory(): PiRuntimeFactoryPort {
   return {
     modelRuntime: {} as PiRuntimeFactoryPort["modelRuntime"],
+    strictModelRuntime: {} as PiRuntimeFactoryPort["strictModelRuntime"],
     listAvailableModels: vi.fn(async () => []),
     createPersistent: vi.fn(async () => {
       throw new Error("Startup workspace test must not create a runtime");

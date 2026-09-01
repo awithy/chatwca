@@ -11,6 +11,7 @@ import {
   type CreateAgentSessionServicesOptions,
   type ModelRuntime,
   type PromptOptions,
+  SettingsManager,
   SessionManager,
   createAgentSessionFromServices,
   createAgentSessionRuntime,
@@ -25,6 +26,19 @@ import {
   toAppError,
 } from "../shared/errors.js";
 import { resolveConversationCwd } from "./cwd.js";
+import type { RuntimeWorkspacePolicy } from "./workspace-repository.js";
+import type {
+  SandboxWorkerArtifact,
+  ValidatedSandboxHost,
+} from "./sandbox/bwrap.js";
+import type { SandboxConfig } from "./sandbox/config.js";
+import {
+  SandboxResourceLoader,
+  createStrictSettingsManager,
+} from "./sandbox/resources.js";
+import { createSandboxTools, SANDBOX_TOOL_NAMES } from "./sandbox/tools.js";
+import { startSandboxWorkerClient } from "./sandbox/worker-client.js";
+import { SandboxController } from "./sandbox/worker-controller.js";
 
 export interface PiModelCapability {
   readonly provider: string;
@@ -84,6 +98,7 @@ export interface SandboxWorkspaceFileReaderPort {
 
 export interface PiConversationRuntimePort {
   readonly session: AgentSession;
+  readonly securityProfile: RuntimeWorkspacePolicy["securityProfile"];
   readonly identity: PiRuntimeIdentity;
   readonly model: PiModelCapability | undefined;
   readonly supportsImages: boolean;
@@ -100,18 +115,29 @@ export interface PiConversationRuntimePort {
 
 export interface PiRuntimeFactoryPort {
   readonly modelRuntime: ModelRuntime;
-  listAvailableModels(): Promise<readonly PiModelCapability[]>;
-  createPersistent(
-    cwd: string,
-    sessionDirectory?: string,
+  readonly strictModelRuntime: ModelRuntime;
+  listAvailableModels(securityProfile?: RuntimeWorkspacePolicy["securityProfile"]): Promise<readonly PiModelCapability[]>;
+  createPersistent(policy: Readonly<RuntimeWorkspacePolicy>): Promise<PiConversationRuntimePort>;
+  openPersistent(
+    policy: Readonly<RuntimeWorkspacePolicy>,
+    sessionFile: string,
   ): Promise<PiConversationRuntimePort>;
-  openPersistent(sessionFile: string): Promise<PiConversationRuntimePort>;
+}
+
+export interface PiSandboxRuntimeOptions {
+  readonly config: Readonly<SandboxConfig>;
+  readonly host: Readonly<ValidatedSandboxHost>;
+  readonly worker: Readonly<SandboxWorkerArtifact>;
+  readonly hiddenPaths: readonly string[];
 }
 
 export interface PiRuntimeFactoryOptions {
-  /** Defaults to the one process-wide ModelRuntime. Primarily injectable for tests. */
+  /** Defaults to the process-wide unrestricted ModelRuntime. Primarily injectable for tests. */
   readonly modelRuntime?: ModelRuntime;
+  /** A distinct runtime for strict sessions. It must never be extension-mutated. */
+  readonly strictModelRuntime?: ModelRuntime;
   readonly agentDir?: string;
+  readonly sandbox?: Readonly<PiSandboxRuntimeOptions>;
   /** Optional Pi session directory override, useful for isolated deployments/tests. */
   readonly sessionDir?: string;
   readonly serviceOptions?: (
@@ -189,14 +215,28 @@ async function resolveSessionFile(sessionFile: string): Promise<string> {
  */
 export class PiConversationRuntime implements PiConversationRuntimePort {
   readonly #runtime: AgentSessionRuntime;
+  readonly #securityProfile: RuntimeWorkspacePolicy["securityProfile"];
+  readonly #sandboxController: SandboxController | undefined;
   readonly #eventListeners = new Set<AgentSessionEventListener>();
   readonly #replacementListeners = new Set<PiRuntimeReplacementListener>();
   #unsubscribeSession: (() => void) | undefined;
   #replacementSource: PiRuntimeIdentity | undefined;
   #disposed = false;
 
-  constructor(runtime: AgentSessionRuntime) {
+  constructor(
+    runtime: AgentSessionRuntime,
+    securityProfile: RuntimeWorkspacePolicy["securityProfile"] = "unrestricted",
+    sandboxController?: SandboxController,
+  ) {
     this.#runtime = runtime;
+    this.#securityProfile = securityProfile;
+    this.#sandboxController = sandboxController;
+    if (sandboxController !== undefined) {
+      Object.defineProperty(this, "sandboxFileReader", {
+        value: sandboxController,
+        enumerable: true,
+      });
+    }
 
     runtime.setBeforeSessionInvalidate(() => {
       this.#detachSession();
@@ -218,6 +258,12 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
   get session(): AgentSession {
     return this.#runtime.session;
   }
+
+  get securityProfile(): RuntimeWorkspacePolicy["securityProfile"] {
+    return this.#securityProfile;
+  }
+
+  declare readonly sandboxFileReader?: SandboxWorkspaceFileReaderPort;
 
   get identity(): PiRuntimeIdentity {
     return identityOf(this.#runtime);
@@ -270,7 +316,11 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
   async abort(): Promise<void> {
     this.#assertUsable();
     try {
-      await this.session.abort();
+      if (this.#sandboxController !== undefined) {
+        await this.#sandboxController.abort();
+      } else {
+        await this.session.abort();
+      }
     } catch (error) {
       throw toAppError(error, { source: "internal" });
     }
@@ -320,7 +370,11 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
     this.#replacementListeners.clear();
     this.#runtime.setBeforeSessionInvalidate(undefined);
     this.#runtime.setRebindSession(undefined);
-    await this.#runtime.dispose();
+    try {
+      await this.#runtime.dispose();
+    } finally {
+      await this.#sandboxController?.close();
+    }
   }
 
   #attachSession(): void {
@@ -349,32 +403,48 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
   }
 }
 
-/** Creates persistent Pi runtimes while sharing only process-global model state. */
+/** Creates profile-selected Pi runtimes with isolated process-global model state. */
 export class PiRuntimeFactory implements PiRuntimeFactoryPort {
   readonly #modelRuntime: ModelRuntime;
+  readonly #strictModelRuntime: ModelRuntime;
   readonly #agentDir: string;
   readonly #sessionDir: string | undefined;
   readonly #serviceOptions: PiRuntimeFactoryOptions["serviceOptions"];
   readonly #sessionOptions: PiRuntimeFactoryOptions["sessionOptions"];
+  readonly #sandbox: Readonly<PiSandboxRuntimeOptions> | undefined;
+  readonly #globalSettings: ReturnType<SettingsManager["getGlobalSettings"]>;
 
   private constructor(
     modelRuntime: ModelRuntime,
+    strictModelRuntime: ModelRuntime,
+    globalSettings: ReturnType<SettingsManager["getGlobalSettings"]>,
     options: PiRuntimeFactoryOptions,
   ) {
     this.#modelRuntime = modelRuntime;
+    this.#strictModelRuntime = strictModelRuntime;
     this.#agentDir = path.resolve(options.agentDir ?? getAgentDir());
     this.#sessionDir = options.sessionDir;
     this.#serviceOptions = options.serviceOptions;
     this.#sessionOptions = options.sessionOptions;
+    this.#sandbox = options.sandbox;
+    this.#globalSettings = structuredClone(globalSettings);
   }
 
   static async create(
     options: PiRuntimeFactoryOptions = {},
   ): Promise<PiRuntimeFactory> {
     try {
-      const modelRuntime =
-        options.modelRuntime ?? (await getSharedModelRuntime());
-      return new PiRuntimeFactory(modelRuntime, options);
+      const agentDir = path.resolve(options.agentDir ?? getAgentDir());
+      const modelRuntime = options.modelRuntime ?? (await getSharedModelRuntime());
+      const strictModelRuntime = options.strictModelRuntime ?? await PiModelRuntime.create({
+        authPath: path.join(agentDir, "auth.json"),
+        modelsPath: path.join(agentDir, "models.json"),
+        modelsStorePath: path.join(agentDir, "models-store.json"),
+      });
+      // Only the global half of SettingsManager's merged state is retained.
+      // The strict in-memory snapshot never observes project settings again.
+      const globalSettings = SettingsManager.create(path.parse(agentDir).root, agentDir).getGlobalSettings();
+      return new PiRuntimeFactory(modelRuntime, strictModelRuntime, globalSettings, options);
     } catch (error) {
       throw toAppError(error, { source: "pi", operation: "create" });
     }
@@ -384,9 +454,18 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
     return this.#modelRuntime;
   }
 
-  async listAvailableModels(): Promise<readonly PiModelCapability[]> {
+  get strictModelRuntime(): ModelRuntime {
+    return this.#strictModelRuntime;
+  }
+
+  async listAvailableModels(
+    securityProfile: RuntimeWorkspacePolicy["securityProfile"] = "unrestricted",
+  ): Promise<readonly PiModelCapability[]> {
     try {
-      const models = await this.#modelRuntime.getAvailable();
+      const selectedRuntime = securityProfile === "workspace-sandboxed"
+        ? this.#strictModelRuntime
+        : this.#modelRuntime;
+      const models = await selectedRuntime.getAvailable();
       return models.map((model) => ({
         provider: model.provider,
         id: model.id,
@@ -398,19 +477,20 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
     }
   }
 
-  async createPersistent(
-    cwd: string,
-    sessionDirectory?: string,
-  ): Promise<PiConversationRuntime> {
-    const canonicalCwd = await resolveConversationCwd(cwd);
+  async createPersistent(policy: Readonly<RuntimeWorkspacePolicy>): Promise<PiConversationRuntime> {
+    const canonicalPolicy = await this.#canonicalPolicy(policy);
     const sessionManager = SessionManager.create(
-      canonicalCwd,
-      sessionDirectory ?? this.#sessionDir,
+      canonicalPolicy.cwd,
+      canonicalPolicy.sessionDirectory ?? this.#sessionDir,
     );
-    return this.#createRuntime(canonicalCwd, sessionManager);
+    return this.#createRuntime(canonicalPolicy, sessionManager);
   }
 
-  async openPersistent(sessionFile: string): Promise<PiConversationRuntime> {
+  async openPersistent(
+    policy: Readonly<RuntimeWorkspacePolicy>,
+    sessionFile: string,
+  ): Promise<PiConversationRuntime> {
+    const canonicalPolicy = await this.#canonicalPolicy(policy);
     const canonicalFile = await resolveSessionFile(sessionFile);
 
     let storedSession: SessionManager;
@@ -419,68 +499,137 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
     } catch (error) {
       throw toAppError(error, { source: "filesystem", target: "session" });
     }
+    const storedCwd = await resolveConversationCwd(storedSession.getCwd());
+    if (storedCwd !== canonicalPolicy.cwd) {
+      throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
+    }
 
-    const canonicalCwd = await resolveConversationCwd(storedSession.getCwd());
     let sessionManager: SessionManager;
     try {
-      // Preserve the stored workspace's meaning while using its canonical path
-      // for CWD-bound resources and registry identity.
       sessionManager = SessionManager.open(
         canonicalFile,
         storedSession.getSessionDir(),
-        canonicalCwd,
+        canonicalPolicy.cwd,
       );
     } catch (error) {
       throw toAppError(error, { source: "filesystem", target: "session" });
     }
 
-    return this.#createRuntime(canonicalCwd, sessionManager);
+    return this.#createRuntime(canonicalPolicy, sessionManager);
+  }
+
+  async #canonicalPolicy(policy: Readonly<RuntimeWorkspacePolicy>): Promise<RuntimeWorkspacePolicy> {
+    const cwd = await resolveConversationCwd(policy.cwd);
+    if (cwd !== path.resolve(policy.cwd) || !policy.workspaceId) {
+      throw new AppError(ERROR_CODES.WORKSPACE_UNAVAILABLE);
+    }
+    return Object.freeze({
+      workspaceId: policy.workspaceId,
+      cwd,
+      sessionDirectory: policy.sessionDirectory === null
+        ? null
+        : path.resolve(policy.sessionDirectory),
+      securityProfile: policy.securityProfile,
+    });
   }
 
   async #createRuntime(
-    cwd: string,
+    policy: Readonly<RuntimeWorkspacePolicy>,
     sessionManager: SessionManager,
   ): Promise<PiConversationRuntime> {
-    const createRuntime = async ({
-      cwd: runtimeCwd,
-      sessionManager: runtimeSessionManager,
-      sessionStartEvent,
-    }: Parameters<
-      Parameters<typeof createAgentSessionRuntime>[0]
-    >[0]) => {
-      const configurableServiceOptions =
-        (await this.#serviceOptions?.(runtimeCwd)) ?? {};
-      const services = await createAgentSessionServices({
-        ...configurableServiceOptions,
-        cwd: runtimeCwd,
-        agentDir: this.#agentDir,
-        modelRuntime: this.#modelRuntime,
-      });
-      const configurableSessionOptions =
-        (await this.#sessionOptions?.(services)) ?? {};
-      const sessionCreationOptions: CreateAgentSessionFromServicesOptions = {
-        ...configurableSessionOptions,
-        services,
-        sessionManager: runtimeSessionManager,
-        ...(sessionStartEvent === undefined ? {} : { sessionStartEvent }),
-      };
-
-      return {
-        ...(await createAgentSessionFromServices(sessionCreationOptions)),
-        services,
-        diagnostics: services.diagnostics,
-      };
-    };
-
+    let sandboxController: SandboxController | undefined;
+    let sdkRuntime: AgentSessionRuntime | undefined;
     try {
-      const runtime = await createAgentSessionRuntime(createRuntime, {
-        cwd,
+      if (policy.securityProfile === "workspace-sandboxed") {
+        const sandbox = this.#sandbox;
+        if (sandbox === undefined) {
+          throw new AppError(ERROR_CODES.SANDBOX_WORKER_START_FAILED);
+        }
+        sandboxController = await SandboxController.start({
+          createWorker: (onFatal) => startSandboxWorkerClient({
+            config: sandbox.config,
+            host: sandbox.host,
+            worker: sandbox.worker,
+            workspace: policy.cwd,
+            hiddenPaths: [...new Set([
+              ...sandbox.hiddenPaths,
+              ...(policy.sessionDirectory === null ? [] : [policy.sessionDirectory]),
+            ])],
+            onFatal,
+          }),
+          commandTimeoutMs: sandbox.config.commandTimeoutMs,
+          abortActiveRun: () => sdkRuntime?.session.abort(),
+          waitForPiIdle: () => sdkRuntime?.session.agent.waitForIdle(),
+          // Phase 7 attaches the registry-facing terminal failure observer. The
+          // controller still fails closed and aborts Pi without one.
+          onFatal: () => undefined,
+        });
+      }
+
+      const createRuntime = async ({
+        cwd: runtimeCwd,
+        sessionManager: runtimeSessionManager,
+        sessionStartEvent,
+      }: Parameters<Parameters<typeof createAgentSessionRuntime>[0]>[0]) => {
+        let services: AgentSessionServices;
+        let configurableSessionOptions: PiSessionOptions;
+        if (policy.securityProfile === "workspace-sandboxed") {
+          if (sandboxController === undefined) throw new AppError(ERROR_CODES.SANDBOX_WORKER_FAILED);
+          const resourceLoader = await SandboxResourceLoader.create(policy.cwd);
+          services = {
+            cwd: "/workspace",
+            agentDir: this.#agentDir,
+            modelRuntime: this.#strictModelRuntime,
+            settingsManager: createStrictSettingsManager(this.#globalSettings),
+            resourceLoader,
+            diagnostics: [],
+          };
+          const requested = (await this.#sessionOptions?.(services)) ?? {};
+          configurableSessionOptions = {
+            ...(requested.model === undefined ? {} : { model: requested.model }),
+            ...(requested.thinkingLevel === undefined ? {} : { thinkingLevel: requested.thinkingLevel }),
+            ...(requested.scopedModels === undefined ? {} : { scopedModels: requested.scopedModels }),
+            tools: [...SANDBOX_TOOL_NAMES],
+            customTools: [...createSandboxTools(sandboxController)],
+          };
+        } else {
+          const configurableServiceOptions = (await this.#serviceOptions?.(runtimeCwd)) ?? {};
+          services = await createAgentSessionServices({
+            ...configurableServiceOptions,
+            cwd: runtimeCwd,
+            agentDir: this.#agentDir,
+            modelRuntime: this.#modelRuntime,
+          });
+          configurableSessionOptions = (await this.#sessionOptions?.(services)) ?? {};
+        }
+        const sessionCreationOptions: CreateAgentSessionFromServicesOptions = {
+          ...configurableSessionOptions,
+          services,
+          sessionManager: runtimeSessionManager,
+          ...(sessionStartEvent === undefined ? {} : { sessionStartEvent }),
+        };
+        return {
+          ...(await createAgentSessionFromServices(sessionCreationOptions)),
+          services,
+          diagnostics: services.diagnostics,
+        };
+      };
+
+      sdkRuntime = await createAgentSessionRuntime(createRuntime, {
+        cwd: policy.cwd,
         agentDir: this.#agentDir,
         sessionManager,
       });
-      return new PiConversationRuntime(runtime);
+      if (sandboxController !== undefined && sandboxController.state !== "healthy") {
+        await sdkRuntime.dispose().catch(() => undefined);
+        throw new AppError(ERROR_CODES.SANDBOX_WORKER_START_FAILED);
+      }
+      return new PiConversationRuntime(sdkRuntime, policy.securityProfile, sandboxController);
     } catch (error) {
-      throw toAppError(error, { source: "pi", operation: "create" });
+      await sandboxController?.close().catch(() => undefined);
+      throw error instanceof AppError
+        ? error
+        : toAppError(error, { source: "pi", operation: "create" });
     }
   }
 }

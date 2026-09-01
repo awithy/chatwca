@@ -13,6 +13,18 @@ These notes record the concrete SDK behavior on which ChatWCA relies. They are a
 - Available authenticated models come from `await modelRuntime.getAvailable()`. A model advertises vision support when `model.input.includes("image")`.
 - `ModelRuntime` has no disposal method in this version. It is safe to retain for the process lifetime.
 
+## Strict sandbox resources and tools (Phase 6)
+
+The installed package and runtime exports were re-verified at `0.84.3` before implementing the strict adapter:
+
+- `createReadToolDefinition`, `createWriteToolDefinition`, `createEditToolDefinition`, `createBashToolDefinition`, `createLsToolDefinition`, `createGrepToolDefinition`, and `createFindToolDefinition` are exported. ChatWCA uses them only to obtain pinned names, labels, descriptions, TypeBox schemas, prompt snippets/guidelines, and edit argument preparation; none of their `execute` functions or TUI renderers are retained.
+- `createAgentSessionFromServices()` accepts both `customTools` and a `tools` allowlist. In 0.84.3 a custom definition replaces the same-name built-in in the final registry, while the allowlist filters built-in, extension, and SDK tools. Sandboxed sessions pass the same explicit seven names in both places and contract-test `session.agent.state.tools`.
+- `ResourceLoader` is a small public interface, and `createExtensionRuntime()` is exported. The strict loader follows the SDK's `examples/sdk/12-full-control.ts` pattern rather than wrapping `DefaultResourceLoader`; therefore package, extension, skill, prompt, theme, system/append-prompt, and ancestor-context discovery never starts.
+- A custom system prompt is still followed by Pi's `Current working directory: ...` line. Strict `AgentSessionServices.cwd` is consequently `/workspace`, while the parent-owned `SessionManager` and `AgentSessionRuntime` retain the canonical host workspace for persistence and ownership checks.
+- `SettingsManager.inMemory()` performs no settings file I/O. ChatWCA snapshots only safe administrator global model/thinking/retry/compaction/transport fields and omits project, package, resource, tool, shell, proxy, and session-path fields.
+- `createBashToolDefinition(..., { exposeSessionEnvironment: false })` omits the `PI_*` prompt guideline. ChatWCA's app-owned bash executor also bypasses Pi shell operations entirely, so no Pi session environment reaches the worker.
+- `ModelRuntime.create()` accepts explicit `authPath`, `modelsPath`, and `modelsStorePath`. The unrestricted and strict instances use the same administrator-owned files but are distinct objects; only the unrestricted instance is ever supplied to extension-capable services.
+
 ## CWD-bound services and sessions
 
 The advanced runtime factory in the design maps directly to the SDK:

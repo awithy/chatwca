@@ -471,6 +471,8 @@ export async function startChatWcaServer(
       config.piCodingAgentDir ?? path.join(homedir(), ".pi", "agent"),
     );
     let functionalProbeSucceeded = false;
+    let sandboxWorker: Readonly<SandboxWorkerArtifact> | undefined;
+    let sandboxHost: Readonly<ValidatedSandboxHost> | undefined;
     if (config.sandbox.mode !== "disabled") {
       let worker: Readonly<SandboxWorkerArtifact>;
       try {
@@ -479,6 +481,8 @@ export async function startChatWcaServer(
         throw toAppError(error, { source: "sandbox", phase: "configuration" });
       }
       const host = (options.validateSandboxHost ?? validateBwrapAndToolchain)(config.sandbox);
+      sandboxWorker = worker;
+      sandboxHost = host;
       await (options.runSandboxStartupProbe ?? runSandboxStartupProbe)({
         config: config.sandbox,
         host,
@@ -506,6 +510,16 @@ export async function startChatWcaServer(
         ...(loadedConfig.piCodingAgentDir === undefined
           ? {}
           : { agentDir: loadedConfig.piCodingAgentDir }),
+        ...(sandboxWorker === undefined || sandboxHost === undefined
+          ? {}
+          : {
+              sandbox: {
+                config: loadedConfig.sandbox,
+                host: sandboxHost,
+                worker: sandboxWorker,
+                hiddenPaths: [dataDirectory, piAgentDirectory],
+              },
+            }),
       }))
     )(config);
 

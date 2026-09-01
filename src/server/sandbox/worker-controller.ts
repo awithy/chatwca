@@ -1,0 +1,203 @@
+import { AppError, ERROR_CODES } from "../../shared/errors.js";
+import type {
+  EditFileArguments,
+  EditFileResult,
+  ExecArguments,
+  ExecResult,
+  FindArguments,
+  FindResult,
+  GrepArguments,
+  GrepResult,
+  HealthResult,
+  ListDirectoryArguments,
+  ListDirectoryResult,
+  ReadFileArguments,
+  ReadFileResult,
+  WriteFileResult,
+} from "./protocol.js";
+import {
+  SandboxWorkerOperationError,
+  type SandboxCallOptions,
+  type SandboxExecOptions,
+  type SandboxWorkerFatal,
+} from "./worker-client.js";
+
+export type SandboxControllerState = "healthy" | "restarting" | "error" | "closed";
+export interface SandboxControllerWorkerPort {
+  readFile(arguments_: Readonly<ReadFileArguments>, options?: SandboxCallOptions): Promise<ReadFileResult>;
+  writeFile(path: string, data: Buffer | string, options?: SandboxCallOptions & { readonly createParents?: boolean }): Promise<WriteFileResult>;
+  editFile(arguments_: Readonly<EditFileArguments>, options?: SandboxCallOptions): Promise<EditFileResult>;
+  listDirectory(arguments_: Readonly<ListDirectoryArguments>, options?: SandboxCallOptions): Promise<ListDirectoryResult>;
+  grep(arguments_: Readonly<GrepArguments>, options?: SandboxCallOptions): Promise<GrepResult>;
+  find(arguments_: Readonly<FindArguments>, options?: SandboxCallOptions): Promise<FindResult>;
+  exec(arguments_: Readonly<ExecArguments>, options?: SandboxExecOptions): Promise<ExecResult>;
+  health(options?: SandboxCallOptions): Promise<HealthResult>;
+  invalidate(): Promise<void>;
+}
+export type SandboxControllerWorkerFactory = (
+  onFatal: (failure: Readonly<SandboxWorkerFatal>) => void,
+) => Promise<SandboxControllerWorkerPort>;
+
+export interface SandboxControllerOptions {
+  readonly createWorker: SandboxControllerWorkerFactory;
+  readonly commandTimeoutMs: number;
+  /** Abort the active Pi run. This callback must never execute tools itself. */
+  readonly abortActiveRun: () => void | Promise<void>;
+  /** Resolves only after Pi has settled from the abort/fatal tool rejection. */
+  readonly waitForPiIdle: () => void | Promise<void>;
+  /** Registry/runtime notification after Pi settles and the state is terminal. */
+  readonly onFatal: (failure: Readonly<SandboxWorkerFatal>) => void;
+}
+
+/**
+ * Stable tool-facing ownership for a replaceable sandbox worker.
+ * No state transition invokes an unrestricted implementation or retries an operation.
+ */
+export class SandboxController {
+  readonly #options: SandboxControllerOptions;
+  #worker: SandboxControllerWorkerPort;
+  #state: SandboxControllerState = "healthy";
+  #transition: Promise<void> | undefined;
+  #fatalNotified = false;
+
+  private constructor(options: SandboxControllerOptions, worker: SandboxControllerWorkerPort) {
+    this.#options = options; this.#worker = worker;
+  }
+
+  static async start(options: SandboxControllerOptions): Promise<SandboxController> {
+    let controller: SandboxController | undefined;
+    let startupFatal: Readonly<SandboxWorkerFatal> | undefined;
+    const worker = await options.createWorker((failure) => {
+      if (controller === undefined) startupFatal = failure;
+      else controller.#workerFatal(failure);
+    });
+    if (startupFatal !== undefined) {
+      await worker.invalidate().catch(() => undefined);
+      throw new AppError(ERROR_CODES.SANDBOX_WORKER_START_FAILED, { cause: startupFatal.error });
+    }
+    controller = new SandboxController(options, worker);
+    return controller;
+  }
+
+  get state(): SandboxControllerState { return this.#state; }
+
+  async readFile(arguments_: Readonly<ReadFileArguments>, options?: SandboxCallOptions): Promise<ReadFileResult> {
+    return (await this.#current()).readFile(arguments_, options);
+  }
+  async writeFile(path: string, data: Buffer | string, options?: SandboxCallOptions & { readonly createParents?: boolean }): Promise<WriteFileResult> {
+    return (await this.#current()).writeFile(path, data, options);
+  }
+  async editFile(arguments_: Readonly<EditFileArguments>, options?: SandboxCallOptions): Promise<EditFileResult> {
+    return (await this.#current()).editFile(arguments_, options);
+  }
+  async listDirectory(arguments_: Readonly<ListDirectoryArguments>, options?: SandboxCallOptions): Promise<ListDirectoryResult> {
+    return (await this.#current()).listDirectory(arguments_, options);
+  }
+  async grep(arguments_: Readonly<GrepArguments>, options?: SandboxCallOptions): Promise<GrepResult> {
+    return (await this.#current()).grep(arguments_, options);
+  }
+  async find(arguments_: Readonly<FindArguments>, options?: SandboxCallOptions): Promise<FindResult> {
+    return (await this.#current()).find(arguments_, options);
+  }
+  async health(options?: SandboxCallOptions): Promise<HealthResult> {
+    return (await this.#current()).health(options);
+  }
+
+  async exec(arguments_: Readonly<ExecArguments>, options: SandboxExecOptions = {}): Promise<ExecResult> {
+    const worker = await this.#current();
+    const timeoutMs = Math.min(arguments_.timeoutMs, this.#options.commandTimeoutMs);
+    let timer: NodeJS.Timeout | undefined; let removeAbort: (() => void) | undefined;
+    let invalidate!: (reason: "timeout" | "abort") => void;
+    const planned = new Promise<"timeout" | "abort">((resolve) => { invalidate = resolve; });
+    timer = setTimeout(() => invalidate("timeout"), timeoutMs);
+    if (options.signal !== undefined) {
+      const abort = () => invalidate("abort");
+      options.signal.addEventListener("abort", abort, { once: true });
+      removeAbort = () => options.signal?.removeEventListener("abort", abort);
+      if (options.signal.aborted) invalidate("abort");
+    }
+    const operation = worker.exec({ ...arguments_, timeoutMs }, options);
+    // The namespace teardown rejects this promise; observe it even when the planned branch wins.
+    void operation.catch(() => undefined);
+    try {
+      const outcome = await Promise.race([
+        operation.then((result) => ({ kind: "result" as const, result })),
+        planned.then((reason) => ({ kind: "planned" as const, reason })),
+      ]);
+      if (outcome.kind === "result") return outcome.result;
+      await this.#plannedRestart();
+      if (outcome.reason === "abort") throw options.signal?.reason ?? new SandboxWorkerOperationError("cancelled");
+      throw new SandboxWorkerOperationError("timeout");
+    } finally {
+      if (timer !== undefined) clearTimeout(timer); removeAbort?.();
+    }
+  }
+
+  /** Conversation abort: namespace first, Pi abort/settle second, replacement last. */
+  abort(): Promise<void> { return this.#plannedRestart(); }
+
+  async close(): Promise<void> {
+    if (this.#state === "closed") return;
+    const transition = this.#transition; if (transition !== undefined) await transition.catch(() => undefined);
+    this.#state = "closed";
+    await this.#worker.invalidate();
+  }
+
+  async #current(): Promise<SandboxControllerWorkerPort> {
+    if (this.#state === "restarting" && this.#transition !== undefined) await this.#transition;
+    if (this.#state !== "healthy") throw new AppError(ERROR_CODES.SANDBOX_WORKER_FAILED);
+    return this.#worker;
+  }
+
+  #plannedRestart(): Promise<void> {
+    if (this.#state === "closed") return Promise.reject(new AppError(ERROR_CODES.SANDBOX_WORKER_FAILED));
+    if (this.#state === "restarting" && this.#transition !== undefined) return this.#transition;
+    if (this.#state === "error") return Promise.reject(new AppError(ERROR_CODES.SANDBOX_WORKER_FAILED));
+    this.#state = "restarting";
+    const previous = this.#worker;
+    const transition = (async () => {
+      // Never trust process-group cleanup on timeout/abort.
+      await previous.invalidate();
+      await this.#options.abortActiveRun();
+      await this.#options.waitForPiIdle();
+      try {
+        let replacementFatal: Readonly<SandboxWorkerFatal> | undefined;
+        const replacement = await this.#options.createWorker((failure) => {
+          replacementFatal = failure;
+          this.#workerFatal(failure);
+        });
+        if (replacementFatal !== undefined) {
+          await replacement.invalidate().catch(() => undefined);
+          throw replacementFatal.error;
+        }
+        if (this.#state === "closed") { await replacement.invalidate(); return; }
+        this.#worker = replacement; this.#state = "healthy";
+      } catch (cause) {
+        this.#state = "error";
+        const failure = { error: new AppError(ERROR_CODES.SANDBOX_WORKER_START_FAILED, { cause }), diagnostic: "" };
+        this.#notifyFatal(failure);
+        throw failure.error;
+      }
+    })();
+    const tracked = transition.finally(() => { if (this.#transition === tracked) this.#transition = undefined; });
+    this.#transition = tracked;
+    return tracked;
+  }
+
+  #workerFatal(failure: Readonly<SandboxWorkerFatal>): void {
+    if (this.#state !== "healthy") return;
+    this.#state = "error";
+    void (async () => {
+      await this.#worker.invalidate().catch(() => undefined);
+      await Promise.resolve(this.#options.abortActiveRun()).catch(() => undefined);
+      await Promise.resolve(this.#options.waitForPiIdle()).catch(() => undefined);
+      this.#notifyFatal(failure);
+    })();
+  }
+
+  #notifyFatal(failure: Readonly<SandboxWorkerFatal>): void {
+    if (this.#fatalNotified) return;
+    this.#fatalNotified = true;
+    try { this.#options.onFatal(failure); } catch { /* observers have no authority */ }
+  }
+}

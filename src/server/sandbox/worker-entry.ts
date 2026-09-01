@@ -22,6 +22,12 @@ import {
   workerReadFile,
   workerWriteFile,
 } from "./worker-fs.js";
+import {
+  FatalWorkerProcessError,
+  workerExec,
+  workerFind,
+  workerGrep,
+} from "./worker-process.js";
 
 const REQUEST_FD = 8;
 const RESPONSE_FD = 9;
@@ -168,8 +174,19 @@ async function main(): Promise<void> {
   const requestStream = new net.Socket({ fd: REQUEST_FD, readable: true, writable: false });
   let helloDone = false;
   let shutdown = false;
+  let processOperationTail = Promise.resolve();
+  let commandTimeoutMs = 900_000;
+  let maxCommandOutputBytes = 64 * 1024 * 1024;
   const active = new Map<string, ActiveRequest>();
   const tasks = new Set<Promise<void>>();
+  const withProcessOperation = async <T>(operation: () => Promise<T>): Promise<T> => {
+    const previous = processOperationTail;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    processOperationTail = previous.catch(() => undefined).then(() => gate);
+    await previous.catch(() => undefined);
+    try { return await operation(); } finally { release(); }
+  };
 
   const execute = async (request: ActiveRequest): Promise<void> => {
     if (request.started) throw new Error("request executed twice");
@@ -198,9 +215,31 @@ async function main(): Promise<void> {
           writeFrame({ type: "response", id: request.id, result });
           break;
         }
+        case "grep": {
+          const result = await withProcessOperation(() => workerGrep(request.arguments as never, request));
+          writeFrame({ type: "response", id: request.id, result });
+          break;
+        }
+        case "find": {
+          const result = await withProcessOperation(() => workerFind(request.arguments as never, request));
+          writeFrame({ type: "response", id: request.id, result });
+          break;
+        }
+        case "exec": {
+          let outputSequence = 0;
+          const result = await withProcessOperation(() => workerExec(
+            request.arguments as never,
+            { commandTimeoutMs, maxCommandOutputBytes },
+            (stream, data) => writeFrame({ type: "output", id: request.id, sequence: outputSequence++, stream, data }),
+            request,
+          ));
+          writeFrame({ type: "response", id: request.id, result });
+          break;
+        }
         default: throw new WorkerFileSystemError("operation_not_implemented");
       }
     } catch (error) {
+      if (error instanceof FatalWorkerProcessError) throw error;
       const failure = error instanceof WorkerFileSystemError ? error : mapFileSystemError(error);
       writeFrame({ type: "error", id: request.id, code: request.cancelled ? "cancelled" : failure.code });
     } finally { active.delete(request.id); }
@@ -217,6 +256,8 @@ async function main(): Promise<void> {
     if (!helloDone) {
       if (frame.type !== "hello" || frame.artifactSha256 !== actualHash || frame.artifactVersion !== WORKER_VERSION) throw new Error("invalid worker handshake");
       helloDone = true;
+      commandTimeoutMs = frame.commandTimeoutMs as number;
+      maxCommandOutputBytes = frame.maxCommandOutputBytes as number;
       writeFrame({ type: "ready", protocol: 1, nonce: frame.nonce, probe: await collectProbe(frame, actualHash) });
       if (frame.exitAfterProbe === true) shutdown = true;
       else fs.unlinkSync(`/workspace/.chatwca-probe-${String(frame.nonce)}`);

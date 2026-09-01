@@ -102,9 +102,25 @@ export const ListDirectoryResultSchema = strictObject({
   entries: Type.Array(FileMetadataSchema), truncated: Type.Boolean(),
 });
 export interface ListDirectoryResult extends Static<typeof ListDirectoryResultSchema> {}
-export const GrepResultSchema = strictObject({ text: Type.String(), matches: Type.Integer({ minimum: 0 }), truncated: Type.Boolean() });
+const TruncationResultSchema = strictObject({
+  truncated: Type.Boolean(), truncatedBy: Type.Union([Type.Literal("lines"), Type.Literal("bytes"), Type.Null()]),
+  totalLines: Type.Integer({ minimum: 0 }), totalBytes: Type.Integer({ minimum: 0 }),
+  outputLines: Type.Integer({ minimum: 0 }), outputBytes: Type.Integer({ minimum: 0 }),
+  lastLinePartial: Type.Boolean(), firstLineExceedsLimit: Type.Boolean(),
+  maxLines: Type.Integer({ minimum: 1 }), maxBytes: Type.Integer({ minimum: 1 }),
+});
+export const GrepResultSchema = strictObject({
+  text: Type.String(), matches: Type.Integer({ minimum: 0 }), truncated: Type.Boolean(),
+  matchLimitReached: Type.Optional(Type.Integer({ minimum: 1 })),
+  linesTruncated: Type.Optional(Type.Literal(true)),
+  truncation: Type.Optional(TruncationResultSchema),
+});
 export interface GrepResult extends Static<typeof GrepResultSchema> {}
-export const FindResultSchema = strictObject({ paths: Type.Array(Type.String()), truncated: Type.Boolean() });
+export const FindResultSchema = strictObject({
+  paths: Type.Array(Type.String()), text: Type.Optional(Type.String()), truncated: Type.Boolean(),
+  resultLimitReached: Type.Optional(Type.Integer({ minimum: 1 })),
+  truncation: Type.Optional(TruncationResultSchema),
+});
 export interface FindResult extends Static<typeof FindResultSchema> {}
 export const ExecResultSchema = strictObject({
   exitCode: Type.Union([Type.Integer(), Type.Null()]), signal: Type.Union([Type.String(), Type.Null()]),
@@ -137,6 +153,8 @@ export const HelloFrameSchema = strictObject({
   hiddenPaths: Type.Array(Type.String(), { maxItems: 1_000 }),
   mountPaths: Type.Array(Type.String(), { maxItems: 1_000 }),
   exitAfterProbe: Type.Boolean(),
+  commandTimeoutMs: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+  maxCommandOutputBytes: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
 });
 const requestSchema = <T extends SandboxOperation>(operation: T, argumentsSchema: (typeof OperationArgumentsSchemas)[T]) =>
   strictObject({ type: Type.Literal("request"), id: IdSchema, operation: Type.Literal(operation), arguments: argumentsSchema });

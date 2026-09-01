@@ -98,6 +98,8 @@ export interface SandboxWorkerClientStartOptions {
   readonly probeContext: Readonly<SandboxProbeContext>;
   readonly startTimeoutMs: number;
   readonly hiddenPaths: readonly string[];
+  readonly commandTimeoutMs?: number;
+  readonly maxCommandOutputBytes?: number;
   readonly onFatal: (failure: Readonly<SandboxWorkerFatal>) => void;
   readonly spawn?: SandboxSpawn;
 }
@@ -148,7 +150,10 @@ export async function startSandboxWorkerClient(options: SandboxWorkerLaunchOptio
   });
   return SandboxWorkerClient.start({
     specification, probeContext, startTimeoutMs: options.config.startTimeoutMs,
-    hiddenPaths: options.hiddenPaths, onFatal: options.onFatal,
+    hiddenPaths: options.hiddenPaths,
+    commandTimeoutMs: options.config.commandTimeoutMs,
+    maxCommandOutputBytes: options.config.maxCommandOutputBytes,
+    onFatal: options.onFatal,
     ...(options.spawn === undefined ? {} : { spawn: options.spawn }),
   });
 }
@@ -256,6 +261,8 @@ export class SandboxWorkerClient {
           artifactSha256: options.probeContext.artifact.sha256,
           artifactVersion: options.probeContext.artifact.version,
           hiddenPaths: [...options.hiddenPaths], mountPaths: Object.keys(options.probeContext.mounts), exitAfterProbe: false,
+          commandTimeoutMs: options.commandTimeoutMs ?? 900_000,
+          maxCommandOutputBytes: options.maxCommandOutputBytes ?? 64 * 1024 * 1024,
         });
         await hello;
       })();
@@ -308,6 +315,15 @@ export class SandboxWorkerClient {
   }
 
   async cancelAll(): Promise<void> { if (!this.#closed && !this.#fatal) await this.#send({ type: "cancel.all" }); }
+
+  /** Planned invalidation tears down the complete PID namespace immediately. */
+  invalidate(): Promise<void> {
+    if (!this.#closing && !this.#closed) {
+      this.#closing = true;
+      this.#rejectPending(new AppError(ERROR_CODES.SANDBOX_WORKER_FAILED));
+    }
+    return this.#terminate();
+  }
 
   close(): Promise<void> {
     this.#closePromise ??= this.#closeOnce();
@@ -424,12 +440,14 @@ export class SandboxWorkerClient {
         this.#pendingOutputFrames >= SANDBOX_MAX_PENDING_OUTPUT_FRAMES) throw new SandboxProtocolError("pending worker output overflow");
     this.#pendingOutputBytes += bytes;
     this.#pendingOutputFrames += 1;
+    if (this.#pendingOutputBytes >= 3 * 1024 * 1024) this.#response.pause();
     const task = Promise.resolve().then(() => pending.onOutput?.(event)).then(() => undefined).catch((error) => {
       this.#fail(error);
     }).finally(() => {
       this.#pendingOutputBytes -= bytes;
       this.#pendingOutputFrames -= 1;
       pending.outputTasks.delete(task);
+      if (!this.#closed && this.#pendingOutputBytes <= 2 * 1024 * 1024) this.#response.resume();
     });
     pending.outputTasks.add(task);
   }

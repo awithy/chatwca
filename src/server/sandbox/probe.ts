@@ -319,6 +319,8 @@ export async function runSandboxWorkerProbe(input: {
       hiddenPaths: input.hiddenPaths,
       mountPaths: input.config.readOnlyMounts.map((mount) => mount.destination),
       exitAfterProbe: true,
+      commandTimeoutMs: input.config.commandTimeoutMs,
+      maxCommandOutputBytes: input.config.maxCommandOutputBytes,
     }));
     const ready = await readyPromise;
     validateSandboxWorkerReady(ready, context);

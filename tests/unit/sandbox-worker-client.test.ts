@@ -226,19 +226,24 @@ describe("SandboxWorkerClient hostile transport", () => {
     await client.close();
   });
 
-  it("kills a worker whose output outruns a deliberately slow parent consumer", async () => {
+  it("pauses and resumes a worker pipe around a deliberately slow parent consumer", async () => {
     const child = new FakeChild(); const fatal = vi.fn();
     child.onFrame = (frame) => {
       if (frame.type !== "request" || frame.operation !== "exec") return;
       for (let sequence = 0; sequence < 7; sequence += 1) {
         child.send({ type: "output", id: frame.id, sequence, stream: "stdout", data: "x".repeat(700_000) });
       }
+      child.send({ type: "response", id: frame.id, result: { exitCode: 0, signal: null, timedOut: false, fullOutputPath: null } });
     };
     const { client } = await start(child, fatal);
-    const never = new Promise<void>(() => undefined);
-    await expect(client.exec({ command: "flood", timeoutMs: 100 }, { onOutput: () => never }))
-      .rejects.toMatchObject({ code: "sandbox_worker_failed" });
-    await eventually(() => expect(fatal).toHaveBeenCalledTimes(1));
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const call = client.exec({ command: "flood", timeoutMs: 100 }, { onOutput: () => blocked });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(fatal).not.toHaveBeenCalled();
+    release();
+    await expect(call).resolves.toMatchObject({ exitCode: 0 });
+    expect(fatal).not.toHaveBeenCalled();
     await client.close();
   });
 

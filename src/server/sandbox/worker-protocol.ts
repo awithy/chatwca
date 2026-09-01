@@ -56,10 +56,11 @@ export function workerValidateOperationArguments(operation: WorkerOperation, val
 export function workerIsParentFrame(value: unknown): boolean {
   if (!record(value) || typeof value.type !== "string") return false;
   switch (value.type) {
-    case "hello": return exact(value, ["type", "protocol", "nonce", "artifactSha256", "artifactVersion", "hiddenPaths", "mountPaths", "exitAfterProbe"]) &&
+    case "hello": return exact(value, ["type", "protocol", "nonce", "artifactSha256", "artifactVersion", "hiddenPaths", "mountPaths", "exitAfterProbe", "commandTimeoutMs", "maxCommandOutputBytes"]) &&
       value.protocol === 1 && string(value.nonce, 16, 256) && /^[A-Za-z0-9_-]+$/.test(value.nonce) && sha(value.artifactSha256) && string(value.artifactVersion, 1, 64) &&
       Array.isArray(value.hiddenPaths) && value.hiddenPaths.length <= 1_000 && value.hiddenPaths.every((item) => typeof item === "string") &&
-      Array.isArray(value.mountPaths) && value.mountPaths.length <= 1_000 && value.mountPaths.every((item) => typeof item === "string") && bool(value.exitAfterProbe);
+      Array.isArray(value.mountPaths) && value.mountPaths.length <= 1_000 && value.mountPaths.every((item) => typeof item === "string") && bool(value.exitAfterProbe) &&
+      integer(value.commandTimeoutMs, 1) && integer(value.maxCommandOutputBytes, 1);
     case "request": return exact(value, ["type", "id", "operation", "arguments"]) && id(value.id) &&
       WORKER_OPERATIONS.includes(value.operation as WorkerOperation) && workerValidateOperationArguments(value.operation as WorkerOperation, value.arguments);
     case "request.chunk": return exact(value, ["type", "id", "sequence", "encoding", "data"]) && id(value.id) &&

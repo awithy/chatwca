@@ -1,802 +1,796 @@
-# Gondolin Workspace Sandboxing Implementation Plan
+# Bubblewrap Workspace Sandboxing Implementation Plan
 
 **Status:** Proposed
 
-**Source research:** [`research.md`](research.md)
+**Design:** [`docs/bubblewrap-design.md`](docs/bubblewrap-design.md)
 
-**Target:** Gondolin `0.12.0`, Pi SDK `0.84.3`, Node.js 24, Linux with QEMU/KVM
+**Baseline:** Node.js 22.19+, Bubblewrap 0.6.1+, Pi SDK 0.84.3, Linux
 
-## 1. Goal
+## 1. Objective and release boundary
 
-Add an opt-in workspace execution policy that routes Pi's coding tools through a Gondolin micro-VM while keeping model requests, credentials, ChatWCA metadata, and Pi session persistence in the trusted host process.
+Implement the design's `workspace-sandboxed` profile without changing unrestricted behavior. A sandboxed live conversation owns one Bubblewrap worker. All model-selected filesystem and process operations cross that worker boundary; model/provider calls, credentials, SQLite, Pi JSONL persistence, HTTP, and WebSockets remain in the parent.
 
-Each workspace will have these authoritative settings:
-
-```ts
-type SandboxNetworkPolicy = "none" | "allowlist" | "public-web";
-
-interface WorkspaceSandboxSettings {
-  sandbox: boolean;
-  sandboxNetworkPolicy: SandboxNetworkPolicy;
-  sandboxNetworkAllowedHosts: string[];
-}
-```
-
-Defaults for all existing and newly created workspaces are:
-
-```ts
-{
-  sandbox: false,
-  sandboxNetworkPolicy: "none",
-  sandboxNetworkAllowedHosts: [],
-}
-```
-
-For a sandboxed workspace, ChatWCA will:
-
-- create at most one lazy Gondolin VM for each live conversation runtime;
-- mount the host workspace read/write at `/workspace`;
-- hide `/.chatwca` from the guest;
-- route `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`, and user-bash execution into the VM;
-- disable untrusted/discovered Pi extensions and project resources in the sandboxed runtime;
-- pass only a small fixed environment into guest commands;
-- enforce the selected HTTP/TLS network policy;
-- block private/internal network ranges and WebSockets in every mode;
-- never fall back to host tools if VM startup or execution fails; and
-- close or invalidate the VM on runtime disposal, abort, command timeout, replacement, eviction, and shutdown.
-
-## 2. V1 policy decisions
-
-### 2.1 Workspace-level policy
-
-Sandbox and network settings apply to every conversation in a workspace. A closed conversation uses the workspace's current policy when reopened. A live conversation retains the policy with which its runtime was created.
-
-Changing the workspace path, sandbox mode, network mode, or allowlist is rejected while the workspace owns any live runtime. Name-only updates remain allowed. Forks and rewinds inherit the source workspace policy.
-
-Per-conversation overrides are out of scope for v1. If added later, the workspace policy should become the default copied into new conversations.
-
-### 2.2 Network modes
-
-- `none`: no guest HTTP/TLS egress; Gondolin receives `allowedHosts: []`.
-- `allowlist`: guest HTTP/TLS egress only to the workspace's normalized exact-host allowlist.
-- `public-web`: guest HTTP/TLS egress to public destinations; Gondolin receives `allowedHosts: ["*"]`.
-
-All modes retain:
-
-- `blockInternalRanges: true`;
-- synthetic DNS;
-- `allowWebSockets: false`;
-- no SSH egress;
-- no mapped TCP egress;
-- no ingress; and
-- no guest-visible host credentials.
-
-V1 allowlist entries are exact DNS hostnames, not wildcard patterns. Permit only standard HTTP and HTTPS ports in v1. Gondolin must reapply host and IP policy after redirects and host-side DNS resolution.
-
-An allowed host can receive any data readable in the workspace. The allowlist is destination control, not data-loss prevention.
-
-### 2.3 Allowlist normalization
-
-Create one server-owned normalization function and use it at every repository/protocol boundary. It will:
-
-- trim whitespace;
-- remove a terminal DNS root dot;
-- convert Unicode names with `domainToASCII()`;
-- lowercase the result;
-- reject empty values, schemes, paths, queries, fragments, userinfo, ports, wildcard characters, IP literals, `localhost`, malformed labels, and names over 253 bytes;
-- reject labels over 63 bytes or with invalid leading/trailing hyphens;
-- deduplicate and sort the canonical result; and
-- enforce at most 64 hosts per workspace.
-
-`allowlist` requires at least one host. `none` and `public-web` require an empty host list. When `sandbox` is false, the network policy must be `none` with an empty host list.
-
-### 2.4 Filesystem boundary
-
-The workspace is writable. Sandbox mode protects the host outside the workspace; it does not protect workspace content from modification or deletion.
-
-The VFS provider stack is:
+The first release supports exactly these sandboxed tools:
 
 ```text
-ShadowProvider
-  └── RealFSProvider(<canonical workspace path>)
+read, write, edit, bash, ls, grep, find
 ```
 
-The mandatory shadow predicate hides `/.chatwca` and all descendants with `writeMode: "deny"` and symlink-bypass protection enabled. V1 will not claim to hide arbitrary workspace secrets such as `.env`; those files remain readable unless a separate product policy is introduced.
+It must not silently fall back to a parent implementation. Extensions, dynamically registered tools, skills, prompt templates, project settings that can alter tools, and provider registrations made by extensions are unavailable in sandboxed runtimes.
 
-### 2.5 Trusted host resources
+Resource quotas through cgroup v2, network allowlists, read-only source profiles, `.git` protection, and arbitrary extension support remain out of scope.
 
-For sandboxed runtimes, disable all automatically discovered extensions, skills, prompt templates, themes, context files, project settings, project system prompts, and appended system prompts. Inject only the ChatWCA-owned inline Gondolin extension.
+## 2. Non-negotiable implementation invariants
 
-This intentionally trades feature compatibility for a defensible boundary. Provider/model resolution continues through the process-wide host `ModelRuntime`. A later trusted-resource allowlist can restore selected global resources after a separate security review.
+1. The browser supplies only a workspace ID and requested profile. Runtime policy always comes from a fresh repository lookup.
+2. A sandboxed tool never resolves a model-provided path or spawns a model-provided command in the parent.
+3. Worker responses cannot request host operations. The parent accepts only terminal responses, output, and diagnostics for parent-created request IDs.
+4. Worker launch, handshake, protocol, and restart failures fail closed.
+5. A live runtime's effective profile is immutable. Path/profile changes require all workspace runtimes to be closed.
+6. Fork and rewind resolve the workspace policy again and create a distinct temporary worker.
+7. Abort, timeout, fatal failure, close, eviction, and shutdown remove the namespace and descendants.
+8. The sandbox system prompt and tool CWD are `/workspace`; canonical host workspace paths never enter the model-facing prompt.
+9. `.chatwca` is masked with ephemeral storage. `.git` remains writable and is described accurately in the UI and documentation.
+10. Sandboxing does not claim confidentiality from the model provider or protection from harmful workspace edits or denial of service.
 
-### 2.6 VM lifecycle and abort policy
+## 3. Current-code impact
 
-The VM starts before the first prompt is accepted, so startup failures are visible as a correlated ChatWCA error rather than a tool failure after model work has begun. VM startup remains lazy: merely listing history or opening a conversation does not boot a VM.
+The main integration points are:
 
-A prompt abort or guest command timeout invalidates and closes the VM. It must not be reused or restarted during the same agent run. A later prompt may lazily create a clean VM. Workspace writes already completed before invalidation remain on the host.
+- `src/server/config.ts`: currently synchronous scalar environment parsing only.
+- `src/server/database.ts`: schema version 2.
+- `src/server/workspace-repository.ts`: synchronous availability checks and no policy evaluator.
+- `src/shared/protocol.ts`: workspace create/update and projections have no security fields.
+- `src/server/pi-runtime.ts`: CWD-only factory API, one shared `ModelRuntime`, and default Pi resources/tools.
+- `src/server/conversation-registry.ts`: owns runtime/fork/abort/disposal lifecycle but records no effective profile.
+- `src/server/protocol.ts`: uses `requireAvailable()` for all workspace operations and only treats path changes as busy-sensitive.
+- `src/server/index.ts`: startup has no asynchronous host-capability probe; `/api/config` only reports image limits.
+- `src/server/conversation-registry.ts#getWorkspaceImage()`: currently opens assistant-supplied Markdown image paths in the parent and must use the worker for sandboxed conversations.
+- `WorkspaceForm`, `WorkspaceSidebar`, `ConversationHeader`, `App`, and client state: no profile controls, policy-blocked state, or runtime badge.
 
-## 3. Architecture
+The existing registry already has useful ownership points: capacity reservation before construction, temporary fork runtime ownership, LRU eviction, coalesced aborts, and bounded shutdown. Extend these rather than creating a second conversation registry.
 
-```text
-Browser
-  -> WebSocket workspace policy commands
-  -> ChatWCA host
-       -> SQLite workspace policy
-       -> process-wide Pi ModelRuntime and provider credentials
-       -> host Pi JSONL session storage
-       -> ConversationRegistry
-            -> PiConversationRuntime
-                 -> SandboxController (sandboxed workspaces only)
-                      -> SandboxVmPool capacity lease
-                      -> Gondolin VM
-                           -> /workspace VFS mount
-                           -> mediated HTTP/TLS policy
-                 -> trusted inline Pi extension
-                      -> approved tool overrides
-```
+## 4. Target server types and ownership
 
-Introduce a trusted runtime input rather than inferring policy from `process.cwd()`:
+Add shared types:
 
 ```ts
-interface ConversationWorkspace {
-  id: string;
-  path: string;
+type WorkspaceSecurityProfile =
+  | "unrestricted"
+  | "workspace-sandboxed";
+
+type SandboxMode = "disabled" | "optional" | "required";
+
+type WorkspacePolicyIssue =
+  | "sandbox_disabled"
+  | "outside_workspace_roots"
+  | "protected_path_overlap"
+  | null;
+```
+
+Replace CWD-only runtime construction with:
+
+```ts
+interface RuntimeWorkspacePolicy {
+  workspaceId: string;
+  cwd: string;                    // canonical host path, parent-only
   sessionDirectory: string | null;
-  sandbox: boolean;
-  sandboxNetworkPolicy: SandboxNetworkPolicy;
-  sandboxNetworkAllowedHosts: readonly string[];
+  securityProfile: WorkspaceSecurityProfile; // effective profile
+}
+
+interface PiRuntimeFactoryPort {
+  createPersistent(policy: RuntimeWorkspacePolicy): Promise<PiConversationRuntimePort>;
+  openPersistent(
+    policy: RuntimeWorkspacePolicy,
+    sessionFile: string,
+  ): Promise<PiConversationRuntimePort>;
 }
 ```
 
-Change the runtime factory to receive this object for both create and open operations. The browser never supplies a CWD, session path, mount, or runtime policy directly; the repository-resolved workspace remains authoritative.
+`ConversationRecord` stores the immutable effective `securityProfile`. `ConversationState.securityProfile` is projected from the record, not from the current workspace row.
 
-## 4. Phase 0 — Mandatory implementation spike
-
-Do not land the persistent schema or UI until this phase passes on the production host.
-
-### T0.1 Standardize Node and install Gondolin in an isolated spike
-
-- Change the development shell to Node 24.
-- Install `@earendil-works/gondolin@0.12.0` in an isolated branch or spike directory.
-- Confirm `npm ci`, TypeScript, and the pinned Pi SDK work together under Node 24.
-- Record the actual QEMU binary, accelerator, VM kernel/rootfs versions, and cache paths.
-
-### T0.2 Prove the VM boundary
-
-Using a temporary host workspace:
-
-- boot with QEMU/KVM and verify KVM rather than TCG is active;
-- mount the workspace at `/workspace` and verify write-through;
-- verify host paths outside the workspace cannot be read or written;
-- test relative paths, absolute host paths, `..`, symlinks, hard links, rename operations, and concurrent path replacement;
-- hide `/.chatwca` with `ShadowProvider` and test reads, writes, listings, rename, and symlink aliases;
-- verify `allowedHosts: []` denies egress;
-- verify an exact-host allowlist permits only its destination;
-- verify public-web reaches a public HTTP/TLS endpoint;
-- verify redirects, DNS rebinding defenses, IP literals, private ranges, alternate ports, raw TCP, SSH, and WebSockets cannot bypass policy;
-- verify `vm.close()` removes the QEMU process and session sockets; and
-- test startup and close failure behavior.
-
-### T0.3 Inventory realistic guest tooling
-
-Run a representative ChatWCA repository workflow in the default guest image:
-
-- inventory shell, Git, Node/npm, Python, compilers, certificates, and common utilities;
-- run install/build/typecheck/test operations under the intended network modes;
-- determine whether host `node_modules` is usable or must be shadowed/recreated;
-- measure cold and warm boot times, resident memory, CPU use, and disk/cache use; and
-- determine which guest-root changes survive VM recreation.
-
-If the default image cannot support representative coding workflows, stop and decide on a custom rootfs, dependency cache, or narrower product promise before continuing.
-
-### T0.4 Prove the Pi adapter
-
-Adapt Pi's pinned Gondolin example with an explicit host workspace and a fake provider:
-
-- exercise all seven approved built-in tools and user-bash routing;
-- preserve built-in result shapes, streaming, truncation, and edit diff details;
-- verify the final model-visible system prompt uses `/workspace` and contains no host workspace path;
-- set `exposeSessionEnvironment: false` for bash;
-- place canary provider credentials and unrelated secrets in `process.env` and prove they are absent in the guest;
-- prove sandboxed resource loading does not execute a malicious project extension or read symlinked project context outside the workspace;
-- verify prompt abort and command timeout invalidate the VM; and
-- verify runtime replacement and `session_shutdown` close the old VM.
-
-**Phase 0 exit criteria:** the host boundary, realistic toolchain, network policy, secret isolation, Pi tool shapes, and deterministic cleanup are demonstrated. Any failed criterion blocks the remaining phases.
-
-## 5. Phase 1 — Runtime and dependency foundation
-
-### T1.1 Raise the Node.js minimum
-
-Update:
-
-- `package.json` engines to Node `>=24`;
-- `.github/workflows/ci.yml` to a pinned Node 24 release;
-- `docs/design.md`, `README.md`, and deployment documentation;
-- local version-manager files if added; and
-- the Pi SDK smoke-test expectations.
-
-Run the complete existing suite before adding sandbox behavior to establish that the Node upgrade is behavior-neutral.
-
-### T1.2 Add the Gondolin dependency
-
-- Add exact dependency `@earendil-works/gondolin@0.12.0` and update `package-lock.json`.
-- Do not download guest assets during package installation or ordinary tests.
-- Add an operator command such as `npm run sandbox:prefetch` that resolves assets or performs a controlled boot-and-close check.
-- Document cache ownership, disk requirements, integrity verification provided by Gondolin, and offline deployment steps.
-
-### T1.3 Add server resource configuration
-
-Extend `src/server/config.ts` with bounded settings:
-
-| Variable | Proposed default | Purpose |
-|---|---:|---|
-| `CHATWCA_MAX_LIVE_SANDBOX_VMS` | `4` | Maximum powered sandbox VMs |
-| `CHATWCA_SANDBOX_MEMORY_MIB` | `1024` | Memory per VM |
-| `CHATWCA_SANDBOX_CPUS` | `2` | vCPUs per VM |
-| `CHATWCA_SANDBOX_START_TIMEOUT_MS` | `60000` | VM readiness deadline |
-
-Validate safe integer ranges and translate memory to Gondolin's `memory` option. Keep these server-only; `/api/config` does not need host capacity details.
-
-Add configuration unit tests and `.env.example` comments.
-
-## 6. Phase 2 — Workspace policy persistence
-
-### T2.1 Add shared policy schemas
-
-In `src/shared/protocol.ts`:
-
-- add `SandboxNetworkPolicySchema` and inferred type;
-- add `sandbox`, `sandboxNetworkPolicy`, and `sandboxNetworkAllowedHosts` to `WorkspaceSchema` and `WorkspaceSummarySchema`;
-- bound allowlist array and string sizes at the wire boundary;
-- require all sandbox fields on `workspace.create`;
-- allow them as a complete group on `workspace.update`;
-- permit sandbox-only updates while still rejecting an update with no changes; and
-- preserve `additionalProperties: false` on every command and response.
-
-TypeBox provides structural bounds. Canonical host validation and cross-field consistency remain server-domain validation.
-
-### T2.2 Migrate SQLite to schema version 3
-
-Update `src/server/database.ts`:
-
-```sql
-ALTER TABLE workspaces
-ADD COLUMN sandbox INTEGER NOT NULL DEFAULT 0
-  CHECK (sandbox IN (0, 1));
-
-ALTER TABLE workspaces
-ADD COLUMN sandbox_network_policy TEXT NOT NULL DEFAULT 'none'
-  CHECK (sandbox_network_policy IN ('none', 'allowlist', 'public-web'));
-
-CREATE TABLE workspace_sandbox_network_hosts (
-  workspace_id TEXT NOT NULL
-    REFERENCES workspaces(id) ON DELETE CASCADE,
-  host TEXT NOT NULL,
-  PRIMARY KEY (workspace_id, host)
-) WITHOUT ROWID;
-```
-
-Also enforce, either with a table-level check in a rebuilt table or repository validation, that an unsandboxed row cannot advertise network access.
-
-Refactor migrations into an ordered chain:
-
-- version 1 -> 2 adds `session_storage`;
-- version 2 -> 3 adds sandbox policy and host table;
-- a version 1 database runs both migrations transactionally in order;
-- new databases are created directly at version 3; and
-- unsupported future versions still fail startup.
-
-Migration tests must prove all existing rows become unsandboxed with no network and no allowlist entries.
-
-### T2.3 Add the policy normalization module
-
-Add `src/server/sandbox/policy.ts` containing:
-
-- allowlist normalization and validation;
-- cross-field validation for sandbox/network combinations;
-- conversion from persisted rows to an immutable runtime policy;
-- conversion from policy to Gondolin `allowedHosts`; and
-- constants for entry count and hostname length.
-
-Return stable `AppError` values without exposing parser or local-system details.
-
-### T2.4 Extend `WorkspaceRepository`
-
-Update `src/server/workspace-repository.ts`:
-
-- add the new columns to `WorkspaceRow` and all projections;
-- load host rows and return a sorted canonical list;
-- accept policy on create and update;
-- validate before entering SQLite;
-- insert a workspace and its allowlist in one transaction;
-- replace the policy and host rows atomically on update;
-- cascade host deletion when a workspace is removed;
-- preserve policy on name/path-only updates; and
-- ensure failed policy updates leave timestamps and host rows unchanged.
-
-Add repository tests for defaults, every mode, canonicalization, duplicate removal, atomic replacement, invalid combinations, deletion cascade, reopening, and migration.
-
-### T2.5 Add errors
-
-Extend `src/shared/errors.ts` with at least:
-
-- `invalid_sandbox_network_policy`;
-- `sandbox_capacity`;
-- `sandbox_unavailable`; and
-- `sandbox_start_failed`.
-
-Messages must be useful to the user but omit QEMU command lines, host paths, environment values, and raw Gondolin errors. Full causes remain server-side.
-
-**Phase 2 exit criteria:** policy is safely migrated, validated, persisted, listed, and updated without constructing any VM.
-
-## 7. Phase 3 — Gondolin adapter
-
-Create a focused `src/server/sandbox/` module rather than embedding VM logic in `pi-runtime.ts`.
-
-Suggested layout:
+Use these sandbox ownership layers:
 
 ```text
-src/server/sandbox/
-├── policy.ts
-├── vm-pool.ts
-├── vm-controller.ts
-├── path-mapping.ts
-├── tool-operations.ts
-└── extension.ts
+PiConversationRuntime
+  -> SandboxController (optional)
+       -> current SandboxWorkerClient
+       -> restart/fatal state
+       -> SandboxWorkerFactory
+            -> bwrap child + data FDs + protocol pipes
 ```
 
-### T3.1 Implement path mapping
+Tools capture `SandboxController`, not a particular worker instance, so a successful abort restart updates all tool executions without rebuilding the Pi session.
 
-Adapt the pinned Pi example's path mapping with these rules:
+## 5. Phase 0 — Boundary and packaging spike
 
-- relative paths resolve below `/workspace`;
-- the canonical host workspace maps to `/workspace`;
-- absolute host paths inside the workspace map to their guest equivalent;
-- absolute host paths outside the workspace remain guest-absolute and never address the host;
-- leading `@` normalization matches Pi built-ins; and
-- host platform separators are converted to POSIX guest separators.
+Do this before landing schema/UI changes. The spike may live in tests or a disposable branch, but its conclusions must be recorded in `docs/bubblewrap-operations.md`.
 
-Unit-test normalization, boundaries with common prefixes, root paths, Unicode names, and Windows-like strings even though v1 deployment is Linux-only.
+### T0.1 Prove the exact Bubblewrap profile
 
-### T3.2 Implement the VM controller
+On the deployment host and under `systemd/chatwca.service`, launch the proposed synthetic root and verify:
 
-`SandboxController` owns one lazy VM and a strict state machine:
+- user, mount, PID, IPC, UTS, and network namespaces differ from the parent;
+- effective capabilities are empty and `NoNewPrivs` is `1`;
+- `/usr/bin/node`, `/bin/bash`, and `rg` execute;
+- the workspace is read/write at `/workspace`;
+- `.chatwca` is ephemeral and masks host sessions;
+- parent canary, ChatWCA data, Pi agent, unrelated workspace, host `/home`, `/etc`, `/run`, `/tmp`, `/sys`, and `/dev` devices beyond the minimal view are unavailable;
+- IPv4, IPv6, DNS, and loopback connections fail; and
+- killing Bubblewrap removes a forked command tree.
+
+### T0.2 Prove inherited data FDs
+
+Use Node `spawn()` with dedicated `stdio` entries to prove that Bubblewrap 0.6.1 accepts pipes for:
+
+- `--ro-bind-data <worker-fd> /app/worker.mjs`;
+- minimal `/etc/passwd`, `group`, `hosts`, and `nsswitch.conf`; and
+- separate request and response protocol FDs inherited by the final worker.
+
+The parent must write each immutable payload, close its end, and never place worker source in the workspace or bind the application checkout.
+
+### T0.3 Prove development and production worker packaging
+
+Add a worker bundle step using a direct `esbuild` development dependency:
 
 ```text
-stopped -> starting -> ready -> stopping -> stopped
-                    \-> error -> stopped on retry
+src/server/sandbox/worker-entry.ts
+  -> dist/sandbox/worker.mjs
 ```
 
-Required behavior:
+The bundle must contain only worker code and Node built-ins; it must not need `node_modules` in the namespace. Update `build`, `dev`, and clean scripts so both `tsx` development and compiled production load the same generated artifact. The server reads it into memory once, computes its SHA-256/version, and every worker launch uses that process-lifetime snapshot.
 
-- coalesce concurrent startup calls;
-- acquire VM-pool capacity before boot;
-- create `createHttpHooks()` from the immutable workspace policy;
-- create the protected workspace provider stack;
-- set explicit CPU, memory, timeout, synthetic DNS, and WebSocket options;
-- detect the guest shell without using host environment variables;
-- expose status subscriptions for the registry/UI;
-- make close and invalidate idempotent;
-- clear partial state after failed startup;
-- prevent stale startup promises from publishing a VM after disposal;
-- hold a run lease for the full Pi prompt so the pool cannot evict a VM between tool calls;
-- prevent VM recreation during a run invalidated by abort/timeout; and
-- release capacity in every failure and close path.
+### Phase 0 exit criterion
 
-Abstract VM construction behind a small injectable `GondolinVmFactory` so normal unit/integration tests do not require QEMU.
+Do not proceed if the current kernel/systemd policy cannot create the required namespaces, data FDs do not work, the synthetic root cannot run the required binaries, or killing the Bubblewrap child leaves descendants.
 
-### T3.3 Implement VM capacity
+## 6. Phase 1 — Configuration, persistence, and policy projection
 
-`SandboxVmPool` tracks powered/starting VMs separately from live Pi runtimes.
+### T1.1 Extend configuration
 
-- Enforce `CHATWCA_MAX_LIVE_SANDBOX_VMS` across all controllers.
-- Count starting VMs so concurrent prompts cannot oversubscribe the host.
-- Evict the least-recently-used powered VM only when its conversation has no active prompt/tool lease.
-- Eviction closes only the VM, not the Pi runtime or session; the next prompt gets a clean guest.
-- If every VM is active, reject startup with `sandbox_capacity`.
-- Shutdown closes all registered controllers and waits within ChatWCA's existing global deadline.
+Create `src/server/sandbox/config.ts` and keep `src/server/config.ts` as the top-level composition boundary.
 
-Add deterministic tests for concurrent reservation, LRU ordering, active-run protection, release after startup failure, repeated close, and shutdown.
+Parse and validate:
 
-### T3.4 Implement protected VFS construction
+- `CHATWCA_SANDBOX_MODE`;
+- `CHATWCA_BWRAP_PATH`;
+- `CHATWCA_WORKSPACE_ROOTS` as a JSON string array;
+- `CHATWCA_SANDBOX_RO_MOUNTS` as a JSON string array;
+- `CHATWCA_SANDBOX_PATH` as an absolute, empty-segment-free guest PATH;
+- start timeout, command hard timeout, and full command output limit.
 
-Construct:
+Rules:
+
+- reject malformed JSON, non-string entries, empty values, relative paths, and canonical duplicates;
+- require at least one workspace root in `required` mode;
+- canonicalize configured roots and mount sources once at startup;
+- require every PATH entry to be supplied by `/usr`, a compatibility symlink into `/usr`, or an approved read-only mount;
+- validate extra mount sources as regular files or directories and reject protected/overlapping destinations;
+- in `disabled` mode, do not stat, version-check, or execute Bubblewrap and do not require its runtime/toolchain settings to work;
+- still enforce configured workspace roots in every mode.
+
+Represent sandbox settings as an immutable nested object on `ServerConfig`. Keep executable paths, roots, mounts, limits, and diagnostics server-only.
+
+### T1.2 Add schema version 3
+
+In `src/server/database.ts`:
+
+- change `DATABASE_SCHEMA_VERSION` to `3`;
+- include `security_profile` in a fresh schema;
+- add a transaction-safe 2-to-3 migration with default `unrestricted` and the CHECK constraint;
+- preserve 1-to-2-to-3 migration support in one startup;
+- set `user_version` only after each successful migration.
+
+Add database tests for fresh version 3, version 2 migration, version 1 chained migration, invalid stored values, and rollback on failure.
+
+### T1.3 Add policy evaluation to the workspace repository
+
+Inject immutable policy inputs into `WorkspaceRepository`: mode, canonical roots, canonical data directory, canonical Pi agent directory, and canonical read-only mounts.
+
+Extend stored/projection types with:
 
 ```ts
-new ShadowProvider(new RealFSProvider(workspace.path), {
-  shouldShadow: createShadowPathPredicate(["/.chatwca"]),
-  writeMode: "deny",
-  denySymlinkBypass: true,
-});
+securityProfile: WorkspaceSecurityProfile; // stored
+effectiveSecurityProfile: WorkspaceSecurityProfile | null;
+usable: boolean;
+policyIssue: WorkspacePolicyIssue;
 ```
 
-Do not add optional `.env` hiding under the sandbox label in v1. Add focused tests against a fake provider and real gated VM tests for every supported VFS operation.
+Implement the mode table exactly:
 
-### T3.5 Implement network construction
+- disabled + requested sandbox => `effectiveSecurityProfile: null`, `sandbox_disabled`, never downgrade silently;
+- optional => stored value is effective;
+- required => effective sandbox regardless of stored value.
 
-Build hooks as follows:
+Policy checks must use canonical containment/overlap helpers, never string prefixes. Apply roots whenever configured. Apply protected-path and extra-mount overlap checks when the effective profile is sandboxed.
 
-```ts
-const allowedHosts =
-  policy === "none" ? [] :
-  policy === "public-web" ? ["*"] :
-  workspace.sandboxNetworkAllowedHosts;
+Split repository admission:
 
-const { httpHooks } = createHttpHooks({
-  allowedHosts,
-  blockInternalRanges: true,
-  isRequestAllowed: standardHttpOrHttpsPortOnly,
-});
+- `requireAvailable(id)`: directory/session-history operations that do not start tools;
+- `requireUsable(id)`: fresh canonical path/root/policy validation and a trusted `RuntimeWorkspacePolicy` for create/open/fork/rewind.
+
+For sandboxed policy, `requireUsable()` also requires read/write/search access and delegates the bounded socket and `.chatwca` checks added in Phase 2. A policy-blocked workspace remains listable and may expose scoped history, but cannot create/open/fork/rewind a runtime.
+
+### T1.4 Update workspace commands
+
+In shared and server protocol code:
+
+- require `securityProfile` on `workspace.create`;
+- permit optional `securityProfile` on `workspace.update`;
+- permit `acknowledgeSecurityDowngrade` only on an update containing a sandbox-to-unrestricted change;
+- reject such a downgrade without `true`;
+- reject any downgrade in required mode;
+- treat path or profile changes as `workspace_busy` while a live runtime belongs to the workspace;
+- continue allowing name-only changes while busy;
+- include new projection fields in every authoritative workspace list.
+
+Use closed TypeBox variants so acknowledgement fields cannot be smuggled into unrelated updates.
+
+### T1.5 Add errors and public config
+
+Add all seven sandbox errors from the design to `src/shared/errors.ts`, with generic client-safe messages. Extend error mapping with a sandbox context that distinguishes configuration, startup, workspace admission, worker startup, fatal worker failure, and healthy operation failure.
+
+Extend `GET /api/config` with only:
+
+- mode;
+- selectable profiles;
+- remote-provider disclosure warning;
+- functional-probe success.
+
+Do not expose bwrap path, roots, protected paths, mount source paths, or private causes. Workspace Info will describe `/usr` and the existence of administrator-controlled runtime mounts generically; host mount paths stay redacted as required by the design's API restriction.
+
+### Phase 1 exit criterion
+
+All existing tests pass in the default `disabled` mode. Version 3 rows and stored/effective projections are fully tested without launching Bubblewrap.
+
+## 7. Phase 2 — Workspace admission, Bubblewrap builder, and probes
+
+### T2.1 Implement sandbox workspace admission
+
+Add an asynchronous admission component used by `requireUsable()` immediately before every sandbox runtime construction. Re-canonicalize the workspace and verify:
+
+- approved-root membership;
+- read/write/search access;
+- `.chatwca` is absent or a real directory and never a symlink;
+- no overlap in either direction with ChatWCA data, Pi agent, or extra mounts;
+- the canonical path still matches the stored path; and
+- no Unix-domain socket exists in a no-follow tree walk.
+
+Use `lstat`/directory handles and never follow symlinks during the socket walk. Add named internal bounds (initially 100,000 entries and 2 seconds). Reaching either bound is rejection, not a skipped check. Record that this is a best-effort race check in documentation.
+
+### T2.2 Validate Bubblewrap and required runtime binaries
+
+In `src/server/sandbox/bwrap.ts`:
+
+- require an absolute path whose realpath is identical to the configured path;
+- require a root-owned regular executable not writable by group/other;
+- invoke it without a shell and parse `bwrap --version` as at least 0.6.1;
+- validate that the synthetic `/usr` provides `/usr/bin/node` at Node 22.19+, `/bin/bash` through the conditional symlink, and `rg` on the configured PATH;
+- reject unsupported platform/architecture assumptions with `sandbox_configuration_error` or `sandbox_unavailable` as appropriate.
+
+`rg` is the only required search executable: worker `grep` uses its JSON stream and worker `find` uses `rg --files` plus glob filtering. No parent `ensureTool()`, download, `fd`, or `rg` spawn is allowed.
+
+### T2.3 Build Bubblewrap argv and immutable data bindings
+
+Create one pure argument builder used by startup probes and conversation workers. It returns argv plus inherited FD payloads, never a shell command.
+
+Cover:
+
+- all namespaces, hostname, capabilities, session, parent death, and clearenv flags from the design;
+- synthetic root with `/usr` only, conditional `/bin`, `/sbin`, `/lib`, `/lib64` symlinks, minimal `/proc` and `/dev`, ephemeral home/tmp/var-tmp;
+- canonical extra mounts before the workspace bind;
+- workspace bind and later `.chatwca` tmpfs mask;
+- immutable worker and minimal `/etc` data FDs;
+- exact fixed environment values;
+- `/workspace` as chdir and `/usr/bin/node /app/worker.mjs` as the final command.
+
+Unit tests inspect the argv array and prove there is no bind of `/`, data, agent, session paths, host home, host temp, `/run`, `/sys`, or application checkout.
+
+### T2.4 Implement startup and per-worker probes
+
+Add `src/server/sandbox/probe.ts`. The startup probe uses a temporary workspace, parent-only canary, and the same worker/argv builder. It checks namespace inode differences, capabilities, no-new-privileges, root entries, exact environment names, workspace write-through, hidden protected paths, mount identity, and network failures.
+
+Every conversation handshake repeats nonce, protocol version, worker artifact hash/version, namespace checks, environment checks, and expected workspace mount identity. A successful process-wide probe never substitutes for a per-worker handshake.
+
+Integrate startup in this order:
+
+```text
+parse config
+open/canonicalize data and Pi paths
+load immutable worker bundle
+validate sandbox config and bwrap (optional/required only)
+run functional probe (optional/required only)
+create model/runtime services
+construct HTTP/WS server
+listen
 ```
 
-Pass `httpHooks` and `allowWebSockets: false` to `VM.create()`. Do not configure `allowedInternalHosts`, SSH, mapped TCP, or ingress.
+Any failure before listening unwinds SQLite, temporary workers, FDs, and model/runtime construction just like current startup cleanup.
 
-Test that an omitted allowlist can never accidentally become Gondolin's allow-all default.
+### Phase 2 exit criterion
 
-### T3.6 Implement guest-safe tool operations
+Optional/required startup fails before binding when the executable, version, namespace, mount, environment, toolchain, or network probe is wrong. Disabled startup never inspects Bubblewrap.
 
-Adapt Pi's pinned example for:
+## 8. Phase 3 — Framed IPC and parent worker lifecycle
 
-- `ReadOperations`;
-- `WriteOperations`;
-- `EditOperations`;
-- `BashOperations`;
-- `FindOperations`;
-- `LsOperations`; and
-- grep traversal/results.
+### T3.1 Define protocol schemas and codecs
 
-Requirements:
+Create `src/server/sandbox/protocol.ts` with closed parent-side TypeBox schemas and an incremental four-byte big-endian frame decoder.
 
-- preserve Pi's exact built-in schemas and result/detail shapes;
-- preserve output streaming and 50KB/2000-line truncation behavior;
-- pass abort signals through VFS and exec calls;
-- invalidate the controller on bash timeout;
-- never spread `process.env` or the `env` supplied to `BashOperations.exec`;
-- use a fixed guest-safe environment determined by the spike;
-- create bash with `exposeSessionEnvironment: false`; and
-- never expose `PI_SESSION_FILE`, provider/model metadata, host `PATH`, proxy variables, or provider credentials.
+Enforce before allocation:
 
-### T3.7 Implement the trusted inline extension
+- 1 MiB frame limit;
+- 16 MiB assembled request limit;
+- eight active operations;
+- 4 MiB pending worker output;
+- strict UTF-8 and JSON;
+- parent-generated request IDs only;
+- ordered chunk sequence, declared byte count, and SHA-256;
+- one terminal response/error per request.
 
-`createGondolinExtension(controller, workspace)` will:
+Use raw chunks no larger than 768 KiB before base64 encoding so the encoded frame remains below 1 MiB. The dependency-free worker has mirrored strict structural validators; shared fixture tests feed every valid/invalid frame to both validators to prevent drift.
 
-- register overrides for exactly `read`, `write`, `edit`, `bash`, `grep`, `find`, and `ls`;
-- route `user_bash` through the same safe bash operations;
-- set the active tool list to the approved names;
-- block any non-approved tool call as defense in depth;
-- rewrite the model-visible working directory to `/workspace` without including the host path;
-- avoid booting resources from the extension factory or `session_start`; and
-- close the controller idempotently on `session_shutdown`.
+### T3.2 Implement `SandboxWorkerClient`
 
-The `PiConversationRuntime` owner will also close the controller directly during disposal; extension lifecycle events are not the sole cleanup mechanism.
+`src/server/sandbox/worker-client.ts` owns:
 
-**Phase 3 exit criteria:** the adapter is independently testable, contains no host fallback, and the only host filesystem provider points at the repository-resolved workspace.
+- detached Bubblewrap process and every inherited FD;
+- hello/ready timeout and nonce verification;
+- request correlation and operation-specific response validation;
+- chunk assembly and hashes;
+- streamed stdout/stderr callbacks;
+- AbortSignal-to-cancel propagation;
+- pipe backpressure and queue accounting;
+- bounded private stderr diagnostics;
+- graceful shutdown, then SIGTERM, then SIGKILL with bounded waits;
+- rejection of all pending calls on exit/protocol violation; and
+- exactly-once fatal notification.
 
-## 8. Phase 4 — Pi runtime and registry integration
+Worker stdout is closed, stdin is `/dev/null`, and stderr is diagnostic-only. Never parse protocol from stdout/stderr.
 
-### T4.1 Harden sandboxed Pi resource loading
+Unknown IDs, unsolicited request-like frames, duplicate terminals, malformed JSON/UTF-8, hash mismatch, sequence gaps, oversized payloads, queue overflow, or unexpected exit are fatal. Healthy operation errors carry stable worker codes only.
 
-In `src/server/pi-runtime.ts`, construct sandboxed services with:
+### T3.3 Define worker operations
 
-- `SettingsManager.create(cwd, agentDir, { projectTrusted: false })`;
-- `noExtensions: true` plus the trusted inline `extensionFactories` entry;
-- `noSkills: true`;
-- `noPromptTemplates: true`;
-- `noThemes: true`;
-- `noContextFiles: true`;
-- system-prompt override that ignores project prompt files;
-- empty appended-system-prompt override; and
-- an explicit approved tool list.
+Version 1 operation schemas cover:
 
-Apply security options after general injectable service/session options so tests or future callers cannot accidentally weaken them. Unsandboxed runtime construction remains unchanged.
+- `readFile` with MIME signature detection and bounded binary response;
+- `writeFile` with recursive parent creation;
+- atomic `editFile`;
+- `listDirectory`/metadata;
+- `grep`;
+- `find`;
+- `exec` with stream frames;
+- health/namespace probes.
 
-Add a malicious-workspace integration fixture containing project extensions, settings, skills, prompts, `AGENTS.md` symlinks, and system-prompt files. Prove none are loaded or executed by a sandboxed runtime.
+The parent API exposes typed methods, not a generic `call(operation, unknown)` outside the sandbox package.
 
-### T4.2 Change the runtime factory port
+### T3.4 Test hostile transport behavior
 
-Replace positional CWD-only methods with policy-bearing inputs, for example:
+Use fake child streams and a deliberately hostile worker fixture to test partial prefixes, coalesced frames, invalid lengths, slow readers, worker stderr floods, spoofed IDs, request races, cancellation, shutdown races, and exit during every handshake phase. Assert FD closure and one fatal callback in every path.
 
-```ts
-createPersistent(workspace: ConversationWorkspace): Promise<PiConversationRuntimePort>;
-openPersistent(
-  workspace: ConversationWorkspace,
-  sessionFile: string,
-): Promise<PiConversationRuntimePort>;
+### Phase 3 exit criterion
+
+The parent can treat the worker as compromised without accepting new authority or leaking unbounded memory/FDs.
+
+## 9. Phase 4 — Dependency-free worker filesystem operations
+
+### T4.1 Implement guest path handling
+
+Create `worker-entry.ts` and `worker-fs.ts` using Node built-ins only.
+
+Path rules:
+
+- strip one leading `@`;
+- resolve relative paths from `/workspace`;
+- treat absolute paths as synthetic guest-root paths;
+- reject NUL and malformed path inputs;
+- use `realpath` for existing mutation targets;
+- for new targets, canonicalize the nearest existing ancestor and append the unresolved suffix;
+- rely on the mount namespace as the final boundary rather than translating guest paths to host paths.
+
+Do not add a host-path broker or return host paths in operation errors.
+
+### T4.2 Serialize mutations by canonical guest target
+
+Maintain per-target promise queues in the worker. Queue the complete read/validate/write mutation window for `writeFile` and `editFile`, and collapse symlink aliases onto the same canonical key. Remove idle queue entries to bound state.
+
+### T4.3 Preserve edit semantics
+
+Port the pinned Pi 0.84.3 behavior needed for exact edits into the worker:
+
+- legacy argument preparation remains parent-side;
+- one or more unique, non-overlapping matches against original content;
+- BOM preservation;
+- LF normalization and original line-ending restoration;
+- no partial write when any edit is invalid;
+- diff, unified patch, and first changed line in the result.
+
+Write through a same-directory temporary file plus rename where filesystem semantics permit, while preserving existing permissions. Contract-test success and every ambiguity/overlap/error case against Pi 0.84.3 fixtures.
+
+### T4.4 Implement read/write/list/image behavior
+
+Return binary bytes and MIME-signature results from the worker. Parent tool code may resize/format returned image bytes, but must not receive or open a host path. Enforce IPC/read limits before buffering.
+
+For sandboxed Markdown workspace images, replace the current parent `realpath/readFile` path with a worker read/signature operation. Keep the current host implementation only for unrestricted records. This closes the existing assistant-supplied path bypass outside tool execution.
+
+### Phase 4 exit criterion
+
+Read/write/edit/ls work in the workspace, cannot escape through absolute paths, `..`, symlinks, or `.chatwca`, and no model-directed path is opened in the parent.
+
+## 10. Phase 5 — Search, shell, output, and cleanup
+
+### T5.1 Implement grep and find inside the worker
+
+Run the mounted `rg` from the worker, not the parent:
+
+- `grep`: JSON output, regex/literal/case/glob/context/limit behavior, `.gitignore`, hidden-file behavior, long-line and byte truncation metadata;
+- `find`: `rg --files`, glob filtering, relative POSIX paths, result limit and truncation metadata.
+
+Spawn without a shell for search. Validate all options before construction and pass argv arrays. Contract-test result text/details against Pi 0.84.3.
+
+### T5.2 Implement shell execution
+
+Run `/bin/bash -lc <command>` with:
+
+- cwd `/workspace`;
+- exact fixed environment;
+- stdin ignored;
+- separate stdout/stderr pipes;
+- one exec at a time;
+- a new process group;
+- the lower of the tool timeout and configured hard maximum.
+
+The worker streams ordered output frames while writing full output to ephemeral worker storage. The parent keeps only Pi-compatible truncation snapshots. If output is truncated, `fullOutputPath` is a guest path readable through the sandbox worker, never a parent temp file.
+
+Terminate the worker when total command output exceeds `CHATWCA_SANDBOX_MAX_COMMAND_OUTPUT_BYTES`; do not continue while dropping bytes.
+
+### T5.3 Clean command descendants
+
+After normal command exit, inspect private `/proc`, terminate remaining descendants, and report success only when only Bubblewrap init and the worker remain. Failure to prove a clean namespace is fatal.
+
+On tool timeout or conversation abort, do not trust process-group cleanup: terminate the entire Bubblewrap namespace. Pipe backpressure must pause child output and resume on drain without allowing more than 4 MiB queued frames.
+
+### T5.4 Add worker restart/failure state
+
+`SandboxController` distinguishes:
+
+- healthy operation failure: return a normal failed tool result; worker remains usable;
+- planned invalidation (abort/command timeout): kill namespace, allow Pi to settle, start and probe a fresh worker before another prompt;
+- fatal exit/protocol failure: reject all tools, abort the active Pi run, mark the runtime failed after Pi settles, and do not auto-fallback or auto-retry unrestricted;
+- restart failure: transition the conversation to `error`.
+
+A timeout may abort the current run and return the conversation to idle only after a replacement worker handshakes. A fatal protocol/worker failure leaves it in `error` until close/reopen.
+
+### Phase 5 exit criterion
+
+Shell/search behavior is useful and bounded; command descendants cannot survive completion, abort, close, or worker teardown.
+
+## 11. Phase 6 — App-owned Pi tools and strict resources
+
+### T6.1 Build complete app-owned tool definitions
+
+Add `src/server/sandbox/tools.ts`. Use Pi's exported definition factories only as pinned metadata/schema sources; do not call their built-in `execute` functions. Replace execution for all seven tools with typed worker operations.
+
+Preserve:
+
+- names, labels, descriptions, parameter schemas, prompt snippets/guidelines;
+- edit `prepareArguments` compatibility;
+- 50 KiB/2,000-line truncation direction and notices;
+- tool update streaming;
+- read image content shape;
+- grep/find/ls details;
+- bash details and guest `fullOutputPath`;
+- edit diff/patch/firstChangedLine.
+
+Do not retain built-in edit preview renderers that can probe a host path. Browser rendering uses normalized results and does not need Pi TUI renderers.
+
+Every thrown tool error must use a generic stable message. Requested paths, command output, OS messages, worker stderr, stacks, and Bubblewrap arguments remain in bounded private diagnostics.
+
+### T6.2 Add a strict ResourceLoader
+
+Implement an app-owned `ResourceLoader` for sandboxed sessions:
+
+- empty extension runtime (`createExtensionRuntime()`), no discovered or inline extensions;
+- empty skills, prompts, and themes;
+- no package discovery/installation;
+- no appended/system prompt files from project/global locations;
+- context files loaded only by an app-owned scanner that stops at workspace root, requires canonical regular files within the workspace, and returns guest display paths such as `/workspace/AGENTS.md`;
+- explicit sandbox system prompt with `/workspace` and the design's network, host-path, `.chatwca`, package-download, and ephemeral-state constraints.
+
+Use a strict in-memory settings snapshot derived from administrator-controlled global settings. Exclude project settings and resource/tool/shell/package fields that can alter tool execution. Preserve safe model choice, thinking, retry, and compaction settings needed for normal agent behavior.
+
+### T6.3 Separate model runtimes
+
+Create two process-lifetime `ModelRuntime` instances using the same administrator-controlled credential/model paths:
+
+- unrestricted: current extension-compatible behavior;
+- strict: never passed to an extension-capable resource loader and therefore never mutated by extension provider registration.
+
+`PiRuntimeFactory` chooses by effective profile. `listAvailableModels()` should report the appropriate administrator-visible catalog without causing the strict runtime to inherit unrestricted extension mutations. Add tests proving an extension-only provider/tool is absent from strict sessions while a normal faux remote provider still works through the parent.
+
+### T6.4 Construct sandboxed sessions with an explicit allowlist
+
+Pass only the seven app-owned `customTools` and an explicit seven-name active allowlist to `createAgentSessionFromServices()`. Set bash session-environment exposure to false. Contract-test the final `session.agent.state.tools`: exact names, exact app-owned execute functions, and no built-in/dynamic/extension extras.
+
+Inspect the final model-facing system prompt in tests and fail if it contains the canonical host workspace, data directory, Pi agent directory, or session file.
+
+### Phase 6 exit criterion
+
+A fake model can exercise every approved tool, but cannot call an unbrokered built-in, extension tool, extension command, dynamic tool, or parent `pi.exec` path.
+
+## 12. Phase 7 — Runtime, registry, fork, abort, and shutdown integration
+
+### T7.1 Refactor the runtime factory API
+
+Update every production/test factory implementation to take `RuntimeWorkspacePolicy`. For open, verify the session file as today, but use the supplied trusted policy rather than deriving security from the session header/CWD. Continue verifying that the stored canonical CWD equals `policy.cwd`.
+
+For sandboxed creation:
+
+1. run fresh workspace admission;
+2. start and handshake the worker;
+3. construct strict Pi services/session;
+4. dispose the worker if any later construction step fails.
+
+For unrestricted creation, preserve the current path exactly.
+
+### T7.2 Extend `PiConversationRuntime`
+
+Own an optional controller and expose:
+
+- immutable `securityProfile`;
+- a fatal runtime failure subscription for the registry;
+- coordinated `abort()` that tears down the worker, aborts Pi, waits for idle, and handshakes a replacement;
+- `dispose()` that always kills the worker even if Pi disposal fails;
+- prompt rejection while worker replacement is pending or failed.
+
+Pi session replacement inside a runtime retains the controller because profile/path changes are prohibited while live.
+
+### T7.3 Extend conversation registry state
+
+Store and project the effective profile. Subscribe to runtime fatal failures and transition to `error` after Pi settles without allowing a later normalizer `idle` event to overwrite the terminal state.
+
+Keep worker ownership inside the runtime so existing close, LRU eviction, temporary fork ownership, failed-fork rollback, and process shutdown automatically cover it. Add explicit assertions that runtime disposal has completed worker teardown.
+
+### T7.4 Re-resolve policy for fork and rewind
+
+Before fork/rewind, `src/server/protocol.ts` must:
+
+- read source state only to obtain workspace ID;
+- call `requireUsable(workspaceId)` again;
+- pass the resulting policy to `registry.fork()`;
+- verify it still matches the immutable source workspace ownership;
+- create the temporary runtime with `openPersistent(policy, sourceFile)`.
+
+Promotion transfers the temporary Pi runtime and its worker together. Rewind deletes the source only after the fork snapshot succeeds, preserving current semantics.
+
+### T7.5 Verify all cleanup paths
+
+Add lifecycle tests for:
+
+- normal close;
+- LRU eviction;
+- failed registration;
+- failed fork before/after replacement;
+- prompt abort and repeated abort;
+- command timeout;
+- worker self-kill;
+- protocol violation;
+- graceful shutdown and forced deadline;
+- startup failure after a worker exists.
+
+Each test checks process exit, FD closure, pending request rejection, and no fallback factory call.
+
+### Phase 7 exit criterion
+
+Concurrent unrestricted and sandboxed conversations do not share workers, strict tools, resource loaders, or extension-mutated model runtimes. Every registry ownership exit disposes its worker.
+
+## 13. Phase 8 — Browser behavior
+
+### T8.1 Load client-safe sandbox configuration
+
+Add a shared public config schema/type and store it in `App`. Handle config fetch failure conservatively: do not show/select sandbox options until authoritative config is available.
+
+### T8.2 Add profile create/edit controls
+
+Update `WorkspaceForm` and sidebar props:
+
+- optional mode defaults new workspaces to unrestricted;
+- disabled mode hides/fixes the control to unrestricted;
+- required mode fixes it to Workspace sandbox;
+- edit displays stored and effective values;
+- reducing protection uses an explicit `window.confirm()` warning and sends `acknowledgeSecurityDowngrade: true` only after confirmation;
+- security/path controls are disabled when the client knows a workspace has a live runtime, while the server remains authoritative.
+
+Use **Workspace sandbox**, never “Safe” or “Secure.”
+
+### T8.3 Show availability versus policy usability
+
+Workspace rows and selected-workspace behavior distinguish:
+
+- unavailable directory;
+- policy-blocked workspace and its reason;
+- usable workspace.
+
+A blocked workspace remains visible and can show Workspace Info/history, but New/Open/Fork/Rewind are disabled and server-rejected if attempted.
+
+### T8.4 Expand Workspace Info
+
+Show:
+
+- stored and effective profile;
+- whether server mode requires sandboxing;
+- workspace and session paths;
+- no-network policy;
+- writable `.git` warning;
+- `/usr` plus generically described administrator-approved read-only runtime mounts, without exposing host mount paths;
+- remote-model disclosure warning;
+- lack of CPU/memory/disk denial-of-service isolation.
+
+### T8.5 Add conversation badge
+
+Add an always-visible **Sandboxed** or **Unrestricted** badge to `ConversationHeader`, sourced only from `ConversationState.securityProfile`. Add accessible text, high-contrast styles, and browser/unit coverage.
+
+### Phase 8 exit criterion
+
+All three server modes, stored/effective differences, busy updates, downgrade confirmation, blocked reasons, badges, and warnings are covered by reducer/component and Playwright tests.
+
+## 14. Phase 9 — Documentation, deployment, CI, and hardening
+
+### T9.1 Update operator documentation
+
+Update `README.md`, `.env.example`, and add `docs/bubblewrap-operations.md` with:
+
+- Bubblewrap/Node/kernel requirements and installation;
+- all environment variables and JSON examples;
+- required-mode roots requirement;
+- synthetic-root/toolchain compatibility;
+- no package network access;
+- remote model disclosure;
+- writable workspace/`.git` and hook/build-script risk;
+- socket prohibition and race limitation;
+- extension/provider compatibility;
+- data/Pi overlap deployment trap;
+- disabled/optional/required rollout and failure behavior;
+- private diagnostic fields and troubleshooting probe failures;
+- explicit statement that Bubblewrap is not authentication or resource quota enforcement.
+
+Reconcile the older LAN deployment text with the current mTLS/reverse-proxy deployment: recommend loopback binding or firewall isolation and state that all accepted clients retain full ChatWCA authority.
+
+### T9.2 Harden the systemd unit
+
+Test and document a unit with:
+
+- `NoNewPrivileges=true` if compatible with unprivileged user namespaces;
+- `KillMode=control-group`;
+- a process-wide `TasksMax` defense-in-depth value;
+- a stop timeout consistent with ChatWCA's bounded shutdown;
+- no `PrivateUsers`/namespace restriction that prevents Bubblewrap.
+
+Do not claim these are per-conversation cgroup limits.
+
+### T9.3 Add dedicated Linux sandbox CI
+
+Keep the existing default-mode suite. Add a sandbox-capable Linux job that installs Bubblewrap and ripgrep and must fail, not skip, if namespace/probe tests cannot run. Jobs not declared sandbox-capable may skip only the marked real-Bubblewrap suite.
+
+Run the sandbox integration suite both directly and under the provided systemd unit in deployment validation. Capture only redacted diagnostics in CI artifacts.
+
+### T9.4 Run attack and concurrency tests
+
+Cover the full design matrix:
+
+- relative, absolute, `..`, symlink, rename, and mutation-alias escapes;
+- SQLite/WAL/SHM, Pi credentials, global/local sessions, parent environment, `/proc`, and canary reads;
+- IPv4/IPv6/DNS/loopback and Unix socket admission;
+- workspace/source modification and `.git` functionality;
+- read-only toolchain use and write rejection;
+- malformed IPC and compromised worker behavior;
+- output floods and slow parent reads;
+- fork bombs/large allocation tests only in isolated CI, verifying cleanup but not claiming quota protection;
+- concurrent profiles and multiple sandboxed workers;
+- remote faux provider success through the parent.
+
+### Phase 9 exit criterion
+
+The acceptance criteria in `docs/bubblewrap-design.md` are each mapped to at least one automated test or a documented manual deployment check.
+
+## 15. Planned file changes
+
+```text
+scripts/
+└── build-sandbox-worker.mjs       # bundle dependency-free worker artifact
+
+src/server/
+├── sandbox/
+│   ├── config.ts                  # mode, roots, mounts, limits, public projection
+│   ├── admission.ts               # protected paths, .chatwca, bounded socket walk
+│   ├── bwrap.ts                   # executable validation, argv/data-FD builder
+│   ├── probe.ts                   # startup and handshake assertions
+│   ├── protocol.ts                # parent schemas, frame codec, operation types
+│   ├── worker-client.ts           # process/IPC lifecycle and flow control
+│   ├── worker-controller.ts       # restart/fatal state for one runtime
+│   ├── worker-entry.ts            # dependency-free child main
+│   ├── worker-fs.ts               # guest paths, queues, fs/search/edit operations
+│   ├── tools.ts                   # seven Pi-compatible app-owned tools
+│   └── resources.ts               # strict loader/settings/context/system prompt
+├── config.ts
+├── database.ts
+├── workspace-repository.ts
+├── pi-runtime.ts
+├── conversation-registry.ts
+├── protocol.ts
+└── index.ts
+
+src/shared/
+├── protocol.ts
+└── errors.ts
+
+src/web/src/
+├── App.tsx
+├── api/state.ts
+├── components/WorkspaceForm.tsx
+├── components/WorkspaceSidebar.tsx
+├── components/ConversationHeader.tsx
+└── app.css
+
+tests/
+├── unit/sandbox-*.test.ts
+├── integration/sandbox-*.test.ts
+├── browser/workspace-sandbox.spec.ts
+└── fixtures/sandbox/hostile-worker.mjs
 ```
 
-The implementation still resolves/canonicalizes the CWD and session file independently and checks that the stored session CWD equals the workspace path.
+Existing test fakes for `PiRuntimeFactoryPort`, `ProtocolWorkspaceRepository`, workspace wire objects, and `ServerConfig` must be updated centrally to avoid unsafe `as` casts that omit policy.
 
-Capture the workspace policy in the `createAgentSessionRuntime()` factory closure so every service reconstruction after fork/session replacement receives the same sandbox policy.
+## 16. Test gates by phase
 
-### T4.3 Thread policy through `ConversationRegistry`
+After every phase run:
 
-Update `src/server/conversation-registry.ts`:
-
-- extend `ConversationWorkspace` and `ConversationRecord` with immutable runtime policy;
-- pass the full policy on create and open;
-- pass the source policy when constructing temporary fork runtimes;
-- compare policy as part of duplicate live-runtime ownership checks;
-- preserve policy across replacement registration;
-- dispose the controller on failed create/open/fork registration; and
-- ensure close, LRU eviction, rewind, temporary-runtime failure, and shutdown all await sandbox cleanup.
-
-Update all fake runtime factories and fixtures to use the new method signatures.
-
-### T4.4 Expose runtime status
-
-Add a revisioned sandbox-status projection:
-
-```ts
-type SandboxRuntimeStatus =
-  | "disabled"
-  | "stopped"
-  | "starting"
-  | "ready"
-  | "stopping"
-  | "error";
+```sh
+npm run typecheck
+npm run test:unit
+npm run test:integration
+npm run build
 ```
 
-- Add `sandboxStatus` to `ConversationState`.
-- Add a `conversation.sandbox-status` event to the shared protocol.
-- Let `PiConversationRuntimePort` expose current status and a status subscription.
-- Have the registry bridge controller changes into normal revision sequencing.
-- Unsubscribe before disposal and ignore late status notifications.
-
-### T4.5 Fail prompt startup closed
-
-Before forwarding a sandboxed prompt to Pi:
-
-- acquire the prompt/run lease;
-- start the VM;
-- reject with `sandbox_capacity`, `sandbox_unavailable`, or `sandbox_start_failed` if preparation fails;
-- do not call `session.prompt()` on failure; and
-- never construct or invoke host built-in tools as a fallback.
-
-The existing preflight acknowledgement semantics remain unchanged after successful VM preparation.
-
-### T4.6 Abort and timeout behavior
-
-For sandboxed runtimes:
-
-- call Pi abort;
-- invalidate and close the current VM even if Pi abort resolves first;
-- keep the current run generation invalid so subsequent tool calls in that run fail;
-- return the conversation to a reusable state only after the run settles; and
-- allow the next prompt to boot a clean VM.
-
-Add races for abort-during-start, abort-during-exec, close-after-abort, shutdown-during-start, and replacement-during-cleanup.
-
-### T4.7 Wire startup ownership
-
-In `src/server/index.ts`:
-
-- construct one process-wide `SandboxVmPool` from server configuration;
-- inject it into `PiRuntimeFactory`;
-- include it in startup failure unwinding and graceful shutdown;
-- keep server startup independent of QEMU when no VM is requested; and
-- ensure database/listener cleanup still runs if sandbox infrastructure construction fails.
-
-**Phase 4 exit criteria:** create/open/fork/rewind consistently inherit policy, first prompt starts safely, every lifecycle path closes VMs, and unsandboxed behavior remains unchanged.
-
-## 9. Phase 5 — Protocol dispatch and UI
-
-### T5.1 Dispatch workspace policy commands
-
-Update `src/server/protocol.ts`:
-
-- pass all sandbox fields on create;
-- pass the complete policy group on update;
-- reject path or policy changes when `registry.hasLiveWorkspace()` is true;
-- continue allowing name-only updates while live;
-- return and broadcast authoritative normalized workspace values; and
-- preserve safe error mapping.
-
-Add protocol tests proving malformed or inconsistent settings never reach the repository.
-
-### T5.2 Extend workspace creation/editing
-
-Update `WorkspaceForm.tsx`, `WorkspaceSidebar.tsx`, and `App.tsx`:
-
-- add a default-disabled **Sandbox this workspace** checkbox;
-- when enabled, show radio/select choices for **No network**, **Allowed hosts**, and **Public web**;
-- show a one-host-per-line allowlist editor for `allowlist`;
-- validate obvious empty/duplicate/malformed entries client-side while treating server normalization as authoritative;
-- reset network mode to `none` and clear hosts when sandbox is disabled;
-- submit complete sandbox policy on create and edit;
-- permit policy editing but show the server's live-runtime constraint;
-- warn that the workspace remains writable; and
-- warn that allowlisted/public destinations can receive all workspace-readable data.
-
-Do not allow session-storage policy to become editable.
-
-### T5.3 Show effective policy
-
-In Workspace Info, display:
-
-- sandbox enabled/disabled;
-- network mode;
-- canonical allowed hosts when applicable;
-- `/workspace` as the guest mount; and
-- a concise boundary statement.
-
-In `ConversationHeader.tsx`, add accessible badges for:
-
-- **Sandboxed**;
-- **No network**, **N allowed hosts**, or **Public web**; and
-- current VM status when starting/error is relevant.
-
-The host workspace path may remain visible to the human in ChatWCA; it must not be inserted into the model-visible sandbox prompt.
-
-### T5.4 Handle status and failures in the web client
-
-Update client schemas/reducer/state tests to:
-
-- consume `sandboxStatus` snapshots and revisioned events;
-- show a starting state while the first prompt prepares the VM;
-- preserve a user's draft if startup fails;
-- show stable sandbox/capacity errors;
-- avoid presenting a failed prompt as accepted; and
-- reconcile status correctly after reconnect.
-
-Update the browser fixture server with safe defaults and simulated start/failure/status transitions; browser CI must not require QEMU.
-
-**Phase 5 exit criteria:** users can create and edit all three network modes, see authoritative normalized policy, and understand when the VM is starting or failed.
-
-## 10. Phase 6 — Testing and hardening
-
-### T6.1 Unit tests
-
-Add or update tests for:
-
-- Node/config bounds and defaults;
-- database v1 -> v2 -> v3 and v2 -> v3 migration;
-- workspace policy CRUD and atomic allowlist replacement;
-- hostname normalization, IDNA, limits, malformed inputs, duplicates, and cross-field consistency;
-- closed TypeBox command/response schemas;
-- protocol live-runtime update rejection;
-- path translation and host-path redaction;
-- fixed guest environment construction;
-- network hook construction for all modes;
-- VM controller startup/close/invalidation races;
-- VM-pool capacity and LRU behavior;
-- registry policy ownership and fork inheritance;
-- sandbox-status revisions;
-- UI form accessibility, warnings, info, badges, and reducer behavior; and
-- unchanged unsandboxed runtime behavior.
-
-### T6.2 QEMU-free integration tests
-
-Use a fake `GondolinVmFactory` and Pi's faux provider to verify:
-
-- sandboxed create/open/fork/rewind receives approved tools;
-- startup failure occurs before prompt acceptance;
-- no host fallback occurs;
-- all effective tools are from the approved set;
-- malicious discovered resources do not load;
-- process-environment canaries do not enter VM exec options;
-- abort/timeout invalidates the VM;
-- runtime replacement closes the prior VM generation;
-- LRU conversation eviction releases VM capacity; and
-- graceful shutdown closes every controller.
-
-### T6.3 Gated real-Gondolin tests
-
-Add an opt-in suite, such as `npm run test:gondolin`, guarded by an explicit environment variable and not run on ordinary browser/unit CI. It must cover:
-
-- actual KVM boot and accelerator selection;
-- workspace write-through;
-- outside-workspace and symlink escape denial;
-- `/.chatwca` shadowing for every relevant operation;
-- environment-secret canaries;
-- all seven Pi tools and user bash;
-- no-network, exact allowlist, and public-web modes;
-- redirects/internal ranges/WebSocket/raw protocol denial;
-- abort and timeout process cleanup;
-- concurrent VM capacity behavior; and
-- no QEMU process or socket remaining after close and shutdown.
-
-Run this suite in a dedicated deployment-host preflight job where `/dev/kvm` and network test fixtures are controlled.
-
-### T6.4 Browser tests
-
-Extend Playwright coverage for:
-
-- safe defaults on workspace creation;
-- allowlist editing and validation;
-- public-web warning;
-- policy persistence and Workspace Info;
-- policy update rejection while a conversation is live;
-- header badges and starting/ready/error states;
-- draft preservation after sandbox startup failure; and
-- unsandboxed workspace UI and behavior.
-
-### T6.5 Security review checklist
-
-Before release, manually verify:
-
-- no code path passes `process.env` to Gondolin;
-- no sandboxed path creates local Pi tools;
-- no untrusted extension factory/module is loaded first and filtered later;
-- project settings/context are not read through symlinks;
-- `allowedHosts` is always explicit, including `[]` for `none`;
-- redirects and every resolved IP are policy checked;
-- WebSockets, SSH, mapped TCP, and ingress remain disabled;
-- logs and public errors contain no secrets or raw provider errors;
-- `.chatwca` cannot be reached by alias, rename, or symlink; and
-- every VM owner has a bounded, idempotent cleanup path.
-
-## 11. Phase 7 — Documentation and deployment
-
-### T7.1 Update product documentation
-
-Update `README.md` and `docs/design.md` to describe:
-
-- Node 24 and Linux/QEMU/KVM requirements;
-- the per-conversation VM ownership model;
-- workspace/network settings and defaults;
-- disabled project resources in sandbox mode;
-- writable-workspace limitations and persistent code poisoning risk;
-- allowlist/public-web exfiltration implications;
-- first-run asset size and cache location;
-- resource configuration and VM capacity;
-- guest toolchain limitations; and
-- the distinction between guest command egress and any future host-side web-search tool.
-
-### T7.2 Add deployment readiness tooling
-
-Provide an operator preflight command that checks:
-
-- Node version;
-- QEMU availability/version;
-- `/dev/kvm` access and group membership;
-- Gondolin asset availability/cache writability;
-- one boot/exec/close cycle;
-- effective accelerator;
-- no leaked QEMU process; and
-- configured memory/capacity totals.
-
-Production deployment should prefetch verified assets before accepting sandboxed workspaces. Do not rely on a user's first prompt to download runtime assets.
-
-### T7.3 Rollout
-
-- Keep sandbox disabled by default for every migrated and new workspace.
-- Deploy Node/QEMU/assets first.
-- Run the gated host preflight and realistic repository workflow.
-- Release workspace policy/UI second.
-- Initially enable sandbox on a small number of workspaces and monitor boot latency, memory, cleanup failures, and capacity errors.
-- Do not automatically convert existing workspaces to sandboxed execution.
-
-## 12. Out of scope for v1
-
-- Per-conversation policy overrides
-- Raw unrestricted NAT
-- WebSockets, UDP, SSH egress, mapped TCP, or guest ingress
-- Guest access to host SSH agents or cloud credentials
-- Authenticated guest services through secret placeholders
-- A trusted global/project extension allowlist
-- File rollback, snapshots, or copy-on-write workspaces
-- Hiding arbitrary workspace secret patterns
-- Multi-host scheduling or horizontal scaling
-- Non-Linux production support
-
-## 13. Acceptance criteria
-
-The feature is complete when:
-
-- existing databases migrate to `sandbox: false`, network `none`, and an empty allowlist;
-- workspace create/list/update persist and return canonical sandbox policy;
-- policy/path changes are rejected while the workspace has a live runtime;
-- unsandboxed workspaces retain current host-tool behavior;
-- sandboxed create/open/fork/rewind expose only approved VM-backed tools;
-- the model sees `/workspace` and never the host workspace path;
-- provider credentials, Pi session paths, proxy variables, and unrelated process environment values are absent in the guest;
-- `/.chatwca` and every host path outside the workspace are inaccessible;
-- `none`, exact-host `allowlist`, and `public-web` work as documented while internal ranges and disabled protocols remain blocked;
-- VM startup, capacity, and readiness are visible and fail without host fallback;
-- abort and timeout discard the current VM before the conversation can be reused;
-- close, replacement, fork failure, LRU eviction, startup unwind, and graceful shutdown leave no QEMU process or socket behind;
-- VM count, CPU, and memory are explicitly bounded;
-- ordinary CI passes without QEMU, and the gated real-Gondolin suite passes on the deployment host;
-- the UI clearly states that workspace files remain writable and network-enabled modes permit data exfiltration; and
-- deployment documentation includes Node 24, KVM, asset prefetch, cache, and resource requirements.
+After UI phases also run:
+
+```sh
+npm run test:browser
+```
+
+On a sandbox-capable Linux host run the dedicated real-Bubblewrap suite and Pi SDK smoke test. Before release, run the complete suite under both:
+
+```text
+CHATWCA_SANDBOX_MODE=disabled
+CHATWCA_SANDBOX_MODE=optional
+CHATWCA_SANDBOX_MODE=required
+```
+
+Required mode must use approved temporary roots and must not rewrite stored workspace rows.
+
+## 17. Release and rollback strategy
+
+1. Ship with the existing default `CHATWCA_SANDBOX_MODE=disabled`.
+2. Validate optional-mode startup probe and representative repositories on the production host.
+3. Opt in selected workspaces and monitor only redacted phase/error codes, worker exits, restart outcomes, and command timeouts.
+4. Move to required mode only after every production workspace is under approved roots and data/Pi directories do not overlap.
+5. Operational rollback is an explicit server-mode change and restart. Stored sandbox requests remain stored; disabled mode shows them as policy-blocked rather than silently running unrestricted.
+
+No rollback path may reinterpret a requested sandboxed workspace as unrestricted without an administrator changing policy and, where applicable, a browser-confirmed workspace downgrade.
+
+## 18. Definition of done
+
+Implementation is complete only when:
+
+- schema version 3 persists requested profiles and mode-derived effective profiles;
+- root, protected path, and live-runtime checks are server-enforced;
+- optional/required startup executes the real functional probe before listening;
+- every enabled sandboxed tool and assistant-supplied workspace image path uses the worker;
+- the strict Pi runtime contains exactly seven app-owned tools and no arbitrary resources/extensions;
+- parent credentials/environment/session stores are absent from the namespace;
+- synthetic root, `.chatwca` mask, no-network policy, and read-only mounts pass integration probes;
+- abort, timeout, failure, close, eviction, fork rollback, and shutdown leave no worker descendants or FDs;
+- no sandbox failure path selects unrestricted tools;
+- concurrent effective profiles remain isolated; and
+- UI/operator text accurately communicates remote-provider disclosure, writable workspace/`.git`, compatibility limits, socket caveat, and missing resource quotas.

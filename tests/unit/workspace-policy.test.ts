@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { openDatabase, type ChatWcaDatabase } from "../../src/server/database.js";
 import {
@@ -66,7 +66,7 @@ describe("workspace security policy", () => {
     ["disabled", "workspace-sandboxed", null, "sandbox_disabled"],
   ] as const)(
     "evaluates %s mode with stored %s",
-    (mode, stored, effective, issue) => {
+    async (mode, stored, effective, issue) => {
       const root = temporaryDirectory();
       const workspacePath = path.join(root, "project");
       mkdirSync(workspacePath);
@@ -83,21 +83,21 @@ describe("workspace security policy", () => {
         policyIssue: issue,
       });
       if (issue === null) {
-        expect(repository.requireUsable("workspace-1")).toEqual({
+        await expect(repository.requireUsable("workspace-1")).resolves.toEqual({
           workspaceId: "workspace-1",
           cwd: realpathSync(workspacePath),
           sessionDirectory: null,
           securityProfile: effective,
         });
       } else {
-        expect(() => repository.requireUsable("workspace-1")).toThrow(
-          expect.objectContaining({ code: ERROR_CODES.SANDBOX_DISABLED }),
-        );
+        await expect(repository.requireUsable("workspace-1")).rejects.toMatchObject({
+          code: ERROR_CODES.SANDBOX_DISABLED,
+        });
       }
     },
   );
 
-  it("enforces roots on create, path update, projection, and runtime admission", () => {
+  it("enforces roots on create, path update, projection, and runtime admission", async () => {
     const approvedRoot = temporaryDirectory();
     const approved = path.join(approvedRoot, "approved");
     mkdirSync(approved);
@@ -137,9 +137,9 @@ describe("workspace security policy", () => {
       policyIssue: "outside_workspace_roots",
     });
     expect(repository.requireAvailable("legacy").path).toBe(realpathSync(outside));
-    expect(() => repository.requireUsable("legacy")).toThrow(
-      expect.objectContaining({ code: ERROR_CODES.SANDBOX_WORKSPACE_REJECTED }),
-    );
+    await expect(repository.requireUsable("legacy")).rejects.toMatchObject({
+      code: ERROR_CODES.SANDBOX_WORKSPACE_REJECTED,
+    });
   });
 
   it("rejects sandbox overlap in either direction while unrestricted remains usable", () => {
@@ -168,6 +168,35 @@ describe("workspace security policy", () => {
       path: workspacePath,
       securityProfile: "unrestricted",
     })).toMatchObject({ usable: true, policyIssue: null });
+  });
+
+  it("runs fresh asynchronous admission before every sandbox policy result", async () => {
+    const root = temporaryDirectory();
+    const workspacePath = path.join(root, "project");
+    mkdirSync(workspacePath);
+    const opened = database();
+    seed(opened, workspacePath, "workspace-sandboxed");
+    const admit = vi.fn(async () => undefined);
+    const configuredPolicy = policy("optional", root);
+    const repository = new WorkspaceRepository(opened.connection, {
+      policy: configuredPolicy,
+      sandboxAdmission: { admit },
+    });
+
+    await repository.requireUsable("workspace-1");
+    await repository.requireUsable("workspace-1");
+    expect(admit).toHaveBeenCalledTimes(2);
+    expect(admit).toHaveBeenLastCalledWith({
+      workspacePath: realpathSync(workspacePath),
+      workspaceRoots: configuredPolicy.workspaceRoots,
+      protectedPaths: [configuredPolicy.dataDirectory, configuredPolicy.piAgentDirectory],
+    });
+
+    const failure = Object.assign(new Error("socket appeared"), {
+      code: ERROR_CODES.SANDBOX_WORKSPACE_REJECTED,
+    });
+    admit.mockRejectedValueOnce(failure);
+    await expect(repository.requireUsable("workspace-1")).rejects.toBe(failure);
   });
 
   it("enforces mode ceilings and explicit downgrade acknowledgement", () => {

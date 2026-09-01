@@ -9,6 +9,7 @@ import path from "node:path";
 
 import type Database from "better-sqlite3";
 
+import { SandboxWorkspaceAdmission } from "./sandbox/admission.js";
 import {
   AppError,
   ERROR_CODES,
@@ -82,6 +83,7 @@ export interface WorkspaceRepositoryOptions {
   readonly clock?: () => number;
   readonly fileSystem?: WorkspaceFileSystem;
   readonly policy?: Readonly<WorkspacePolicyInputs>;
+  readonly sandboxAdmission?: Pick<SandboxWorkspaceAdmission, "admit">;
 }
 
 export interface RuntimeWorkspacePolicy {
@@ -173,6 +175,7 @@ export class WorkspaceRepository {
   readonly #clock: () => number;
   readonly #fileSystem: WorkspaceFileSystem;
   readonly #policy: Readonly<WorkspacePolicyInputs>;
+  readonly #sandboxAdmission: Pick<SandboxWorkspaceAdmission, "admit">;
   readonly #listStatement: Database.Statement<[], WorkspaceRow>;
   readonly #getStatement: Database.Statement<[string], WorkspaceRow>;
   readonly #insertStatement: Database.Statement<
@@ -197,6 +200,7 @@ export class WorkspaceRepository {
       workspaceRoots: Object.freeze([...suppliedPolicy.workspaceRoots]),
       readOnlyMounts: Object.freeze([...suppliedPolicy.readOnlyMounts]),
     });
+    this.#sandboxAdmission = options.sandboxAdmission ?? new SandboxWorkspaceAdmission();
 
     try {
       this.#listStatement = connection.prepare<[], WorkspaceRow>(
@@ -244,7 +248,7 @@ export class WorkspaceRepository {
   }
 
   /** Freshly resolve all policy needed to construct a conversation runtime. */
-  requireUsable(workspaceId: string): RuntimeWorkspacePolicy {
+  async requireUsable(workspaceId: string): Promise<RuntimeWorkspacePolicy> {
     const workspace = this.requireAvailable(workspaceId);
     const evaluation = this.#evaluatePolicy(workspace);
     if (!evaluation.usable || evaluation.effectiveSecurityProfile === null) {
@@ -254,18 +258,16 @@ export class WorkspaceRepository {
       throw new AppError(ERROR_CODES.SANDBOX_WORKSPACE_REJECTED);
     }
 
-    // Availability verifies canonical identity. Sandboxed tools additionally
-    // require mutation access; Phase 2 extends this boundary with mask/socket
-    // admission immediately before worker construction.
     if (evaluation.effectiveSecurityProfile === "workspace-sandboxed") {
-      try {
-        this.#fileSystem.access(
-          workspace.path,
-          fsConstants.R_OK | fsConstants.W_OK | fsConstants.X_OK,
-        );
-      } catch (error) {
-        throw new AppError(ERROR_CODES.SANDBOX_WORKSPACE_REJECTED, { cause: error });
-      }
+      await this.#sandboxAdmission.admit({
+        workspacePath: workspace.path,
+        workspaceRoots: this.#policy.workspaceRoots,
+        protectedPaths: [
+          this.#policy.dataDirectory,
+          this.#policy.piAgentDirectory,
+          ...this.#policy.readOnlyMounts,
+        ],
+      });
     }
     return Object.freeze({
       workspaceId: workspace.id,

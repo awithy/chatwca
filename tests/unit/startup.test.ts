@@ -16,6 +16,10 @@ import {
 } from "../../src/server/index.js";
 import type { PiRuntimeFactoryPort } from "../../src/server/pi-runtime.js";
 import { WorkspaceRepository } from "../../src/server/workspace-repository.js";
+import type {
+  SandboxWorkerArtifact,
+  ValidatedSandboxHost,
+} from "../../src/server/sandbox/bwrap.js";
 
 const temporaryDirectories: string[] = [];
 const runningServers: ChatWcaServer[] = [];
@@ -37,6 +41,18 @@ function config(root: string): Readonly<ServerConfig> {
     root,
   );
 }
+
+const workerArtifact: SandboxWorkerArtifact = {
+  source: Buffer.from("worker"), sha256: "a".repeat(64), version: "1",
+};
+const validatedHost: ValidatedSandboxHost = {
+  bwrapPath: "/usr/bin/bwrap",
+  bwrapVersion: "bubblewrap 0.6.1",
+  nodeVersion: "v22.19.0",
+  rgPath: "/usr/bin/rg",
+  rgVersion: "ripgrep 14.0.0",
+  compatibilityLinks: { bin: true, sbin: true, lib: true, lib64: true },
+};
 
 function fakeRuntimeFactory(): PiRuntimeFactoryPort {
   return {
@@ -123,6 +139,98 @@ describe("production startup wiring", () => {
 
     await server.shutdown();
     expect(database?.closed).toBe(true);
+  });
+
+  it("runs enabled sandbox loading, validation, and functional probing before Pi services and listeners", async () => {
+    const root = temporaryDirectory();
+    const loadedConfig = loadConfig({
+      CHATWCA_HOST: "127.0.0.1",
+      CHATWCA_PORT: "8787",
+      CHATWCA_DATA_DIR: path.join(root, "data"),
+      CHATWCA_SANDBOX_MODE: "optional",
+      CHATWCA_WORKSPACE_ROOTS: "[]",
+      CHATWCA_SHUTDOWN_GRACE_MS: "25",
+    }, root);
+    const calls: string[] = [];
+    let database: ChatWcaDatabase | undefined;
+    const server = await startChatWcaServer({
+      loadConfiguration: () => { calls.push("config"); return loadedConfig; },
+      openDatabase: (dataDir) => {
+        calls.push("sqlite");
+        database = openDatabase(dataDir);
+        return database;
+      },
+      loadSandboxWorkerArtifact: async () => { calls.push("worker"); return workerArtifact; },
+      validateSandboxHost: () => { calls.push("validate"); return validatedHost; },
+      runSandboxStartupProbe: async () => {
+        calls.push("probe");
+        return { succeeded: true, bwrapVersion: "bubblewrap 0.6.1", nodeVersion: "v22.19.0", rgVersion: "ripgrep 14.0.0", workerSha256: workerArtifact.sha256 };
+      },
+      createWorkspaceRepository: (connection) => {
+        calls.push("workspace-repository");
+        return new WorkspaceRepository(connection);
+      },
+      createRuntimeFactory: async () => { calls.push("pi-services"); return fakeRuntimeFactory(); },
+      serverVersion: "sandbox-startup-test",
+      listen: async (created) => { calls.push("listeners"); await bindEphemeral(created); },
+    });
+    runningServers.push(server);
+    expect(calls).toEqual([
+      "config", "sqlite", "worker", "validate", "probe",
+      "workspace-repository", "pi-services", "listeners",
+    ]);
+    const address = server.httpServer.address() as AddressInfo;
+    const response = await fetch(`http://127.0.0.1:${String(address.port)}/api/config`);
+    await expect(response.json()).resolves.toMatchObject({
+      sandbox: { mode: "optional", functionalProbeSucceeded: true },
+    });
+    await server.shutdown();
+    expect(database?.closed).toBe(true);
+  });
+
+  it("disabled mode never loads, validates, or probes Bubblewrap", async () => {
+    const root = temporaryDirectory();
+    const loadWorker = vi.fn(async () => workerArtifact);
+    const validateHost = vi.fn(() => validatedHost);
+    const probe = vi.fn(async () => ({ succeeded: true as const, bwrapVersion: "", nodeVersion: "", rgVersion: "", workerSha256: "" }));
+    const server = await startChatWcaServer({
+      loadConfiguration: () => config(root),
+      loadSandboxWorkerArtifact: loadWorker,
+      validateSandboxHost: validateHost,
+      runSandboxStartupProbe: probe,
+      createRuntimeFactory: async () => fakeRuntimeFactory(),
+      serverVersion: "disabled-test",
+      listen: bindEphemeral,
+    });
+    runningServers.push(server);
+    expect(loadWorker).not.toHaveBeenCalled();
+    expect(validateHost).not.toHaveBeenCalled();
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it("fails closed and closes SQLite when the functional probe fails before Pi/listen", async () => {
+    const root = temporaryDirectory();
+    const loadedConfig = loadConfig({
+      CHATWCA_DATA_DIR: path.join(root, "data"),
+      CHATWCA_SANDBOX_MODE: "optional",
+      CHATWCA_WORKSPACE_ROOTS: "[]",
+    }, root);
+    const failure = new Error("probe failed");
+    let database: ChatWcaDatabase | undefined;
+    const createPi = vi.fn(async () => fakeRuntimeFactory());
+    const bind = vi.fn(bindEphemeral);
+    await expect(startChatWcaServer({
+      loadConfiguration: () => loadedConfig,
+      openDatabase: (dataDir) => { database = openDatabase(dataDir); return database; },
+      loadSandboxWorkerArtifact: async () => workerArtifact,
+      validateSandboxHost: () => validatedHost,
+      runSandboxStartupProbe: async () => { throw failure; },
+      createRuntimeFactory: createPi,
+      listen: bind,
+    })).rejects.toBe(failure);
+    expect(database?.closed).toBe(true);
+    expect(createPi).not.toHaveBeenCalled();
+    expect(bind).not.toHaveBeenCalled();
   });
 
   it("closes SQLite when required Pi initialization fails", async () => {

@@ -7,6 +7,7 @@ import { loadEnvFile } from "node:process";
 import { fileURLToPath } from "node:url";
 import WebSocket, { WebSocketServer } from "ws";
 
+import { toAppError } from "../shared/errors.js";
 import {
   ConfigurationError,
   loadConfig,
@@ -40,9 +41,19 @@ import {
   WEBSOCKET_RESTART_CLOSE_REASON,
   type ShutdownRuntimeOwner,
 } from "./shutdown.js";
+import {
+  validateBwrapAndToolchain,
+  type SandboxWorkerArtifact,
+  type ValidatedSandboxHost,
+} from "./sandbox/bwrap.js";
+import {
+  loadSandboxWorkerArtifact,
+  runSandboxStartupProbe,
+  type SandboxFunctionalProbeResult,
+} from "./sandbox/probe.js";
+import { publicSandboxConfig } from "./sandbox/config.js";
 import { serveWebApp } from "./static.js";
 import { hasAllowedWebSocketOrigin } from "./websocket-boundary.js";
-import { publicSandboxConfig } from "./sandbox/config.js";
 import { WorkspaceRepository } from "./workspace-repository.js";
 
 interface PackageMetadata {
@@ -70,6 +81,7 @@ export interface ChatWcaProtocolServices {
   readonly shutdown?: ShutdownRuntimeOwner;
   /** Production supplies the process-wide SQLite owner. */
   readonly closeStorage?: () => void;
+  readonly sandboxFunctionalProbeSucceeded?: boolean;
   readonly onInternalError?: (error: unknown) => void;
 }
 
@@ -176,7 +188,10 @@ export function createChatWcaServer(
       maxImages: config.maxImages,
       maxImageBytes: config.maxImageBytes,
       maxTotalImageBytes: config.maxTotalImageBytes,
-      sandbox: publicSandboxConfig(config.sandbox),
+      sandbox: publicSandboxConfig(
+        config.sandbox,
+        services?.sandboxFunctionalProbeSucceeded ?? false,
+      ),
     });
   });
 
@@ -367,6 +382,17 @@ export interface ChatWcaStartupOptions {
     connection: ChatWcaDatabase["connection"],
     config: Readonly<ServerConfig>,
   ) => ProtocolWorkspaceRepository;
+  readonly loadSandboxWorkerArtifact?: () => Promise<Readonly<SandboxWorkerArtifact>>;
+  readonly validateSandboxHost?: (
+    config: Readonly<ServerConfig["sandbox"]>,
+  ) => Readonly<ValidatedSandboxHost>;
+  readonly runSandboxStartupProbe?: (input: {
+    readonly config: Readonly<ServerConfig["sandbox"]>;
+    readonly host: Readonly<ValidatedSandboxHost>;
+    readonly worker: Readonly<SandboxWorkerArtifact>;
+    readonly dataDirectory: string;
+    readonly piAgentDirectory: string;
+  }) => Promise<Readonly<SandboxFunctionalProbeResult>>;
   readonly createRuntimeFactory?: (
     config: Readonly<ServerConfig>,
   ) => Promise<PiRuntimeFactoryPort>;
@@ -406,14 +432,22 @@ function listen(
 }
 
 function canonicalPathIfPresent(target: string): string {
-  try {
-    return realpathSync(target);
-  } catch (error) {
-    const code = typeof error === "object" && error !== null && "code" in error
-      ? (error as { readonly code?: unknown }).code
-      : undefined;
-    if (code !== "ENOENT") throw error;
-    return path.resolve(target);
+  const absolute = path.resolve(target);
+  const missing: string[] = [];
+  let candidate = absolute;
+  while (true) {
+    try {
+      return path.join(realpathSync(candidate), ...missing.reverse());
+    } catch (error) {
+      const code = typeof error === "object" && error !== null && "code" in error
+        ? (error as { readonly code?: unknown }).code
+        : undefined;
+      if (code !== "ENOENT") throw error;
+      const parent = path.dirname(candidate);
+      if (parent === candidate) throw error;
+      missing.push(path.basename(candidate));
+      candidate = parent;
+    }
   }
 }
 
@@ -432,16 +466,36 @@ export async function startChatWcaServer(
   try {
     const config = (options.loadConfiguration ?? loadConfig)();
     database = (options.openDatabase ?? openDatabase)(config.dataDir);
+    const dataDirectory = realpathSync(config.dataDir);
+    const piAgentDirectory = canonicalPathIfPresent(
+      config.piCodingAgentDir ?? path.join(homedir(), ".pi", "agent"),
+    );
+    let functionalProbeSucceeded = false;
+    if (config.sandbox.mode !== "disabled") {
+      let worker: Readonly<SandboxWorkerArtifact>;
+      try {
+        worker = await (options.loadSandboxWorkerArtifact ?? loadSandboxWorkerArtifact)();
+      } catch (error) {
+        throw toAppError(error, { source: "sandbox", phase: "configuration" });
+      }
+      const host = (options.validateSandboxHost ?? validateBwrapAndToolchain)(config.sandbox);
+      await (options.runSandboxStartupProbe ?? runSandboxStartupProbe)({
+        config: config.sandbox,
+        host,
+        worker,
+        dataDirectory,
+        piAgentDirectory,
+      });
+      functionalProbeSucceeded = true;
+    }
     const workspaces = (
       options.createWorkspaceRepository ??
       ((connection, loadedConfig) => new WorkspaceRepository(connection, {
         policy: {
           mode: loadedConfig.sandbox.mode,
           workspaceRoots: loadedConfig.sandbox.workspaceRoots,
-          dataDirectory: realpathSync(loadedConfig.dataDir),
-          piAgentDirectory: canonicalPathIfPresent(
-            loadedConfig.piCodingAgentDir ?? path.join(homedir(), ".pi", "agent"),
-          ),
+          dataDirectory,
+          piAgentDirectory,
           readOnlyMounts: loadedConfig.sandbox.readOnlyMounts.map((mount) => mount.source),
         },
       }))
@@ -491,6 +545,7 @@ export async function startChatWcaServer(
         workspaces,
         shutdown: registry,
         closeStorage: () => database?.close(),
+        sandboxFunctionalProbeSucceeded: functionalProbeSucceeded,
         onInternalError: reportError,
       },
     );

@@ -69,7 +69,7 @@ export interface ProtocolHistory {
 export interface ProtocolWorkspaceRepository {
   list(): WorkspaceSummary[];
   requireAvailable(workspaceId: string): SessionHistoryWorkspace;
-  requireUsable(workspaceId: string): RuntimeWorkspacePolicy;
+  requireUsable(workspaceId: string): RuntimeWorkspacePolicy | Promise<RuntimeWorkspacePolicy>;
   create(input: {
     readonly name: string;
     readonly path: string;
@@ -238,7 +238,7 @@ export async function dispatchClientCommand(
       };
     }
     case "conversation.create": {
-      const workspace = runtimeWorkspace(workspaces.requireUsable(command.workspaceId));
+      const workspace = runtimeWorkspace(await workspaces.requireUsable(command.workspaceId));
       const record = await registry.create(workspace);
       return {
         response: {
@@ -252,7 +252,7 @@ export async function dispatchClientCommand(
     case "conversation.open": {
       const availableWorkspace = workspaces.requireAvailable(command.workspaceId);
       const listed = await history.resolve(availableWorkspace, command.conversationId);
-      const workspace = runtimeWorkspace(workspaces.requireUsable(command.workspaceId));
+      const workspace = runtimeWorkspace(await workspaces.requireUsable(command.workspaceId));
       const record = await registry.open(workspace, listed.summary.sessionFile);
       return {
         response: {
@@ -319,7 +319,7 @@ export async function dispatchClientCommand(
       return { response: { type: "ack", requestId: command.requestId, command: command.type } };
     case "conversation.fork": {
       const source = await registry.getState(command.conversationId);
-      workspaces.requireUsable(source.workspaceId);
+      await workspaces.requireUsable(source.workspaceId);
       const fork = await registry.fork(command.conversationId, command.entryId);
       return {
         response: {
@@ -338,7 +338,7 @@ export async function dispatchClientCommand(
       const source = await registry.getState(command.conversationId);
       const workspace = workspaces.requireAvailable(source.workspaceId);
       await history.resolve(workspace, source.id);
-      workspaces.requireUsable(source.workspaceId);
+      await workspaces.requireUsable(source.workspaceId);
       const fork = await registry.fork(command.conversationId, command.entryId);
       await registry.close(source.id);
       const conversations = await history.delete(workspace, source.id);

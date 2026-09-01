@@ -21,7 +21,8 @@
     "test:unit": "vitest run tests/unit --passWithNoTests",
     "test:integration": "vitest run tests/integration --passWithNoTests",
     "test:browser": "playwright test --pass-with-no-tests",
-    "test:sdk-smoke": "node --test tests/smoke/pi-sdk.test.mjs"
+    "test:sdk-smoke": "node --test tests/smoke/pi-sdk.test.mjs",
+    "spike:sandbox-profile": "node scripts/spike-bubblewrap-profile.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.84.3",

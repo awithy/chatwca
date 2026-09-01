@@ -108,6 +108,8 @@ Do this before landing schema/UI changes. The spike may live in tests or a dispo
 
 ### T0.1 Prove the exact Bubblewrap profile
 
+**Status: Complete.** Reproducible probe and deployment results are recorded in [`docs/bubblewrap-operations.md`](docs/bubblewrap-operations.md).
+
 On the deployment host and under `systemd/chatwca.service`, launch the proposed synthetic root and verify:
 
 - user, mount, PID, IPC, UTS, and network namespaces differ from the parent;

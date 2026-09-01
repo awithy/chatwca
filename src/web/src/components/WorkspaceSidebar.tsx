@@ -438,9 +438,7 @@ export function WorkspaceSidebar({
                         <span className="workspace-unavailable">Unavailable</span>
                       ) : !workspace.usable ? (
                         <span className="workspace-policy-blocked" title={workspacePolicyIssueLabel(workspace.policyIssue)}>Policy blocked</span>
-                      ) : (
-                        <span className="workspace-usable">Usable</span>
-                      )}
+                      ) : null}
                     </span>
                     <code title={workspace.path}>{workspace.path}</code>
                   </button>

@@ -75,7 +75,7 @@ function renderForm(
 }
 
 describe("workspace-first sidebar", () => {
-  it("uses workspace-first ARIA, full paths, usability, and labeled management actions", () => {
+  it("uses workspace-first ARIA, full paths, and labeled management actions without a healthy-status badge", () => {
     const html = sidebar([workspace], workspace.id);
 
     expect(html).toContain('aria-label="Workspaces and conversations"');
@@ -85,7 +85,8 @@ describe("workspace-first sidebar", () => {
     expect(html).toContain('aria-label="Edit workspace Deep Project"');
     expect(html).toContain('aria-label="Remove workspace Deep Project"');
     expect(html).toContain('aria-current="true"');
-    expect(html).toContain("Usable");
+    expect(html).not.toContain('class="workspace-usable"');
+    expect(html).not.toContain(">Usable<");
   });
 
   it("onboards without selecting or loading conversation history", () => {

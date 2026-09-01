@@ -620,20 +620,11 @@ pre {
 }
 
 .workspace-unavailable,
-.workspace-policy-blocked,
-.workspace-usable {
+.workspace-policy-blocked {
   flex: 0 0 auto;
+  color: var(--danger-text);
   font-size: 0.62rem;
   font-weight: 700;
-}
-
-.workspace-unavailable,
-.workspace-policy-blocked {
-  color: var(--danger-text);
-}
-
-.workspace-usable {
-  color: var(--success);
 }
 
 .workspace-item-menu {

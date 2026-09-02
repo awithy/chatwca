@@ -93,6 +93,31 @@ describe("ManagedNetworkRuntime", () => {
     expect(await readdir(dataDir)).toEqual([]);
   });
 
+  it("recovers descriptors after malformed connection pressure and closes every stalled client", async () => {
+    const dataDir = await root();
+    const stressed = config();
+    const runtime = await ManagedNetworkRuntime.startForTesting({
+      dataDir, workspaceId: "workspace-pressure", conversationId: "conversation-pressure",
+      config: Object.freeze({ ...stressed, connectTimeoutMs: 30 }), diagnosticSink: () => undefined,
+    }, unusedConnector());
+    const before = (await readdir("/proc/self/fd")).length;
+    const clients = await Promise.all(Array.from({ length: 64 }, async () => {
+      const socket = net.createConnection(runtime.httpSocketPath);
+      await new Promise<void>((resolve, reject) => { socket.once("connect", resolve); socket.once("error", reject); });
+      socket.write("GET http://allowed.example/ HTTP/1.1\r\nX-Partial");
+      return socket;
+    }));
+    await Promise.all(clients.map((socket) => new Promise<void>((resolve) => {
+      if (socket.destroyed) resolve(); else socket.once("close", resolve);
+    })));
+    await vi.waitFor(async () => expect((await readdir("/proc/self/fd")).length).toBeLessThanOrEqual(before + 2));
+    expect(await exchange(runtime.httpSocketPath,
+      "CONNECT denied.example:443 HTTP/1.1\r\nHost: denied.example:443\r\n\r\n"))
+      .toContain("blocked-by-allowlist");
+    await runtime.close();
+    expect(await readdir(dataDir)).toEqual([]);
+  });
+
   it("rejects overlong Unix socket paths before creating a process directory", async () => {
     const base = await root();
     const deep = path.join(base, "x".repeat(90));

@@ -1,0 +1,47 @@
+name: Native helper release artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-native:
+    name: Build managed-network helper (${{ matrix.arch }})
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install and test
+        run: |
+          npm ci
+          npm run test:native
+          npm run test:native:architectures
+      - name: Build architecture-specific helper and integrity manifest
+        run: |
+          npm run build:network-helper
+          test -x "dist/native/${{ matrix.arch }}/chatwca-network-helper"
+          test -f "dist/native/${{ matrix.arch }}/network-helper-manifest.json"
+          tar -C dist/native -czf "chatwca-network-helper-linux-${{ matrix.arch }}.tar.gz" "${{ matrix.arch }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chatwca-network-helper-linux-${{ matrix.arch }}
+          path: chatwca-network-helper-linux-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error

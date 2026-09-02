@@ -143,6 +143,66 @@ describe("parent HTTP policy proxy", () => {
     expect(events).toEqual([]);
   });
 
+  it("fails closed on oversized, malformed, and request-smuggling header forms", async () => {
+    const origin = net.createServer();
+    const originPort = await listen(origin);
+    const events: NetworkPolicyAuditEvent[] = [];
+    const proxy = createHttpPolicyProxyForTesting(fixtureOptions(events), connectorTo(originPort));
+    cleanup.push(() => proxy.close());
+    const location = await socketPath("adversarial-http.sock");
+    await proxy.listen(location.socket);
+
+    const malformed = [
+      "GET https://allowed.example/ HTTP/1.1\r\nHost: allowed.example\r\n\r\n",
+      "CONNECT allowed.example HTTP/1.1\r\nHost: allowed.example\r\n\r\n",
+      "CONNECT user@allowed.example:443 HTTP/1.1\r\nHost: allowed.example:443\r\n\r\n",
+      "CONNECT allowed.example:443 HTTP/1.1\r\nHost: allowed.example:80\r\n\r\n",
+      "POST http://allowed.example/ HTTP/1.1\r\nHost: allowed.example\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n",
+      "POST http://allowed.example/ HTTP/1.1\r\nHost: allowed.example\r\nTransfer-Encoding: gzip\r\n\r\n",
+      "POST http://allowed.example/ HTTP/1.1\r\nHost: allowed.example\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nGET http://denied.example/ HTTP/1.1\r\nHost: denied.example\r\n\r\n",
+      "GET http://allowed.example/ HTTP/1.1\r\nHost: allowed.example\r\nConnection: host\r\n\r\n",
+    ];
+    for (const request of malformed) {
+      expect((await unixExchange(location.socket, request)).toString()).toContain("400 Bad Request");
+    }
+    const oversized = "GET http://allowed.example/ HTTP/1.1\r\nHost: allowed.example\r\nX-Fill: " + "x".repeat(40 * 1024) + "\r\n\r\n";
+    expect((await unixExchange(location.socket, oversized)).toString()).toContain("400 Bad Request");
+    expect(events).toEqual([]);
+  });
+
+  it("expires slowloris headers and idle established tunnels without leaking proxy admission", async () => {
+    const stalled = net.createServer((socket) => socket.pause());
+    const stalledPort = await listen(stalled);
+    const events: NetworkPolicyAuditEvent[] = [];
+    const proxy = createHttpPolicyProxyForTesting({
+      ...fixtureOptions(events), connectTimeoutMs: 40, idleTimeoutMs: 50,
+    }, connectorTo(stalledPort));
+    cleanup.push(() => proxy.close());
+    const location = await socketPath("slow-http.sock");
+    await proxy.listen(location.socket);
+
+    const partial = net.createConnection(location.socket);
+    await new Promise<void>((resolve, reject) => { partial.once("connect", resolve); partial.once("error", reject); });
+    partial.write("GET http://allowed.example/ HTTP/1.1\r\nHo");
+    const drip = setInterval(() => { if (!partial.destroyed) partial.write("x"); }, 10);
+    await new Promise<void>((resolve) => partial.once("close", resolve));
+    clearInterval(drip);
+
+    const tunnel = net.createConnection(location.socket);
+    const chunks: Buffer[] = [];
+    tunnel.on("data", (chunk) => chunks.push(chunk));
+    await new Promise<void>((resolve, reject) => { tunnel.once("connect", resolve); tunnel.once("error", reject); });
+    tunnel.write("CONNECT allowed.example:443 HTTP/1.1\r\nHost: allowed.example:443\r\n\r\n");
+    await vi.waitFor(() => expect(Buffer.concat(chunks).toString()).toContain("200 Connection Established"));
+    await new Promise<void>((resolve) => tunnel.once("close", resolve));
+
+    // Admission was released after the stalled connection, so a later policy
+    // decision still receives a deterministic response rather than hanging.
+    const denied = await unixExchange(location.socket,
+      "CONNECT denied.example:443 HTTP/1.1\r\nHost: denied.example:443\r\n\r\n");
+    expect(denied.toString()).toContain("blocked-by-denylist");
+  });
+
   it("handles HTTP WebSocket upgrades only on the dedicated pinned path", async () => {
     const websocket = http.createServer();
     websocket.on("upgrade", (request, socket, head) => {
@@ -271,6 +331,25 @@ describe("parent SOCKS5 policy proxy", () => {
     ]));
     expect(ipv6.subarray(0, 4)).toEqual(Buffer.from([5, 0, 5, 0]));
     expect(hosts).toEqual(["8.8.8.8", "2001:4860:4860::8888"]);
+  });
+
+  it("times out fragmented slowloris greetings and remains available", async () => {
+    const origin = net.createServer();
+    const originPort = await listen(origin);
+    const events: NetworkPolicyAuditEvent[] = [];
+    const proxy = createSocks5PolicyProxyForTesting({
+      ...fixtureOptions(events), connectTimeoutMs: 35,
+    }, connectorTo(originPort));
+    cleanup.push(() => proxy.close());
+    const location = await socketPath("slow-socks.sock");
+    await proxy.listen(location.socket);
+
+    const partial = net.createConnection(location.socket);
+    await new Promise<void>((resolve, reject) => { partial.once("connect", resolve); partial.once("error", reject); });
+    partial.write(Buffer.from([5]));
+    await new Promise<void>((resolve) => partial.once("close", resolve));
+    expect(await unixExchange(location.socket, Buffer.from([5, 1, 2]))).toEqual(Buffer.from([5, 0xff]));
+    expect(events).toEqual([]);
   });
 
   it("rejects unsupported auth, commands, malformed/trailing handshakes, and denied targets without diagnostics", async () => {

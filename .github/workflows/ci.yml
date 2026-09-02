@@ -25,14 +25,17 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+          targets: aarch64-unknown-linux-gnu
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Native helper unit and cross-architecture filter tests
+      - name: Native helper unit and architecture-policy compilation
         run: |
           cargo fmt --manifest-path native/network-helper/Cargo.toml -- --check
           npm run test:native
+          npm run test:native:architectures
+          cargo check --locked --manifest-path native/network-helper/Cargo.toml --target aarch64-unknown-linux-gnu
 
       - name: Typecheck
         run: npm run typecheck
@@ -56,7 +59,7 @@ jobs:
         run: npm run test:sdk-smoke
 
   sandbox-linux:
-    name: Real Bubblewrap (Linux)
+    name: Real isolated + managed Bubblewrap (Linux)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -90,15 +93,21 @@ jobs:
           npm run build:sandbox-worker
           npm run test:native
 
-      - name: Real sandbox suite (direct, isolated runner)
+      - name: Real sandbox suite (direct)
         env:
+          CHATWCA_SANDBOX_CAPABLE: "1"
           CHATWCA_SANDBOX_RESOURCE_STRESS: "1"
         run: npm run test:sandbox-real
 
-      - name: Validate hardened unit syntax
+      - name: Validate hardened unit syntax and required controls
         run: |
           sed "s/^User=.*/User=$(id -un)/" systemd/chatwca.service > /tmp/chatwca.service
           systemd-analyze verify /tmp/chatwca.service
+          grep -Fx 'NoNewPrivileges=true' systemd/chatwca.service
+          grep -Fx 'KillMode=control-group' systemd/chatwca.service
+          grep -Fx 'PrivateUsers=false' systemd/chatwca.service
+          grep -Fx 'RestrictNamespaces=false' systemd/chatwca.service
+          grep -Fx 'LimitNOFILE=8192' systemd/chatwca.service
 
       - name: Real sandbox suite under service-unit constraints
         run: |
@@ -109,6 +118,7 @@ jobs:
             --property=NoNewPrivileges=true \
             --property=KillMode=control-group \
             --property=TasksMax=512 \
+            --property=LimitNOFILE=8192 \
             --property=TimeoutStopSec=310s \
             --property=PrivateUsers=false \
             --property=RestrictNamespaces=false \

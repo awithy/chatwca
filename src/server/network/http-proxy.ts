@@ -1,5 +1,5 @@
 import http, { type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from "node:http";
-import { type Socket } from "node:net";
+import { Socket } from "node:net";
 import { type Duplex } from "node:stream";
 
 import {
@@ -249,6 +249,7 @@ export class HttpPolicyProxy {
   readonly #server: http.Server;
   readonly #admission: ConnectionAdmission;
   readonly #connections = new ConnectionSet();
+  readonly #setupTimers = new WeakMap<Socket, NodeJS.Timeout>();
   readonly #fatalListeners = new Set<() => void>();
   #closing = false;
   #listening = false;
@@ -272,7 +273,18 @@ export class HttpPolicyProxy {
     this.#server.on("request", (request, response) => void this.#handleHttp(request, response, false));
     this.#server.on("upgrade", (request, socket, head) => void this.#handleUpgrade(request, socket, head));
     this.#server.on("connect", (request, socket, head) => void this.#handleConnect(request, socket, head));
-    this.#server.on("connection", (socket) => this.#connections.add(socket));
+    this.#server.on("connection", (socket) => {
+      this.#connections.add(socket);
+      // Use an absolute setup timer rather than an inactivity timeout: traffic
+      // must not let a byte-at-a-time slowloris retain a parser indefinitely.
+      const timer = setTimeout(() => socket.destroy(), this.options.connectTimeoutMs);
+      timer.unref();
+      this.#setupTimers.set(socket, timer);
+      socket.once("close", () => {
+        clearTimeout(timer);
+        this.#setupTimers.delete(socket);
+      });
+    });
     this.#server.on("clientError", (_error, socket) => rawHttpError(socket, 400));
     this.#server.on("error", () => { if (this.#listening && !this.#closing) this.#fatal(); });
     this.#server.on("close", () => { if (this.#listening && !this.#closing) this.#fatal(); });
@@ -301,6 +313,13 @@ export class HttpPolicyProxy {
     this.#admission.stop();
     this.#connections.closeAll();
     for (const listener of this.#fatalListeners) { try { listener(); } catch { /* observer */ } }
+  }
+
+  #finishClientSetup(socket: Socket): void {
+    const timer = this.#setupTimers.get(socket);
+    if (timer !== undefined) clearTimeout(timer);
+    this.#setupTimers.delete(socket);
+    socket.setTimeout(this.options.idleTimeoutMs);
   }
 
   #audit(protocol: NetworkAuditProtocol, destination: Destination, decision: "allow" | "deny", reason: NetworkAuditReason) {
@@ -332,6 +351,7 @@ export class HttpPolicyProxy {
   }
 
   async #handleHttp(request: IncomingMessage, response: ServerResponse, websocket: boolean): Promise<void> {
+    this.#finishClientSetup(request.socket);
     let parsed: { destination: Destination; path: string };
     try {
       validateFraming(request, websocket);
@@ -379,6 +399,7 @@ export class HttpPolicyProxy {
   }
 
   async #handleConnect(request: IncomingMessage, client: Duplex, head: Buffer): Promise<void> {
+    if (client instanceof Socket) this.#finishClientSetup(client);
     let destination: Destination;
     try { validateFraming(request, true); destination = parseConnectRequest(request); } catch { rawHttpError(client, 400); return; }
     let deniedReason: NetworkAuditReason | undefined;
@@ -398,6 +419,7 @@ export class HttpPolicyProxy {
   }
 
   async #handleUpgrade(request: IncomingMessage, client: Duplex, head: Buffer): Promise<void> {
+    if (client instanceof Socket) this.#finishClientSetup(client);
     let parsed: { destination: Destination; path: string };
     let headers: IncomingHttpHeaders;
     try {

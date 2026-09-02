@@ -22,4 +22,6 @@ npm run test:native
 
 The build writes an architecture-specific executable and integrity manifest to
 `dist/native/<arch>/`. The server validates both before managed egress can be
-used. Worker-launch integration is intentionally owned by the next phase.
+used. Release CI builds x64 and arm64 artifacts on native runners. Deployment,
+hash verification, startup probes, incident cleanup, and rollback are covered
+by [`../../docs/network-sandbox-operations.md`](../../docs/network-sandbox-operations.md).

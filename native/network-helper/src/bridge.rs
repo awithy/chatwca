@@ -373,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_handoff_rejects_missing_wrong_and_duplicate_fds() {
+    fn authenticated_handoff_rejects_missing_wrong_and_unsolicited_extra_fds() {
         let (sender, receiver) = pair();
         assert_eq!(
             unsafe { libc::send(sender.as_raw_fd(), b"x".as_ptr().cast(), 1, 0) },
@@ -421,26 +421,36 @@ mod tests {
     }
 
     #[test]
-    fn bounded_relay_propagates_half_closes_and_backpressure() {
+    fn bounded_relay_propagates_half_closes_and_survives_a_stalled_peer() {
         let tcp_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let address = tcp_listener.local_addr().unwrap();
         let (unix_client, mut unix_server) = UnixStream::pair().unwrap();
-        let thread = thread::spawn(move || {
+        let relay_thread = thread::spawn(move || {
             let (guest, _) = tcp_listener.accept().unwrap();
             relay(guest, unix_client).unwrap();
         });
         let mut client = TcpStream::connect(address).unwrap();
-        let payload = vec![7u8; RELAY_BUFFER_BYTES * 4];
-        client.write_all(&payload).unwrap();
-        client.shutdown(Shutdown::Write).unwrap();
+        let mut writer = client.try_clone().unwrap();
+        let payload = vec![7u8; RELAY_BUFFER_BYTES * 64];
+        let expected = payload.clone();
+        let writer_thread = thread::spawn(move || {
+            writer.write_all(&payload).unwrap();
+            writer.shutdown(Shutdown::Write).unwrap();
+        });
+
+        // Do not read the parent side initially. The bridge must apply kernel
+        // backpressure with only its fixed Direction buffer, then resume once
+        // the stalled peer drains.
+        thread::sleep(std::time::Duration::from_millis(50));
         let mut received = Vec::new();
         unix_server.read_to_end(&mut received).unwrap();
-        assert_eq!(received, payload);
+        writer_thread.join().unwrap();
+        assert_eq!(received, expected);
         unix_server.write_all(b"response").unwrap();
         unix_server.shutdown(Shutdown::Write).unwrap();
         let mut response = Vec::new();
         client.read_to_end(&mut response).unwrap();
         assert_eq!(response, b"response");
-        thread.join().unwrap();
+        relay_thread.join().unwrap();
     }
 }

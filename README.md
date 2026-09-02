@@ -11,7 +11,8 @@ ChatWCA is a single-user, dark-only web interface for the [Pi coding agent](http
 - A host supported by Pi, with at least one model/provider configured and available to the server process.
 - Read/search access to every directory registered as a workspace, read/write access to Pi's agent/session directory, and read/write access to ChatWCA's data directory. A workspace configured for workspace-local session storage must also be writable.
 - Network access from the **parent** to any remote model provider. `PI_OFFLINE` intentionally disables Pi model network access.
-- To enable Workspace sandbox: Linux with unprivileged user namespaces, Bubblewrap **0.6.1+** at a canonical root-owned executable, `/usr/bin/node` **22.19.0+**, `/usr/bin/bash`, and ripgrep on the configured synthetic-root `PATH`. Sandboxing is Linux-only; disabled mode does not inspect these dependencies.
+- To enable Workspace sandbox: Linux x86-64 or arm64 with unprivileged user/network namespaces, Bubblewrap **0.6.1+** at a canonical root-owned executable, `/usr/bin/node` **22.19.0+**, `/usr/bin/bash`, and ripgrep on the configured synthetic-root `PATH`. Sandboxing is Linux-only; disabled mode does not inspect these dependencies.
+- To build managed egress from source: stable Rust/Cargo and kernel support for capabilities, `NoNewPrivs`, seccomp, and `SCM_RIGHTS`. The running service uses the built architecture-specific native helper and integrity manifest, not Cargo. Managed egress also requires the base sandbox and remains disabled by default.
 
 `npm ci` installs the Pi SDK and its local `pi` executable; a separate global Pi installation is not required. ChatWCA uses Pi's existing settings, credentials, context files, skills, and extensions. Configure those through Pi rather than ChatWCA—the web UI has no model or credential settings. You can inspect the models visible to the same installation with:
 
@@ -51,7 +52,7 @@ npm run build
 npm start
 ```
 
-`npm start` runs the already-built `dist/server/server/index.js`; it does not build first. With default settings, open `http://127.0.0.1:8787` on the server or `http://<server-lan-address>:8787` from the trusted LAN. `0.0.0.0` is a bind address, not a browser destination.
+`npm run build` compiles the locked Rust helper for the host architecture, writes its executable and SHA-256/version manifest under `dist/native/<arch>/`, bundles the sandbox worker, and builds server/web assets. `npm start` runs the already-built `dist/server/server/index.js`; it does not build first. With default settings, open `http://127.0.0.1:8787` on the server or `http://<server-lan-address>:8787` from the trusted LAN. `0.0.0.0` is a bind address, not a browser destination.
 
 ### systemd
 
@@ -72,7 +73,7 @@ systemctl status chatwca.service
 journalctl -u chatwca.service -f
 ```
 
-The unit uses `NoNewPrivileges=true`, `KillMode=control-group`, and process-wide `TasksMax=512`, with namespace restrictions left disabled so Bubblewrap can create its own user/mount/PID/IPC/UTS/network namespaces. `TasksMax` is defense in depth for the whole service, **not** a per-conversation quota. Validate the real profile under the service constraints before enabling it; see [the Bubblewrap operations runbook](docs/bubblewrap-operations.md).
+The unit preserves `NoNewPrivileges=true`, `KillMode=control-group`, process-wide `TasksMax=512`, and `LimitNOFILE=8192`, with namespace restrictions left disabled so Bubblewrap can create its own user/mount/PID/IPC/UTS/network namespaces. These limits are defense in depth for the whole service, **not** per-conversation quotas. Validate isolated and managed profiles under the exact service constraints before enabling either; see the [Bubblewrap](docs/bubblewrap-operations.md) and [managed-egress](docs/network-sandbox-operations.md) runbooks.
 
 After application updates, run `npm ci`, rebuild, and use `sudo systemctl restart chatwca.service`. If the checkout or user changes, update `User`, `WorkingDirectory`, `EnvironmentFile`, `ExecStart`, and `Documentation` in the service file.
 
@@ -93,7 +94,7 @@ ChatWCA starts with no selected workspace. Before creating or opening a conversa
 1. Open **Manage workspaces** and choose **Add**.
 2. Enter a name and a directory path on the **server** machine. An absolute path is recommended. The directory must already exist and be readable/searchable by the server process.
 3. Optionally enable **Store sessions in this workspace**. It is disabled by default and cannot be changed after creation. Enabled workspaces use `<workspace>/.chatwca/sessions`; otherwise they use Pi's default session store.
-4. Select the security profile when the server permits it. **Workspace sandbox** routes the seven coding tools through a per-conversation, no-network Bubblewrap worker; **Unrestricted** retains the server user's full host authority. The sandbox still permits all workspace and `.git` changes and workspace content can be sent by the parent to the configured remote model.
+4. Select the security profile when the server permits it. **Workspace sandbox** routes the seven coding tools through a per-conversation Bubblewrap worker; **Unrestricted** retains the server user's full host authority. A sandbox defaults to **Isolated** networking. When an administrator explicitly enables it, **Managed egress** exposes only destination-filtered HTTP/HTTPS/WebSocket/SOCKS5 TCP proxies and requires confirmation. The sandbox still permits all workspace and `.git` changes. Managed destinations and the parent-configured remote model can receive readable workspace content.
 5. Select the workspace. Only then does ChatWCA ask Pi for sessions whose exact working directory is that workspace path, and it opens that workspace's most recently modified conversation when one exists.
 6. Create a new conversation or open one from the selected workspace's history. An open conversation's title can be edited from its header; the custom title is stored in Pi's native session metadata. From an eligible user message, **Fork** keeps the source conversation while **Rewind** replaces it with the fork and permanently deletes the source after fork creation succeeds.
 
@@ -131,6 +132,15 @@ These are all environment variables interpreted by ChatWCA or explicitly passed 
 | `CHATWCA_SANDBOX_START_TIMEOUT_MS` | `5000` | Positive worker probe/handshake deadline in milliseconds. |
 | `CHATWCA_SANDBOX_COMMAND_TIMEOUT_MS` | `900000` | Positive hard maximum for a sandbox shell command. |
 | `CHATWCA_SANDBOX_MAX_COMMAND_OUTPUT_BYTES` | `67108864` | Positive total command-output bound; exceeding it terminates the worker. |
+| `CHATWCA_MANAGED_EGRESS_MODE` | `disabled` | `disabled` or `optional`. Optional requires sandbox optional/required, a non-empty allowlist, helper validation, and a real managed probe before listening. |
+| `CHATWCA_NETWORK_HELPER_PATH` | packaged `dist/native/<arch>/chatwca-network-helper` | Absolute canonical helper. In optional mode its owner/mode, ELF architecture, executable bit, protocol/build version, and packaged-manifest SHA-256 must match. Disabled mode does not inspect it. |
+| `CHATWCA_NETWORK_ALLOWED_DOMAINS` | `[]` | JSON string array of exact, `*.` subdomain-only, or `**.` apex-plus-subdomain patterns. Browser clients cannot modify this policy. Non-empty in optional mode. |
+| `CHATWCA_NETWORK_DENIED_DOMAINS` | `[]` | JSON string array using the same syntax. Explicit deny always wins. |
+| `CHATWCA_NETWORK_ALLOWED_PORTS` | `[80,443]` | Unique JSON integer array; each port is `1`–`65535`. |
+| `CHATWCA_NETWORK_MAX_CONNECTIONS` | `32` | Positive per-conversation concurrent outbound proxy connection limit, shared by HTTP and SOCKS. |
+| `CHATWCA_NETWORK_CONNECT_TIMEOUT_MS` | `10000` | Positive aggregate DNS-and-connect/setup deadline; also bounds incomplete proxy handshakes/headers. |
+| `CHATWCA_NETWORK_IDLE_TIMEOUT_MS` | `300000` | Positive bidirectional idle deadline. |
+| `CHATWCA_NETWORK_MAX_CONNECTION_BYTES` | `1073741824` | Positive aggregate bidirectional byte limit for one connection. |
 | `PI_CODING_AGENT_DIR` | Pi default (`~/.pi/agent`) | Non-empty Pi configuration, credential, resource, and session root. Prefer an absolute path. Changing it selects a different Pi history/configuration universe. |
 | `PI_OFFLINE` | unset | Pi offline mode is enabled by the variable's **presence**, regardless of value; even `PI_OFFLINE=0` enables it. Remove/unset the variable to disable offline mode. |
 
@@ -168,7 +178,9 @@ Tool-result text is bounded only in the browser projection; Pi's native session 
 
 The browser client uses `/api/*` and `/ws` on the same authority that served the page. ChatWCA does not enable broad CORS. Browser WebSocket upgrades are accepted only when the `Origin` authority matches the request `Host`; direct clients that omit `Origin` are accepted. This check reduces cross-site WebSocket abuse but **is not authentication**. The recommended remote deployment is loopback binding behind a reverse proxy that requires and validates client certificates (mTLS) for both HTTP and WebSocket upgrades. Preserve the browser-facing `Host` header. Firewall isolation is still required when binding directly to a LAN address. Every client accepted by the proxy/firewall retains full ChatWCA authority; there are no per-client roles.
 
-Workspace sandboxing is a tool boundary, not an access-control or resource-quota system. It has no package network access, but model requests still leave through the parent. It cannot prevent harmful workspace, `.git`, hook, dependency, or build-script changes, and it has no per-conversation CPU, memory, process, or disk quota. Sandboxed runtimes disable arbitrary Pi extensions, extension-only providers, skills, and prompt packages; use an administrator-configured native provider. See [Bubblewrap operations](docs/bubblewrap-operations.md) for rollout and residual risks.
+Workspace sandboxing is a tool boundary, not an access-control or resource-quota system. **Isolated** tools have no network access. **Managed egress** keeps direct IPv4, IPv6, DNS, arbitrary loopback, local/LAN/metadata, UDP, inbound, and Unix-socket networking blocked; only two conversation-owned guest-loopback bridges reach parent proxies. Every connection is checked against administrator domain/port policy, all DNS answers must be public, and the dial uses one validated pinned numeric address. HTTPS remains opaque end-to-end—ChatWCA installs no CA and cannot restrict encrypted methods or content.
+
+Managed egress is not data-loss prevention. Any allowed destination can receive workspace content through paths, queries, headers, bodies, TLS, or protocol payloads and may return malicious packages/scripts/content. Model requests still leave through the separate parent path. The sandbox cannot prevent harmful workspace, `.git`, hook, dependency, or build-script changes, and it has no per-conversation CPU, memory, process, disk, or bandwidth quota. Sandboxed runtimes disable arbitrary Pi extensions, extension-only providers, skills, and prompt packages; use an administrator-configured native provider. See the [Bubblewrap](docs/bubblewrap-operations.md) and [managed-egress](docs/network-sandbox-operations.md) runbooks for rollout and residual risks.
 
 Use a single ChatWCA process. The process-wide registry prevents duplicate live writers inside that process, but it does not coordinate session writes with another ChatWCA or Pi CLI process.
 
@@ -234,7 +246,18 @@ ChatWCA intentionally does not override the working directory recorded in a Pi s
 - `sandbox_workspace_rejected`: move data and Pi state outside the workspace, avoid overlap with read-only mounts, make `.chatwca` a real directory, and remove all Unix sockets. A checkout containing default `./data` cannot itself be sandboxed until `CHATWCA_DATA_DIR` moves elsewhere.
 - `sandbox_worker_start_failed` / `sandbox_worker_failed`: close/reopen only after correcting the host problem. ChatWCA never retries with unrestricted tools.
 
-Normal logs and CI output contain stable redacted codes, not worker stderr, paths, commands, output, or stacks. Run `npm run spike:sandbox-profile` interactively as the service user for a deployment probe, and consult [the operations runbook](docs/bubblewrap-operations.md). Treat any detailed local probe output as private operational data.
+Normal logs and CI output contain stable redacted codes, not worker stderr, paths, commands, output, or stacks. Run `npm run spike:sandbox-profile` interactively as the service user for the base profile and `npm run test:sandbox-real` for the production isolated+managed profiles. Consult the [Bubblewrap](docs/bubblewrap-operations.md) and [managed-egress](docs/network-sandbox-operations.md) runbooks. Treat detailed local probe output as private operational data.
+
+### Managed egress is blocked or startup/runtime fails
+
+- `managed_egress_disabled`: the workspace retains a managed request while server mode is disabled. It is intentionally unusable, not silently converted to isolated; close live conversations and explicitly select isolated or complete the administrator rollout.
+- `network_policy_invalid`: correct JSON types, duplicates, domain syntax, ports, or positive safe-integer limits. Optional mode requires at least one allow entry.
+- `network_helper_unavailable`: rebuild/install the helper for this architecture and verify canonical path, owner/mode, executable bit, version/protocol, packaged manifest hash, and separation from every workspace/protected path.
+- `network_proxy_start_failed` / `network_bridge_start_failed`: verify data-directory permissions/path length, descriptor/task limits, namespaces, capabilities, `NoNewPrivs`, seccomp, and the exact systemd controls. Optional mode refuses to listen when its startup probe fails.
+- `network_proxy_failed`: an active parent proxy failed; the conversation enters error and no isolated/unrestricted fallback is attempted. Close it, inspect redacted `network.policy`/stable error records, verify cleanup, fix the host cause, and reopen.
+- `network_destination_blocked`: ordinary policy denial. Check normalized administrator patterns/ports and denial reason; there is no browser approval action. Never widen policy merely to bypass local/private/DNS safeguards.
+
+Rollback by setting `CHATWCA_MANAGED_EGRESS_MODE=disabled` and restarting. Stored managed workspaces then remain policy-blocked until explicitly changed to isolated. Follow the managed runbook for hash verification, stale sockets, incident shutdown, and cgroup cleanup.
 
 ### WebSocket origin mismatch or repeated reconnects
 
@@ -261,11 +284,13 @@ npm run test:unit
 npm run test:integration
 npm run test:browser
 npm run test:sdk-smoke
-# Linux host explicitly declared sandbox-capable; failure never skips:
+npm run test:native
+npm run test:native:architectures
+# Linux host explicitly declared sandbox-capable; isolated and managed failures never skip:
 npm run test:sandbox-real
 ```
 
-The SDK smoke test uses temporary Pi state and a faux provider; it does not require paid credentials or network access. Browser tests use a deterministic fixture server.
+The SDK smoke test uses temporary Pi state and a faux provider; it does not require paid credentials or network access. Browser tests use a deterministic fixture server. On a declared sandbox-capable Linux host, `npm run test:release-gates` runs the complete sequence above.
 
 ## Documentation
 
@@ -274,6 +299,9 @@ The SDK smoke test uses temporary Pi state and a faux provider; it does not requ
 - [Bubblewrap design](docs/bubblewrap-design.md)
 - [Bubblewrap operations runbook](docs/bubblewrap-operations.md)
 - [Sandbox acceptance-criteria mapping](docs/bubblewrap-acceptance.md)
+- [Managed-egress operations runbook](docs/network-sandbox-operations.md)
+- [Managed network acceptance mapping](docs/network-sandbox-acceptance.md)
+- [Managed network design](docs/network-sandbox-design.md)
 - [Implementation plan](plan.md)
 
 ## License

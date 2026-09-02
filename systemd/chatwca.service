@@ -16,6 +16,9 @@ RestartSec=5s
 NoNewPrivileges=true
 KillMode=control-group
 TasksMax=512
+# Parent proxies, two bridges per managed worker, and bounded outbound sockets
+# need a predictable service-wide descriptor budget.
+LimitNOFILE=8192
 # Bubblewrap must create user/mount/PID/IPC/UTS/network namespaces itself.
 PrivateUsers=false
 RestrictNamespaces=false

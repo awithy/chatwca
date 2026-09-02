@@ -23,6 +23,8 @@ These decisions make the design fit the current codebase:
 - Preserve the isolated launch profile byte-for-byte where practical. Managed mode uses a separate launch path and never weakens isolated mode.
 - Make DNS resolution and outbound dialing injectable only at internal constructor boundaries for deterministic tests. Production always uses the real resolver, classifier, and pinned numeric-address dialer.
 - Build an architecture-specific Rust helper during source builds and place it with a generated SHA-256/version manifest under `dist/native/`. A configured helper override must match the packaged manifest; it is not an arbitrary executable escape hatch.
+- Treat the process-wide allowed domains and ports as an administrator-owned ceiling, then narrow that authority with administrator-defined named destination policy sets selected per workspace. The browser never submits arbitrary destinations.
+- Move workspace add/edit into an accessible responsive modal. The sidebar remains the workspace/conversation navigator rather than hosting a security configuration form in its narrow working area.
 
 ## Phase 0 — Native and kernel feasibility gate
 
@@ -356,6 +358,115 @@ Add/extend unit and Playwright coverage for defaults, disabled mode, confirmatio
 6. Add a managed-egress operations runbook covering helper installation/hash verification, rollout, startup probes, log fields, stale socket cleanup, incident shutdown, and rollback to `disabled`.
 7. Add an acceptance-criteria mapping from every item in design section 22 to an automated test or documented operational verification.
 
+## Phase 9 — Per-workspace destination policy sets and workspace modal
+
+This follow-on phase narrows the initial process-wide managed-egress allowlist and replaces the cramped inline sidebar form. It does not change the namespace, helper, bridge, proxy, DNS, or pinned-dial enforcement boundaries implemented in earlier phases.
+
+### 9.1 Named policy-set configuration and public contract
+
+Extend managed-network configuration with administrator-defined named destination policy sets. Use a closed JSON array format:
+
+```dotenv
+CHATWCA_NETWORK_POLICY_SETS=[{"id":"default","label":"Package registries","allowedDomains":["registry.npmjs.org"],"allowedPorts":[443]},{"id":"github","label":"GitHub","allowedDomains":["**.github.com"],"allowedPorts":[443]}]
+```
+
+- Keep `CHATWCA_NETWORK_ALLOWED_DOMAINS` and `CHATWCA_NETWORK_ALLOWED_PORTS` as the global security ceiling.
+- Reserve the stable set ID `default` for new and migrated workspaces. When `CHATWCA_NETWORK_POLICY_SETS` is unset, synthesize `default` from the complete existing global allowlist and allowed-port list for backward compatibility.
+- When the variable is present, require a non-empty closed array containing exactly one `default` set. Reject unknown object keys, duplicate IDs, invalid labels, empty domain/port lists, duplicate normalized entries, and unsupported value types.
+- Restrict IDs to a documented ASCII slug syntax and bounded length. Labels are display text only and must also be bounded.
+- Require every set domain pattern and port to be an exact normalized member of the corresponding global ceiling. Do not infer wildcard containment: an administrator who wants both `**.example.com` and `api.example.com` as independently selectable grants must put both in the ceiling.
+- Continue to apply global denied-domain precedence, non-public address denial, protocol restrictions, connection limits, resolver validation, and byte/time limits after selecting a set. A set can only remove authority, never relax a global denial or limit.
+- Compile every set at startup into an immutable map. Disabled mode must still avoid helper filesystem inspection or execution.
+
+Extend `PublicManagedEgressConfig` with a bounded ordered list of public set projections containing only stable ID, label, normalized patterns, and ports. Keep helper paths, manifests, socket paths, resolved addresses, policy internals, and diagnostics server-only. Add shared closed schemas and focused malformed/normalization/ceiling/backward-compatibility tests.
+
+### 9.2 Persistence, repository, and commands
+
+Advance the database schema to version 5:
+
+- add `network_policy_set_id TEXT NOT NULL DEFAULT 'default'` with structural validation appropriate to SQLite;
+- migrate every v4 row to `default` transactionally without creating network resources;
+- preserve the complete stepwise 1→2→3→4→5 migration path and rollback behavior; and
+- test fresh creation, every prior version, CHECK enforcement, rollback, and unsupported versions.
+
+Extend workspace and conversation projections with:
+
+- stored `networkPolicySetId`;
+- `effectiveNetworkPolicySetId`, which is non-null only for a usable `workspace-sandboxed` + `managed-egress` workspace; and
+- `networkPolicyIssue: "managed_egress_disabled" | "managed_egress_policy_set_unavailable" | null`.
+
+Make `workspace.create.networkPolicySetId` optional for wire compatibility and default it to `default`. Add optional `networkPolicySetId` to `workspace.update`. Closed command schemas must continue rejecting arbitrary domain/port fields.
+
+Repository semantics:
+
+- validate the ID structurally and resolve it only from the administrator-compiled map;
+- evaluate set availability only when managed egress is effective;
+- retain an unavailable stored ID and mark the workspace policy-blocked rather than silently substituting `default`;
+- return the immutable compiled selected set from `requireUsable()`;
+- reject path, security-profile, network-type, or set changes with `workspace_busy` while any live runtime belongs to the workspace;
+- require `acknowledgeNetworkExposure: true` when enabling managed egress or changing the set of a managed workspace, because either operation may add destinations;
+- reject a smuggled acknowledgement for updates that do neither; and
+- ensure fork/rewind never accept a browser-supplied set and always resolve the destination workspace afresh.
+
+Add repository, protocol, startup, migration, busy-state, unavailable-set, acknowledgement, and public-projection tests.
+
+### 9.3 Runtime, lifecycle, audit, and immutable state
+
+Thread the selected compiled set and stable ID through `RuntimeWorkspacePolicy`, `PiConversationRuntime`, `ManagedNetworkRuntime`, and `ConversationRegistry`.
+
+- Construct HTTP and SOCKS decisions from the selected set plus mandatory global denials and limits.
+- Include `policySetId` in the validated server-only network audit record and no additional request content.
+- Store the set ID in every live conversation record and state snapshot; verify runtime/workspace identity during register, open, replacement, fork, rewind, and promotion.
+- A live conversation retains its immutable compiled set. No component may re-read browser state or switch sets after a request is accepted.
+- Missing/mismatched sets fail closed before Pi construction. Proxy/helper failure continues to terminally fail the conversation without retrying another set, isolated tools, or unrestricted tools.
+- Preserve distinct selected-set snapshots and proxy ownership for concurrent workspaces and temporary forks.
+
+Extend proxy, resolver, Pi runtime, registry, fork/rewind, abort/replacement, shutdown, and concurrency tests. Prove that two managed workspaces assigned different sets cannot use one another's additional destinations, even when their proxies run concurrently.
+
+### 9.4 Workspace add/edit modal
+
+Refactor `WorkspaceSidebar.tsx` so add/edit triggers open a dedicated `WorkspaceDialog` (or equivalently named component) rendered outside the sidebar's layout, preferably through a React portal. Reuse `WorkspaceForm` for form state and validation rather than duplicating command logic.
+
+The dialog must:
+
+- use `role="dialog"`, `aria-modal="true"`, and an accessible title;
+- move initial focus to the first useful field or validation target;
+- trap Tab and Shift+Tab within the dialog;
+- make background content inert/non-interactive and lock background scrolling;
+- close on Escape only when no submission is pending;
+- have explicit Cancel and Save actions and prevent accidental implicit dismissal while submitting;
+- restore focus to the exact Add/Edit trigger on close;
+- retain form state while the existing downgrade or network-exposure confirmation is shown;
+- associate validation/server errors and help text with their controls; and
+- render as a comfortably sized centered dialog on desktop and an inset full-height sheet on narrow viewports without hiding its title/actions.
+
+The managed form flow must:
+
+- show **Destination policy** only when Workspace sandbox + Managed egress is chosen;
+- offer only public administrator-defined named sets, with `default` selected for new workspaces;
+- show the selected set's normalized domains and ports as read-only disclosure details, never editable inputs;
+- show an unavailable stored set as unavailable while allowing an explicit replacement or switch to isolated;
+- lock path, security profile, network type, and set together while any conversation in the workspace is live, while still permitting a name-only edit;
+- preserve the existing security-downgrade confirmation and separately confirm managed-egress enablement/set changes; and
+- show stored versus effective network type/set and distinct policy issues in Workspace Info.
+
+Update CSS and unit/Playwright tests for focus trap, Escape, focus restoration, pending submission, error association, confirmation state retention, desktop/mobile layouts, live-runtime locking, unavailable sets, and exact command payload/acknowledgement behavior.
+
+### 9.5 Documentation, compatibility, and release gates
+
+Update `.env.example`, `README.md`, managed-egress operations guidance, configuration tables, disclosures, troubleshooting, and acceptance mapping. Document migration behavior, the exact-subset rule, default-set compatibility, safe set removal/rollout, and that changing configuration requires restart and affects only newly created runtimes.
+
+Add release assertions that:
+
+- an installation with no policy-set variable preserves the current single-global-policy behavior through synthesized `default`;
+- every migrated workspace selects `default`;
+- no browser command can create or widen a set;
+- a configured set never exceeds the global ceiling or bypasses deny/non-public checks;
+- unavailable sets remain stored and fail closed;
+- live conversations retain immutable set identity and policy bytes;
+- concurrent managed workspaces enforce distinct sets and proxies; and
+- the modal remains keyboard-accessible and usable at supported narrow viewport sizes.
+
 ## Test and quality gates
 
 Run at each phase boundary:
@@ -383,6 +494,10 @@ Additional release gates:
 - Proxy/bridge/helper failure transitions the conversation to error and never selects a weaker runtime.
 - Abort replacement, fork promotion, rewind failure, close, LRU eviction, crash, and shutdown leave no helper process, bridge, proxy connection, Unix socket, or runtime directory.
 - Logs and browser events contain destination decisions but no URL path/query, headers, bodies, TLS bytes, credentials, resolved browser-visible IPs, output, or host paths.
+- Named destination sets are strict subsets of the administrator ceiling, and browser commands cannot submit destination rules.
+- Managed workspaces with different selected sets cannot use each other's additional grants.
+- A removed set policy-blocks affected managed workspaces without silently changing their stored selection.
+- Workspace add/edit is fully operable by keyboard in the responsive modal, with focus containment and restoration.
 
 ## Recommended commit sequence
 
@@ -395,5 +510,9 @@ Additional release gates:
 7. Pi/registry lifecycle integration and fatal handling.
 8. Browser controls, badges, information, and blocked notices.
 9. Adversarial tests, systemd/CI hardening, documentation, and acceptance mapping.
+10. Schema v5, named policy-set configuration, public contract, and repository enforcement.
+11. Selected-set runtime, registry, proxy, audit, and lifecycle integration.
+12. Accessible responsive workspace add/edit modal and destination-set controls.
+13. Policy-set isolation tests, migration/release hardening, operations documentation, and acceptance mapping.
 
 Each commit should keep managed egress disabled by default and leave the existing isolated and unrestricted paths passing their full test suites.

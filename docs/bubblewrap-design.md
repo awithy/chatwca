@@ -1,12 +1,14 @@
 # Bubblewrap Workspace Sandboxing Design
 
-**Status:** Implemented
+**Status:** Implemented; per-workspace managed-egress policy-set and workspace-modal amendments proposed
 
 **Platform:** Linux
 
 **Runtime:** Node.js 22.19+, Bubblewrap 0.6.1+
 
 **Design input:** [Optional Bubblewrap Workspace Sandboxing](bubblewrap-ticket.md)
+
+**Related design:** [Managed Network Sandbox](network-sandbox-design.md)
 
 ## 1. Summary
 
@@ -49,13 +51,15 @@ The initial release will not provide:
 - protection against malicious changes within the writable workspace;
 - a read-only source profile;
 - a separate `.git` capability;
-- domain-based network allowlisting;
-- package installation through the network;
+- direct network access from the isolated profile;
+- network allowlists controlled by a model or supplied as arbitrary browser-entered destinations;
 - Docker, VM, or remote-worker backends;
 - arbitrary extension tools in sandboxed runtimes;
 - cgroup-based per-conversation CPU, memory, disk, or process quotas;
 - a general-purpose host filesystem broker; or
 - a guarantee that an unrestricted Pi extension running in the parent cannot bypass the sandbox boundary.
+
+The separate managed-egress profile described in [`network-sandbox-design.md`](network-sandbox-design.md) supports package installation and administrator-filtered network access without weakening the isolated namespace boundary.
 
 Bubblewrap is not authentication. The reverse proxy, mTLS policy, backend bind address, and firewall remain separate deployment controls.
 
@@ -173,6 +177,31 @@ The configured Bubblewrap executable must be:
 The server requires Bubblewrap 0.6.1 or newer. `disabled` mode does not inspect or execute Bubblewrap. `optional` and `required` modes validate all sandbox configuration and run a functional probe during startup. Operators who want the server to run without a working sandbox must explicitly select `disabled`.
 
 Extra read-only mounts are administrator trust decisions. Each source is canonicalized and must not overlap a workspace, the ChatWCA data directory, the Pi agent directory, `/proc`, `/dev`, `/sys`, `/run`, `/tmp`, `/var/tmp`, `/workspace`, or the worker control paths. Documentation will warn against mounting home directories, credential stores, caches containing tokens, or service sockets.
+
+### 7.1 Per-workspace managed-egress policy sets
+
+The initial managed-egress implementation uses one process-wide administrator allowlist. That grants every managed workspace the union of all destinations needed by any managed workspace. The follow-on design narrows this authority with **administrator-defined named destination policy sets** selected per workspace.
+
+The policy layers are:
+
+```text
+mandatory global enforcement
+  ├── non-public/local/LAN/metadata address denial
+  ├── explicit denied-domain precedence
+  ├── supported protocols and resource limits
+  └── global allowed-domain and allowed-port ceiling
+        └── named policy set (normalized subset of that ceiling)
+              └── workspace selection
+                    └── immutable conversation runtime snapshot
+```
+
+The browser must never submit an arbitrary domain, IP address, port, proxy rule, or raw policy document. Administrators define named sets in server configuration. A set has a stable opaque ID, a human-readable label, normalized allowed patterns, and allowed ports. Every set entry must be an exact normalized member of the global ceiling; this intentionally avoids subtle wildcard-containment rules. Global deny precedence and non-public-address rejection cannot be relaxed by a set.
+
+A workspace stores the selected policy-set ID independently from `networkPolicy`. The selection is effective only when the workspace is both `workspace-sandboxed` and `managed-egress`; isolated and unrestricted runtimes receive no destination policy. A missing configured set leaves a managed workspace policy-blocked without rewriting its stored selection. New and migrated rows use an administrator-configured default set so existing deployments retain a deterministic policy.
+
+Changing a managed workspace's set can add destination authority and therefore requires the same explicit network-exposure acknowledgement as enabling managed egress. Network type or policy-set changes are rejected with `workspace_busy` while any live runtime belongs to the workspace. Create, open, fork, rewind, replacement, and promotion resolve the stored set through `WorkspaceRepository.requireUsable()`. Each `ManagedNetworkRuntime` receives an immutable compiled copy and records the stable set ID in audit decisions; it never consults mutable browser state.
+
+`GET /api/config` may expose only selectable set IDs, labels, normalized domain patterns, and ports in addition to the existing public managed-egress disclosure. It must not expose helper paths, proxy socket paths, resolved addresses, or private diagnostics. Removing or changing a configured set requires a server restart and affects only subsequently created runtimes because live conversations retain their immutable runtime policy until closed.
 
 ## 8. Workspace persistence and protocol
 
@@ -533,26 +562,35 @@ Public errors never contain worker stderr, host paths, Bubblewrap arguments, com
 Workspace creation shows a **Security profile** control:
 
 - **Unrestricted** — current Pi behavior, full server-user access;
-- **Workspace sandbox** — workspace read/write, no tool network, restricted host filesystem.
+- **Workspace sandbox** — workspace read/write with either isolated networking or managed egress, restricted host filesystem.
 
 The control is hidden or fixed when the server mode permits only one choice. In optional mode it defaults to unrestricted.
 
-Editing a profile is allowed only after all live conversations in that workspace are closed. Reducing protection requires a confirmation stating that tools will again run with the ChatWCA server user's host permissions.
+### 17.1 Add and edit modal
+
+The workspace add/edit form is displayed in a responsive modal dialog rather than inline in the narrow sidebar. Workspace list, selection, and action triggers remain in the sidebar. The modal provides enough width for path, security profile, sandbox network type, and managed-egress policy-set controls and disclosures without compressing the conversation list.
+
+The dialog must use native or equivalent accessible modal semantics: `role="dialog"`, `aria-modal="true"`, an accessible title, initial focus, contained Tab/Shift+Tab navigation, Escape cancellation when submission is not pending, background interaction suppression, and focus restoration to the button that opened it. Small viewports use an inset full-height sheet while retaining a visible title and actions. Validation and server errors remain associated with the relevant controls; opening a confirmation must not close or reset the underlying form.
+
+Editing path, security profile, network type, or destination policy set is allowed only after all live conversations in that workspace are closed. The name remains editable independently. Reducing the security profile requires a confirmation stating that tools will again run with the ChatWCA server user's host permissions. Enabling managed egress or changing its destination set requires a separate workspace-disclosure confirmation and server acknowledgement.
+
+When **Managed egress** is selected, the form offers only administrator-defined named policy sets returned by `/api/config`. It shows the selected set's normalized domains and ports as read-only details; it does not provide domain or port text inputs and no one-time approval action. A configured set that is no longer available remains visible as unavailable so the operator can deliberately choose a valid replacement or switch to isolated networking.
 
 Workspace Info shows:
 
-- stored profile;
-- effective profile;
+- stored and effective security profile;
+- stored and effective network type and named destination policy set;
 - whether the server requires sandboxing;
 - workspace and session paths;
-- network policy;
+- the selected set's normalized allowed domains and ports;
+- mandatory local/private denial and protocol/TLS properties;
 - `.git` writable status;
 - configured read-only runtime mounts; and
-- the remote-model disclosure warning.
+- the workspace-egress and remote-model disclosure warnings.
 
-The conversation header shows an always-visible **Sandboxed** or **Unrestricted** badge derived from `ConversationState.securityProfile`, not current form state. A policy-blocked workspace remains visible but cannot create or open a conversation.
+The conversation header shows an always-visible **Sandboxed · Network isolated**, **Sandboxed · Managed egress**, or **Unrestricted** badge derived from immutable `ConversationState`, not current form state. Managed conversation details also show the immutable destination policy-set label or ID. A policy-blocked workspace remains visible but cannot create or open a conversation.
 
-`GET /api/config` adds only client-safe sandbox data: mode, selectable profiles, remote-provider warning text, and whether the functional probe succeeded. It does not expose Bubblewrap paths, approved roots, read-only mounts, protected paths, or private diagnostics.
+`GET /api/config` adds only client-safe sandbox data: mode, selectable profiles, selectable named destination sets and their normalized public rules, warning text, and whether the functional probe succeeded. It does not expose Bubblewrap/helper paths, approved roots, read-only mounts, protected paths, proxy sockets, resolved addresses, or private diagnostics.
 
 ## 18. Resource controls
 
@@ -633,13 +671,16 @@ Tests must run both directly and under the provided systemd unit constraints. Un
 ### 20.3 Browser tests
 
 - create workspaces under each server mode;
-- show stored/effective profiles and policy-blocked reasons;
-- prevent profile changes while a runtime is live;
-- confirm and acknowledge a downgrade;
-- show the effective profile in the conversation header;
-- preserve profile through restart, fork, and rewind;
+- open add/edit in an accessible focus-trapped modal and restore trigger focus on close;
+- preserve form state across network-exposure confirmations and render responsively at narrow widths;
+- show stored/effective profiles, network types, named destination sets, and policy-blocked reasons;
+- offer only administrator-defined sets and never arbitrary destination inputs;
+- prevent path, profile, network, and destination-set changes while a runtime is live;
+- confirm and acknowledge a downgrade, managed-egress enablement, and managed set change;
+- show the effective profile and immutable set in the conversation header;
+- preserve profile and destination set through restart, fork, and rewind;
 - explain no-network/toolchain compatibility limits; and
-- display the remote-model disclosure warning.
+- display the workspace-egress and remote-model disclosure warnings.
 
 ## 21. Implementation sequence
 
@@ -652,6 +693,9 @@ Tests must run both directly and under the provided systemd unit constraints. Un
 7. **Lifecycle integration** — fork/rewind, abort restart, close, LRU eviction, graceful shutdown.
 8. **UI and documentation** — profile controls, badges, warnings, deployment and compatibility guidance.
 9. **Hardening tests** — escape attempts, malformed IPC, systemd operation, concurrent profiles.
+10. **Named destination sets** — schema v5, administrator ceiling/subset validation, workspace selection, immutable runtime/audit identity, and cross-workspace isolation tests.
+11. **Workspace modal** — move add/edit out of the sidebar with accessible focus management, responsive layout, policy-set disclosure, and command-payload tests.
+12. **Follow-on hardening** — migration compatibility, unavailable-set fail-closed behavior, operations guidance, and acceptance mapping.
 
 ## 22. Acceptance criteria
 
@@ -671,5 +715,10 @@ The feature is complete when:
 - setup, protocol, and runtime failures never select unrestricted tools;
 - abort, close, eviction, crash, and shutdown remove workers and descendants;
 - forks and rewinds use the destination workspace's freshly resolved policy;
-- concurrent profiles do not share workers, tool sets, or extension-mutated model runtimes; and
+- concurrent profiles do not share workers, tool sets, or extension-mutated model runtimes;
+- every managed workspace selects an administrator-defined named destination set that is an exact normalized subset of the global ceiling;
+- browser commands cannot submit arbitrary destinations or relax global deny, address, protocol, or resource controls;
+- a missing selected set policy-blocks the workspace without silent substitution, while live conversations retain immutable set snapshots;
+- managed workspaces with different sets cannot use one another's additional destination grants;
+- workspace add/edit uses a responsive keyboard-accessible modal with focus containment and restoration; and
 - the UI and operator documentation accurately state both the protection and its residual workspace, extension, model-provider, and denial-of-service risks.

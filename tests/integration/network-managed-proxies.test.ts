@@ -59,10 +59,13 @@ describe("managed parent proxy integration", () => {
       CHATWCA_NETWORK_MAX_CONNECTION_BYTES: "32",
       CHATWCA_NETWORK_HELPER_PATH: "/unused/helper",
     }, "required");
+    const policySet = config.policySets.get("default")!;
     const runtime = await ManagedNetworkRuntime.startForTesting({
       dataDir: root,
       workspaceId: "workspace-integration",
       conversationId: "conversation-integration",
+      policySetId: policySet.id,
+      policySet,
       config,
       diagnosticSink: (event) => diagnostics.push(event),
     }, new PinnedDestinationConnector(resolver, dialer));

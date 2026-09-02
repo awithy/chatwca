@@ -35,6 +35,7 @@ import type { SandboxConfig } from "./sandbox/config.js";
 import type { SandboxNetworkPolicy } from "../shared/protocol.js";
 import {
   DEFAULT_NETWORK_POLICY_SET_ID,
+  type CompiledNetworkPolicySet,
   type ManagedNetworkConfig,
 } from "./network/config.js";
 import type { NetworkBlockedNotification, NetworkDiagnosticSink } from "./network/audit.js";
@@ -90,6 +91,8 @@ export type PiRuntimeNetworkBlockedListener = (
 export interface ManagedNetworkRuntimePort {
   readonly httpSocketPath: string;
   readonly socksSocketPath: string;
+  readonly policySetId: string;
+  readonly policySet: Readonly<CompiledNetworkPolicySet>;
   subscribeBlocked(listener: PiRuntimeNetworkBlockedListener): () => void;
   onFatal(listener: PiRuntimeFatalFailureListener): () => void;
   close(): Promise<void>;
@@ -123,6 +126,9 @@ export interface PiConversationRuntimePort {
   readonly session: AgentSession;
   readonly securityProfile: RuntimeWorkspacePolicy["securityProfile"];
   readonly networkPolicy: SandboxNetworkPolicy | null;
+  /** Selected managed-egress grant; null for unrestricted/isolated runtimes. */
+  readonly networkPolicySetId: string | null;
+  readonly networkPolicySet: Readonly<CompiledNetworkPolicySet> | null;
   readonly identity: PiRuntimeIdentity;
   readonly model: PiModelCapability | undefined;
   readonly supportsImages: boolean;
@@ -257,6 +263,8 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
   readonly #runtime: AgentSessionRuntime;
   readonly #securityProfile: RuntimeWorkspacePolicy["securityProfile"];
   readonly #networkPolicy: SandboxNetworkPolicy | null;
+  readonly #networkPolicySetId: string | null;
+  readonly #networkPolicySet: Readonly<CompiledNetworkPolicySet> | null;
   readonly #sandboxController: SandboxController | undefined;
   readonly #managedNetwork: ManagedNetworkRuntimePort | undefined;
   readonly #eventListeners = new Set<AgentSessionEventListener>();
@@ -278,20 +286,35 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
     networkPolicy: SandboxNetworkPolicy | null =
       securityProfile === "workspace-sandboxed" ? "isolated" : null,
     managedNetwork?: ManagedNetworkRuntimePort,
+    networkPolicySetId: string | null = null,
+    networkPolicySet: Readonly<CompiledNetworkPolicySet> | null = null,
   ) {
+    const managedIdentityMatches =
+      networkPolicy === "managed-egress" &&
+      managedNetwork !== undefined &&
+      networkPolicySet !== null &&
+      networkPolicySetId !== null &&
+      networkPolicySet.id === networkPolicySetId &&
+      managedNetwork.policySetId === networkPolicySetId &&
+      managedNetwork.policySet === networkPolicySet;
     if (
       (securityProfile === "unrestricted" &&
-        (networkPolicy !== null || sandboxController !== undefined || managedNetwork !== undefined)) ||
+        (networkPolicy !== null || sandboxController !== undefined || managedNetwork !== undefined ||
+          networkPolicySetId !== null || networkPolicySet !== null)) ||
       (securityProfile === "workspace-sandboxed" &&
         (sandboxController === undefined ||
           (networkPolicy !== "isolated" && networkPolicy !== "managed-egress") ||
-          (networkPolicy === "managed-egress") !== (managedNetwork !== undefined)))
+          (networkPolicy === "managed-egress"
+            ? !managedIdentityMatches
+            : managedNetwork !== undefined || networkPolicySetId !== null || networkPolicySet !== null)))
     ) {
       throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
     }
     this.#runtime = runtime;
     this.#securityProfile = securityProfile;
     this.#networkPolicy = networkPolicy;
+    this.#networkPolicySetId = networkPolicySetId;
+    this.#networkPolicySet = networkPolicySet;
     this.#sandboxController = sandboxController;
     this.#managedNetwork = managedNetwork;
     if (sandboxController !== undefined) {
@@ -336,6 +359,14 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
 
   get networkPolicy(): SandboxNetworkPolicy | null {
     return this.#networkPolicy;
+  }
+
+  get networkPolicySetId(): string | null {
+    return this.#networkPolicySetId;
+  }
+
+  get networkPolicySet(): Readonly<CompiledNetworkPolicySet> | null {
+    return this.#networkPolicySet;
   }
 
   declare readonly sandboxFileReader?: SandboxWorkspaceFileReaderPort;
@@ -681,8 +712,27 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
     }
     const networkPolicySetId = policy.networkPolicySetId ?? DEFAULT_NETWORK_POLICY_SET_ID;
     const effectiveNetworkPolicySetId = networkPolicy === "managed-egress"
-      ? policy.effectiveNetworkPolicySetId ?? networkPolicySetId
+      ? policy.effectiveNetworkPolicySetId
       : null;
+    const networkPolicySet = networkPolicy === "managed-egress"
+      ? policy.networkPolicySet
+      : null;
+    if (
+      (networkPolicy === "managed-egress" &&
+        (policy.networkPolicySetId === undefined ||
+          effectiveNetworkPolicySetId !== networkPolicySetId ||
+          networkPolicySet === null || networkPolicySet === undefined ||
+          networkPolicySet.id !== effectiveNetworkPolicySetId ||
+          !Object.isFrozen(networkPolicySet) ||
+          !Object.isFrozen(networkPolicySet.allowedDomainPatterns) ||
+          !Object.isFrozen(networkPolicySet.allowedPorts) ||
+          !Object.isFrozen(networkPolicySet.destinationPolicy))) ||
+      (networkPolicy !== "managed-egress" &&
+        ((policy.effectiveNetworkPolicySetId ?? null) !== null ||
+          (policy.networkPolicySet ?? null) !== null))
+    ) {
+      throw new AppError(ERROR_CODES.NETWORK_POLICY_INVALID);
+    }
     return Object.freeze({
       workspaceId: policy.workspaceId,
       cwd,
@@ -693,9 +743,7 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
       networkPolicy,
       networkPolicySetId,
       effectiveNetworkPolicySetId,
-      networkPolicySet: networkPolicy === "managed-egress"
-        ? policy.networkPolicySet ?? null
-        : null,
+      networkPolicySet,
     });
   }
 
@@ -723,17 +771,35 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
           // unrestricted tools when its parent-owned runtime is unavailable.
           throw new AppError(ERROR_CODES.NETWORK_HELPER_UNAVAILABLE);
         }
+        const selectedPolicySet = policy.networkPolicySet;
+        const selectedPolicySetId = policy.effectiveNetworkPolicySetId;
+        if (
+          selectedPolicySet === null ||
+          selectedPolicySetId === null ||
+          selectedPolicySet.id !== selectedPolicySetId ||
+          managed.config.policySets.get(selectedPolicySetId) !== selectedPolicySet
+        ) {
+          throw new AppError(ERROR_CODES.NETWORK_POLICY_INVALID);
+        }
         const startRuntime = managed.startRuntime ??
           ((options) => ManagedNetworkRuntime.start(options));
         managedNetwork = await startRuntime({
           dataDir: managed.dataDir,
           workspaceId: policy.workspaceId,
           conversationId: sessionManager.getSessionId(),
+          policySetId: selectedPolicySetId,
+          policySet: selectedPolicySet,
           config: managed.config,
           ...(managed.diagnosticSink === undefined
             ? {}
             : { diagnosticSink: managed.diagnosticSink }),
         });
+        if (
+          managedNetwork.policySetId !== selectedPolicySetId ||
+          managedNetwork.policySet !== selectedPolicySet
+        ) {
+          throw new AppError(ERROR_CODES.NETWORK_POLICY_INVALID);
+        }
         unsubscribeStartupProxyFatal = managedNetwork.onFatal((error) => {
           proxyFailure ??= error;
           sandboxController?.failTerminal(error);
@@ -856,6 +922,8 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
         sandboxController,
         policy.networkPolicy,
         managedNetwork,
+        policy.effectiveNetworkPolicySetId,
+        policy.networkPolicySet,
       );
       // Keep the startup observer until the fully owning wrapper has installed
       // its replayable fatal subscription; there is no unobserved proxy gap.

@@ -18,7 +18,7 @@ describe("managed-network audit", () => {
   it("validates a closed redacted record and audits every decision", () => {
     const events: NetworkPolicyAuditEvent[] = [];
     const auditor = new NetworkDecisionAuditor(
-      { workspaceId: "workspace-1", conversationId: "conversation-1" },
+      { workspaceId: "workspace-1", conversationId: "conversation-1", policySetId: "default" },
       (event) => events.push(event),
     );
     auditor.record({ protocol: "http", host: "example.com", port: 80, decision: "allow", reason: "allowlist" });
@@ -26,7 +26,7 @@ describe("managed-network audit", () => {
     expect(events).toHaveLength(2);
     expect(Object.isFrozen(events[0])).toBe(true);
     expect(Object.keys(events[0]!).sort()).toEqual([
-      "conversationId", "decision", "host", "port", "protocol", "reason", "timestamp", "workspaceId",
+      "conversationId", "decision", "host", "policySetId", "port", "protocol", "reason", "timestamp", "workspaceId",
     ]);
     expect(JSON.stringify(events)).not.toMatch(/url|header|body|address|credential|path/i);
     auditor.close();
@@ -38,7 +38,7 @@ describe("managed-network audit", () => {
       const sink = vi.fn();
       const browser = vi.fn();
       const auditor = new NetworkDecisionAuditor(
-        { workspaceId: "workspace-1", conversationId: "conversation-1" }, sink, 100,
+        { workspaceId: "workspace-1", conversationId: "conversation-1", policySetId: "github" }, sink, 100,
       );
       auditor.subscribe(browser);
       for (let count = 0; count < 3; count += 1) {
@@ -57,10 +57,12 @@ describe("managed-network audit", () => {
   it("rejects records containing noncanonical or invalid fields before a sink can see them", () => {
     const base: NetworkPolicyAuditEvent = {
       timestamp: Date.now(), workspaceId: "workspace", conversationId: "conversation",
-      protocol: "http", host: "example.com", port: 80, decision: "allow", reason: "allowlist",
+      policySetId: "default", protocol: "http", host: "example.com", port: 80,
+      decision: "allow", reason: "allowlist",
     };
     expect(() => validateNetworkAuditEvent({ ...base, host: "EXAMPLE.com" })).toThrow();
     expect(() => validateNetworkAuditEvent({ ...base, workspaceId: "workspace/path" })).toThrow();
+    expect(() => validateNetworkAuditEvent({ ...base, policySetId: "Bad Set" })).toThrow();
     expect(() => validateNetworkAuditEvent({ ...base, decision: "deny" })).toThrow();
   });
 });

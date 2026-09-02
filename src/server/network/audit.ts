@@ -1,3 +1,8 @@
+import {
+  NETWORK_POLICY_SET_ID_MAX_LENGTH,
+  NETWORK_POLICY_SET_ID_PATTERN,
+  type NetworkPolicySetId,
+} from "../../shared/protocol.js";
 import { normalizeDestinationHost } from "./policy.js";
 
 export const NETWORK_AUDIT_PROTOCOLS = ["http", "https-connect", "socks5-tcp"] as const;
@@ -12,6 +17,7 @@ export interface NetworkPolicyAuditEvent {
   readonly timestamp: number;
   readonly workspaceId: string;
   readonly conversationId: string;
+  readonly policySetId: NetworkPolicySetId;
   readonly protocol: NetworkAuditProtocol;
   readonly host: string;
   readonly port: number;
@@ -33,6 +39,7 @@ export type NetworkBlockedListener = (event: Readonly<NetworkBlockedNotification
 export interface NetworkAuditContext {
   readonly workspaceId: string;
   readonly conversationId: string;
+  readonly policySetId: NetworkPolicySetId;
 }
 
 export interface NetworkDecision {
@@ -43,14 +50,22 @@ export interface NetworkDecision {
   readonly reason: NetworkAuditReason;
 }
 
-function validIdentity(value: string): boolean {
-  return value.length >= 1 && value.length <= 200 && /^[A-Za-z0-9._:-]+$/.test(value);
+function validIdentity(value: unknown): value is string {
+  return typeof value === "string" && value.length >= 1 && value.length <= 200 &&
+    /^[A-Za-z0-9._:-]+$/.test(value);
+}
+
+function validPolicySetId(value: unknown): value is NetworkPolicySetId {
+  return typeof value === "string" &&
+    value.length <= NETWORK_POLICY_SET_ID_MAX_LENGTH &&
+    new RegExp(NETWORK_POLICY_SET_ID_PATTERN, "u").test(value);
 }
 
 /** Reconstruct, normalize, freeze, and whitelist every logged field. */
 export function validateNetworkAuditEvent(value: NetworkPolicyAuditEvent): Readonly<NetworkPolicyAuditEvent> {
   if (!Number.isSafeInteger(value.timestamp) || value.timestamp < 0 ||
       !validIdentity(value.workspaceId) || !validIdentity(value.conversationId) ||
+      !validPolicySetId(value.policySetId) ||
       !(NETWORK_AUDIT_PROTOCOLS as readonly string[]).includes(value.protocol) ||
       !(NETWORK_AUDIT_REASONS as readonly string[]).includes(value.reason) ||
       (value.decision !== "allow" && value.decision !== "deny") ||
@@ -65,6 +80,7 @@ export function validateNetworkAuditEvent(value: NetworkPolicyAuditEvent): Reado
     timestamp: value.timestamp,
     workspaceId: value.workspaceId,
     conversationId: value.conversationId,
+    policySetId: value.policySetId,
     protocol: value.protocol,
     host,
     port: value.port,
@@ -91,6 +107,7 @@ export class NetworkDecisionAuditor {
     private readonly notificationWindowMs = 1_000,
   ) {
     if (!validIdentity(context.workspaceId) || !validIdentity(context.conversationId) ||
+        !validPolicySetId(context.policySetId) ||
         !Number.isSafeInteger(notificationWindowMs) || notificationWindowMs <= 0) {
       throw new TypeError("invalid network audit context");
     }
@@ -108,6 +125,7 @@ export class NetworkDecisionAuditor {
       timestamp: Date.now(),
       workspaceId: this.context.workspaceId,
       conversationId: this.context.conversationId,
+      policySetId: this.context.policySetId,
       protocol: decision.protocol,
       host: decision.host,
       port: decision.port,

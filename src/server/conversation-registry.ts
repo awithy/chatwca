@@ -56,7 +56,10 @@ import type {
 } from "./pi-runtime.js";
 import type { NetworkBlockedNotification } from "./network/audit.js";
 import type { RuntimeWorkspacePolicy } from "./workspace-repository.js";
-import { DEFAULT_NETWORK_POLICY_SET_ID } from "./network/config.js";
+import {
+  DEFAULT_NETWORK_POLICY_SET_ID,
+  type CompiledNetworkPolicySet,
+} from "./network/config.js";
 
 const UNTITLED_CONVERSATION = "Untitled conversation";
 
@@ -101,6 +104,8 @@ export interface ConversationRecord {
   readonly networkPolicy: SandboxNetworkPolicy | null;
   readonly networkPolicySetId: string;
   readonly effectiveNetworkPolicySetId: string | null;
+  /** Exact immutable compiled grant owned by this live runtime. Never projected. */
+  readonly networkPolicySet: Readonly<CompiledNetworkPolicySet> | null;
   /** Locks terminal runtime failures against later Pi idle events. */
   runtimeFailureTerminal: boolean;
   sessionFile: string;
@@ -831,6 +836,8 @@ export class ConversationRegistry {
       if (
         temporary.securityProfile !== forkPolicy.securityProfile ||
         temporary.networkPolicy !== forkPolicy.networkPolicy ||
+        temporary.networkPolicySetId !== forkPolicy.effectiveNetworkPolicySetId ||
+        temporary.networkPolicySet !== forkPolicy.networkPolicySet ||
         path.resolve(temporary.identity.sessionFile) !==
           reservation.sourceSessionFile ||
         path.resolve(temporary.identity.cwd) !== reservation.sourceCwd
@@ -1073,7 +1080,9 @@ export class ConversationRegistry {
     this.#assertIdentityInWorkspace(identity, workspace);
     if (
       runtime.securityProfile !== workspace.securityProfile ||
-      runtime.networkPolicy !== workspace.networkPolicy
+      runtime.networkPolicy !== workspace.networkPolicy ||
+      runtime.networkPolicySetId !== workspace.effectiveNetworkPolicySetId ||
+      runtime.networkPolicySet !== workspace.networkPolicySet
     ) {
       throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
     }
@@ -1098,6 +1107,7 @@ export class ConversationRegistry {
       networkPolicy: workspace.networkPolicy,
       networkPolicySetId: workspace.networkPolicySetId,
       effectiveNetworkPolicySetId: workspace.effectiveNetworkPolicySetId,
+      networkPolicySet: workspace.networkPolicySet,
       runtimeFailureTerminal: false,
       sessionFile,
       cwd: workspace.cwd,
@@ -1179,7 +1189,10 @@ export class ConversationRegistry {
       (policy.securityProfile === "workspace-sandboxed" ? "isolated" : null);
     const networkPolicySetId = policy.networkPolicySetId ?? DEFAULT_NETWORK_POLICY_SET_ID;
     const effectiveNetworkPolicySetId = networkPolicy === "managed-egress"
-      ? policy.effectiveNetworkPolicySetId ?? networkPolicySetId
+      ? policy.effectiveNetworkPolicySetId
+      : null;
+    const networkPolicySet = networkPolicy === "managed-egress"
+      ? policy.networkPolicySet
       : null;
     if (
       typeof policy.workspaceId !== "string" ||
@@ -1194,7 +1207,17 @@ export class ConversationRegistry {
           networkPolicy !== "managed-egress") ||
       (networkPolicySetId.length > NETWORK_POLICY_SET_ID_MAX_LENGTH ||
         !new RegExp(NETWORK_POLICY_SET_ID_PATTERN, "u").test(networkPolicySetId)) ||
-      (effectiveNetworkPolicySetId !== null && effectiveNetworkPolicySetId !== networkPolicySetId) ||
+      (networkPolicy === "managed-egress"
+        ? policy.networkPolicySetId === undefined ||
+          effectiveNetworkPolicySetId !== networkPolicySetId ||
+          networkPolicySet === null || networkPolicySet === undefined ||
+          networkPolicySet.id !== effectiveNetworkPolicySetId ||
+          !Object.isFrozen(networkPolicySet) ||
+          !Object.isFrozen(networkPolicySet.allowedDomainPatterns) ||
+          !Object.isFrozen(networkPolicySet.allowedPorts) ||
+          !Object.isFrozen(networkPolicySet.destinationPolicy)
+        : (policy.effectiveNetworkPolicySetId ?? null) !== null ||
+          (policy.networkPolicySet ?? null) !== null) ||
       (policy.sessionDirectory !== null &&
         (typeof policy.sessionDirectory !== "string" ||
           !path.isAbsolute(policy.sessionDirectory)))
@@ -1211,9 +1234,7 @@ export class ConversationRegistry {
       networkPolicy,
       networkPolicySetId,
       effectiveNetworkPolicySetId,
-      networkPolicySet: networkPolicy === "managed-egress"
-        ? policy.networkPolicySet ?? null
-        : null,
+      networkPolicySet,
     });
   }
 
@@ -1228,7 +1249,8 @@ export class ConversationRegistry {
       record.securityProfile !== workspace.securityProfile ||
       record.networkPolicy !== workspace.networkPolicy ||
       record.networkPolicySetId !== workspace.networkPolicySetId ||
-      record.effectiveNetworkPolicySetId !== workspace.effectiveNetworkPolicySetId
+      record.effectiveNetworkPolicySetId !== workspace.effectiveNetworkPolicySetId ||
+      record.networkPolicySet !== workspace.networkPolicySet
     ) {
       throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
     }
@@ -1236,7 +1258,7 @@ export class ConversationRegistry {
 
   #assertIdentityInWorkspace(
     identity: PiRuntimeIdentity,
-    workspace: ConversationWorkspace,
+    workspace: Pick<ConversationWorkspace, "cwd">,
   ): void {
     if (path.resolve(identity.cwd) !== workspace.cwd) {
       throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
@@ -1431,22 +1453,15 @@ export class ConversationRegistry {
   ): void {
     if (
       record.runtime.securityProfile !== record.securityProfile ||
-      record.runtime.networkPolicy !== record.networkPolicy
+      record.runtime.networkPolicy !== record.networkPolicy ||
+      record.runtime.networkPolicySetId !== record.effectiveNetworkPolicySetId ||
+      record.runtime.networkPolicySet !== record.networkPolicySet
     ) {
       this.#handleRuntimeFailure(record, new AppError(ERROR_CODES.SESSION_UNAVAILABLE));
       return;
     }
     const current = record.runtime.identity;
-    this.#assertIdentityInWorkspace(current, {
-      workspaceId: record.workspaceId,
-      cwd: record.workspacePath,
-      sessionDirectory: record.sessionDirectory,
-      securityProfile: record.securityProfile,
-      networkPolicy: record.networkPolicy,
-      networkPolicySetId: record.networkPolicySetId,
-      effectiveNetworkPolicySetId: record.effectiveNetworkPolicySetId,
-      networkPolicySet: null,
-    });
+    this.#assertIdentityInWorkspace(current, { cwd: record.workspacePath });
     const sessionFile = path.resolve(current.sessionFile);
     const idOwner = this.#byId.get(current.sessionId);
     const fileOwner = this.#bySessionFile.get(sessionFile);

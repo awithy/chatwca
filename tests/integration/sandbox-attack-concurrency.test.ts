@@ -226,10 +226,12 @@ realSandbox("Bubblewrap attack and concurrency matrix", () => {
     });
     const runtimeA = await ManagedNetworkRuntime.start({
       dataDir: path.join(data, "network"), workspaceId: "managed-a", conversationId: "managed-a",
+      policySetId: "default", policySet: loadedA.managedNetwork.policySets.get("default")!,
       config: loadedA.managedNetwork, diagnosticSink: () => undefined,
     });
     const runtimeB = await ManagedNetworkRuntime.start({
       dataDir: path.join(data, "network"), workspaceId: "managed-b", conversationId: "managed-b",
+      policySetId: "default", policySet: loadedB.managedNetwork.policySets.get("default")!,
       config: loadedB.managedNetwork, diagnosticSink: () => undefined,
     });
     managedRuntimes.push(runtimeA, runtimeB);
@@ -306,6 +308,7 @@ realSandbox("Bubblewrap attack and concurrency matrix", () => {
     });
     const runtime = await ManagedNetworkRuntime.start({
       dataDir: path.join(data, "network"), workspaceId: "crash", conversationId: "crash",
+      policySetId: "default", policySet: loaded.managedNetwork.policySets.get("default")!,
       config: loaded.managedNetwork, diagnosticSink: () => undefined,
     });
     managedRuntimes.push(runtime);

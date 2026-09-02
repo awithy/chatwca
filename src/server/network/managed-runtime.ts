@@ -3,7 +3,10 @@ import path from "node:path";
 import { chmod, lstat, mkdir, readdir, rmdir, unlink } from "node:fs/promises";
 
 import { AppError, ERROR_CODES } from "../../shared/errors.js";
-import type { ManagedNetworkConfig } from "./config.js";
+import type {
+  CompiledNetworkPolicySet,
+  ManagedNetworkConfig,
+} from "./config.js";
 import {
   NetworkDecisionAuditor,
   type NetworkBlockedListener,
@@ -25,6 +28,9 @@ export interface ManagedNetworkRuntimeOptions {
   readonly dataDir: string;
   readonly workspaceId: string;
   readonly conversationId: string;
+  /** Immutable administrator-compiled grant selected by the workspace. */
+  readonly policySetId: string;
+  readonly policySet: Readonly<CompiledNetworkPolicySet>;
   readonly config: Readonly<ManagedNetworkConfig>;
   readonly diagnosticSink?: NetworkDiagnosticSink;
 }
@@ -119,6 +125,8 @@ function defaultDiagnosticSink(event: Parameters<NetworkDiagnosticSink>[0]): voi
 export class ManagedNetworkRuntime {
   readonly httpSocketPath: string;
   readonly socksSocketPath: string;
+  readonly policySetId: string;
+  readonly policySet: Readonly<CompiledNetworkPolicySet>;
   readonly #auditor: NetworkDecisionAuditor;
   readonly #http: HttpPolicyProxy;
   readonly #socks: Socks5PolicyProxy;
@@ -130,12 +138,15 @@ export class ManagedNetworkRuntime {
     private readonly processDirectory: string,
     private readonly runtimeDirectory: string,
     private readonly uid: number,
+    policySet: Readonly<CompiledNetworkPolicySet>,
     auditor: NetworkDecisionAuditor,
     http: HttpPolicyProxy,
     socks: Socks5PolicyProxy,
   ) {
     this.httpSocketPath = path.join(runtimeDirectory, "h.sock");
     this.socksSocketPath = path.join(runtimeDirectory, "s.sock");
+    this.policySetId = policySet.id;
+    this.policySet = policySet;
     this.#auditor = auditor;
     this.#http = http;
     this.#socks = socks;
@@ -163,6 +174,20 @@ export class ManagedNetworkRuntime {
     if (!path.isAbsolute(options.dataDir) || options.config.mode !== "optional") {
       throw new AppError(ERROR_CODES.NETWORK_PROXY_START_FAILED);
     }
+    if (
+      options.policySet === undefined ||
+      options.policySetId === undefined ||
+      options.policySetId !== options.policySet.id ||
+      options.config.policySets.get(options.policySetId) !== options.policySet ||
+      !Object.isFrozen(options.policySet) ||
+      !Object.isFrozen(options.policySet.allowedDomainPatterns) ||
+      !Object.isFrozen(options.policySet.allowedPorts) ||
+      !Object.isFrozen(options.policySet.destinationPolicy)
+    ) {
+      // Never substitute the global policy or another set when trusted runtime
+      // ownership is missing, stale, or mismatched.
+      throw new AppError(ERROR_CODES.NETWORK_POLICY_INVALID);
+    }
     await mkdir(options.dataDir, { recursive: true, mode: 0o700 });
     await cleanupStaleManagedNetworkDirectories(options.dataDir, dependencies.uid);
 
@@ -177,14 +202,18 @@ export class ManagedNetworkRuntime {
     let auditor: NetworkDecisionAuditor;
     try {
       auditor = new NetworkDecisionAuditor(
-        { workspaceId: options.workspaceId, conversationId: options.conversationId },
+        {
+          workspaceId: options.workspaceId,
+          conversationId: options.conversationId,
+          policySetId: options.policySetId,
+        },
         options.diagnosticSink ?? defaultDiagnosticSink,
       );
     } catch (error) {
       throw new AppError(ERROR_CODES.NETWORK_PROXY_START_FAILED, { cause: error });
     }
     const common = {
-      policy: options.config.destinationPolicy,
+      policy: options.policySet.destinationPolicy,
       maxConnections: options.config.maxConnections,
       connectTimeoutMs: options.config.connectTimeoutMs,
       idleTimeoutMs: options.config.idleTimeoutMs,
@@ -194,7 +223,15 @@ export class ManagedNetworkRuntime {
     const admission = new ConnectionAdmission(options.config.maxConnections);
     const http = new HttpPolicyProxy(common, dependencies.connector, admission);
     const socks = new Socks5PolicyProxy(common, dependencies.connector, admission);
-    const runtime = new ManagedNetworkRuntime(processDirectory, runtimeDirectory, dependencies.uid, auditor, http, socks);
+    const runtime = new ManagedNetworkRuntime(
+      processDirectory,
+      runtimeDirectory,
+      dependencies.uid,
+      options.policySet,
+      auditor,
+      http,
+      socks,
+    );
 
     try {
       // mkdir without recursive and random names guarantee no existing intended

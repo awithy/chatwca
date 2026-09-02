@@ -168,12 +168,17 @@ describe.skipIf(process.env.CHATWCA_SANDBOX_CAPABLE !== "1")("profile-selected s
       sessionDirectory: sessionDir,
       securityProfile: "workspace-sandboxed" as const,
       networkPolicy: "managed-egress" as const,
+      networkPolicySetId: "default",
+      effectiveNetworkPolicySetId: "default",
+      networkPolicySet: serverConfig.managedNetwork.policySets.get("default")!,
     };
     const runtime = await factory.createPersistent(managedPolicy);
     const secondRuntime = await factory.createPersistent(managedPolicy);
 
     try {
       expect(runtime.networkPolicy).toBe("managed-egress");
+      expect(runtime.networkPolicySetId).toBe("default");
+      expect(runtime.networkPolicySet).toBe(serverConfig.managedNetwork.policySets.get("default"));
       expect(runtime.session.agent.state.systemPrompt).toContain("destination-filtered proxy");
       expect(proxies).toHaveLength(2);
       expect(proxies[0]!.httpSocketPath).not.toBe(proxies[1]!.httpSocketPath);

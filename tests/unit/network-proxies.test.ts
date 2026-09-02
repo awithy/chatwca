@@ -45,7 +45,7 @@ function connectorTo(localPort: number, calls: Array<{ address: string; port: nu
 
 function fixtureOptions(events: NetworkPolicyAuditEvent[]) {
   const auditor = new NetworkDecisionAuditor(
-    { workspaceId: "workspace-1", conversationId: "conversation-1" },
+    { workspaceId: "workspace-1", conversationId: "conversation-1", policySetId: "default" },
     (event) => events.push(event),
   );
   cleanup.push(() => auditor.close());

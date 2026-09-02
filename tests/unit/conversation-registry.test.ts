@@ -13,6 +13,8 @@ import type {
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AppError, ERROR_CODES } from "../../src/shared/errors.js";
+import type { CompiledNetworkPolicySet } from "../../src/server/network/config.js";
+import { compileDestinationPolicy } from "../../src/server/network/policy.js";
 import {
   ConversationRegistry,
   type ConversationRegistryEvent,
@@ -45,6 +47,22 @@ async function temporaryRoot(): Promise<string> {
   return root;
 }
 
+function policySet(id = "default", domain = "example.com"): CompiledNetworkPolicySet {
+  return Object.freeze({
+    id,
+    label: id,
+    allowedDomainPatterns: Object.freeze([domain]),
+    allowedPorts: Object.freeze([443]),
+    destinationPolicy: compileDestinationPolicy({
+      allowedDomainPatterns: [domain],
+      deniedDomainPatterns: [],
+      allowedPorts: [443],
+    }),
+  });
+}
+
+const defaultPolicySet = policySet();
+
 interface FakeSessionOptions {
   readonly title?: string;
   readonly prompt?: string;
@@ -52,6 +70,8 @@ interface FakeSessionOptions {
   readonly sdkModel?: NonNullable<AgentSession["model"]>;
   readonly securityProfile?: "unrestricted" | "workspace-sandboxed";
   readonly networkPolicy?: "isolated" | "managed-egress" | null;
+  readonly networkPolicySetId?: string | null;
+  readonly networkPolicySet?: CompiledNetworkPolicySet | null;
 }
 
 function fakeSession(
@@ -99,6 +119,8 @@ class FakeRuntime implements PiConversationRuntimePort {
   readonly model: PiModelCapability | undefined = undefined;
   readonly securityProfile: "unrestricted" | "workspace-sandboxed";
   readonly networkPolicy: "isolated" | "managed-egress" | null;
+  networkPolicySetId: string | null;
+  networkPolicySet: CompiledNetworkPolicySet | null;
   readonly supportsImages = false;
   disposed = false;
   teardownComplete = false;
@@ -134,6 +156,12 @@ class FakeRuntime implements PiConversationRuntimePort {
     this.securityProfile = sessionOptions.securityProfile ?? "unrestricted";
     this.networkPolicy = sessionOptions.networkPolicy ??
       (this.securityProfile === "workspace-sandboxed" ? "isolated" : null);
+    this.networkPolicySetId = this.networkPolicy === "managed-egress"
+      ? sessionOptions.networkPolicySetId ?? defaultPolicySet.id
+      : null;
+    this.networkPolicySet = this.networkPolicy === "managed-egress"
+      ? sessionOptions.networkPolicySet ?? defaultPolicySet
+      : null;
     this.session = fakeSession(identity, sessionOptions);
   }
 
@@ -219,29 +247,40 @@ function ownership(cwd: string, id = cwd) {
   } as const;
 }
 
+function managedOwnership(
+  cwd: string,
+  workspaceId = "managed-workspace",
+  selected = defaultPolicySet,
+) {
+  return {
+    workspaceId,
+    cwd,
+    sessionDirectory: null,
+    securityProfile: "workspace-sandboxed" as const,
+    networkPolicy: "managed-egress" as const,
+    networkPolicySetId: selected.id,
+    effectiveNetworkPolicySetId: selected.id,
+    networkPolicySet: selected,
+  };
+}
+
 describe("ConversationRegistry", () => {
   it("projects stored and effective destination-set identity from trusted workspace policy", async () => {
     const root = await temporaryRoot();
     const cwd = path.join(root, "workspace");
     const sessionFile = path.join(root, "sessions", "managed.jsonl");
     await Promise.all([mkdir(cwd), mkdir(path.dirname(sessionFile))]);
+    const github = policySet("github", "github.com");
     const runtime = new FakeRuntime(identity("managed", sessionFile, cwd), {
       securityProfile: "workspace-sandboxed",
       networkPolicy: "managed-egress",
+      networkPolicySetId: github.id,
+      networkPolicySet: github,
     });
     const factory = new FakeFactory();
     factory.createPersistent.mockResolvedValue(runtime);
     const registry = new ConversationRegistry({ runtimeFactory: factory });
-    await registry.create({
-      workspaceId: "workspace-managed",
-      cwd,
-      sessionDirectory: null,
-      securityProfile: "workspace-sandboxed",
-      networkPolicy: "managed-egress",
-      networkPolicySetId: "github",
-      effectiveNetworkPolicySetId: "github",
-      networkPolicySet: null,
-    });
+    await registry.create(managedOwnership(cwd, "workspace-managed", github));
     await expect(registry.getState("managed")).resolves.toMatchObject({
       networkPolicySetId: "github",
       effectiveNetworkPolicySetId: "github",
@@ -731,13 +770,7 @@ describe("ConversationRegistry", () => {
     const registry = new ConversationRegistry({ runtimeFactory: factory });
     const events: ConversationRegistryEvent[] = [];
     registry.subscribe((event) => events.push(event));
-    const managedPolicy = {
-      workspaceId: "managed-workspace",
-      cwd,
-      sessionDirectory: null,
-      securityProfile: "workspace-sandboxed" as const,
-      networkPolicy: "managed-egress" as const,
-    };
+    const managedPolicy = managedOwnership(cwd);
 
     const record = await registry.create(managedPolicy);
     runtime.emitBlocked({
@@ -786,15 +819,68 @@ describe("ConversationRegistry", () => {
     factory.createPersistent.mockResolvedValue(runtime);
     const registry = new ConversationRegistry({ runtimeFactory: factory });
 
+    await expect(registry.create(managedOwnership(cwd)))
+      .rejects.toMatchObject({ code: ERROR_CODES.SESSION_UNAVAILABLE });
+    expect(runtime.disposeSpy).toHaveBeenCalledOnce();
+    expect(registry.size).toBe(0);
+  });
+
+  it("fails closed before registration when a managed set is missing or mismatches runtime bytes", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessions = path.join(root, "sessions");
+    await Promise.all([mkdir(cwd), mkdir(sessions)]);
+    const runtime = new FakeRuntime(identity("managed-mismatch", path.join(sessions, "managed.jsonl"), cwd), {
+      securityProfile: "workspace-sandboxed",
+      networkPolicy: "managed-egress",
+    });
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(runtime);
+    const registry = new ConversationRegistry({ runtimeFactory: factory });
+
     await expect(registry.create({
       workspaceId: "managed-workspace",
       cwd,
       sessionDirectory: null,
       securityProfile: "workspace-sandboxed",
       networkPolicy: "managed-egress",
-    })).rejects.toMatchObject({ code: ERROR_CODES.SESSION_UNAVAILABLE });
+      networkPolicySetId: "default",
+      effectiveNetworkPolicySetId: "default",
+      networkPolicySet: null,
+    })).rejects.toMatchObject({ code: ERROR_CODES.WORKSPACE_UNAVAILABLE });
+    expect(factory.createPersistent).not.toHaveBeenCalled();
+
+    const sameIdDifferentBytes = policySet("default", "other.example");
+    await expect(registry.create(managedOwnership(cwd, "managed-workspace", sameIdDifferentBytes)))
+      .rejects.toMatchObject({ code: ERROR_CODES.SESSION_UNAVAILABLE });
     expect(runtime.disposeSpy).toHaveBeenCalledOnce();
     expect(registry.size).toBe(0);
+  });
+
+  it("verifies selected-set identity during Pi replacement and never switches grants", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessions = path.join(root, "sessions");
+    await Promise.all([mkdir(cwd), mkdir(sessions)]);
+    const runtime = new FakeRuntime(identity("managed-source", path.join(sessions, "source.jsonl"), cwd), {
+      securityProfile: "workspace-sandboxed",
+      networkPolicy: "managed-egress",
+    });
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(runtime);
+    const registry = new ConversationRegistry({ runtimeFactory: factory });
+    const record = await registry.create(managedOwnership(cwd));
+
+    runtime.replace(identity("managed-replaced", path.join(sessions, "replacement.jsonl"), cwd));
+    expect(registry.get("managed-replaced")).toBe(record);
+    expect(record.networkPolicySet).toBe(defaultPolicySet);
+    expect(record.effectiveNetworkPolicySetId).toBe("default");
+
+    runtime.networkPolicySet = policySet("default", "switched.example");
+    runtime.replace(identity("managed-invalid", path.join(sessions, "invalid.jsonl"), cwd));
+    expect(record.status).toBe("error");
+    await vi.waitFor(() => expect(runtime.disposeSpy).toHaveBeenCalledOnce());
+    expect(registry.get("managed-invalid")).toBeUndefined();
   });
 
   it("canonicalizes aliases and shares one in-flight open", async () => {
@@ -1234,6 +1320,39 @@ describe("ConversationRegistry", () => {
     expect(runtime.disposed).toBe(false);
   });
 
+  it("rejects fork/rewind construction when a freshly resolved set no longer matches the live snapshot", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessions = path.join(root, "sessions");
+    const sourceFile = path.join(sessions, "managed-source.jsonl");
+    await Promise.all([mkdir(cwd), mkdir(sessions)]);
+    await writeFile(sourceFile, "source");
+    const branch = [{
+      type: "message",
+      id: "a1b2c3d4",
+      message: { role: "user", content: "fork" },
+    }];
+    const runtime = new FakeRuntime(identity("managed-source", sourceFile, cwd), {
+      branch,
+      securityProfile: "workspace-sandboxed",
+      networkPolicy: "managed-egress",
+    });
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(runtime);
+    const registry = new ConversationRegistry({ runtimeFactory: factory, maxLiveConversations: 2 });
+    const source = await registry.create(managedOwnership(cwd));
+    const recompiled = policySet("default", "changed.example");
+
+    await expect(registry.fork(
+      source.id,
+      "a1b2c3d4",
+      managedOwnership(cwd, "managed-workspace", recompiled),
+    )).rejects.toMatchObject({ code: ERROR_CODES.SESSION_UNAVAILABLE });
+    expect(factory.openPersistent).not.toHaveBeenCalled();
+    expect(source.networkPolicySet).toBe(defaultPolicySet);
+    expect(runtime.disposed).toBe(false);
+  });
+
   it("promotes a successful temporary fork without replacing its source", async () => {
     const root = await temporaryRoot();
     const cwd = path.join(root, "workspace");
@@ -1326,6 +1445,50 @@ describe("ConversationRegistry", () => {
       record: { id: "forked" },
     });
     expect(refreshHistory).toHaveBeenCalled();
+  });
+
+  it("promotes a managed temporary fork with its distinct runtime and immutable selected-set snapshot", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessions = path.join(root, "sessions");
+    const sourceFile = path.join(sessions, "managed-source.jsonl");
+    const forkFile = path.join(sessions, "managed-fork.jsonl");
+    await Promise.all([mkdir(cwd), mkdir(sessions)]);
+    await writeFile(sourceFile, "source");
+    const branch = [{
+      type: "message",
+      id: "a1b2c3d4",
+      message: { role: "user", content: "copy" },
+    }];
+    const options = {
+      branch,
+      securityProfile: "workspace-sandboxed" as const,
+      networkPolicy: "managed-egress" as const,
+      networkPolicySetId: "default",
+      networkPolicySet: defaultPolicySet,
+    };
+    const sourceRuntime = new FakeRuntime(identity("managed-source", sourceFile, cwd), options);
+    const temporary = new FakeRuntime(identity("managed-source", sourceFile, cwd), options);
+    temporary.forkSpy.mockImplementation(async () => {
+      await writeFile(forkFile, "fork");
+      temporary.replace(identity("managed-fork", forkFile, cwd));
+      return { cancelled: false, editorText: "copy" };
+    });
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(sourceRuntime);
+    factory.openPersistent.mockResolvedValue(temporary);
+    const registry = new ConversationRegistry({ runtimeFactory: factory, maxLiveConversations: 2 });
+    const source = await registry.create(managedOwnership(cwd));
+
+    const result = await registry.fork(source.id, "a1b2c3d4", managedOwnership(cwd));
+    const promoted = registry.get(result.conversation.id)!;
+    expect(promoted.runtime).toBe(temporary);
+    expect(promoted.runtime).not.toBe(source.runtime);
+    expect(promoted.networkPolicySet).toBe(defaultPolicySet);
+    expect(promoted.effectiveNetworkPolicySetId).toBe("default");
+    expect(source.networkPolicySet).toBe(defaultPolicySet);
+    expect(sourceRuntime.disposed).toBe(false);
+    expect(temporary.disposed).toBe(false);
   });
 
   it("owns and disposes an in-flight temporary fork during shutdown", async () => {

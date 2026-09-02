@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { AppError, ERROR_CODES } from "../../src/shared/errors.js";
 import { PiConversationRuntime } from "../../src/server/pi-runtime.js";
+import { compileDestinationPolicy } from "../../src/server/network/policy.js";
 import {
   SandboxController,
   type SandboxControllerWorkerPort,
@@ -20,6 +21,18 @@ function worker(overrides: Partial<SandboxControllerWorkerPort> = {}): SandboxCo
 function deferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void; const promise = new Promise<void>((done) => { resolve = done; }); return { promise, resolve };
 }
+
+const managedPolicySet = Object.freeze({
+  id: "default",
+  label: "Default",
+  allowedDomainPatterns: Object.freeze(["example.com"]),
+  allowedPorts: Object.freeze([443]),
+  destinationPolicy: compileDestinationPolicy({
+    allowedDomainPatterns: ["example.com"],
+    deniedDomainPatterns: [],
+    allowedPorts: [443],
+  }),
+});
 
 const failure: SandboxWorkerFatal = {
   error: new AppError(ERROR_CODES.SANDBOX_WORKER_FAILED), diagnostic: "private",
@@ -220,6 +233,8 @@ describe("SandboxController fail-closed lifecycle", () => {
     const managed = {
       httpSocketPath: "/private/one/http.sock",
       socksSocketPath: "/private/one/socks.sock",
+      policySetId: "default",
+      policySet: managedPolicySet,
       subscribeBlocked: vi.fn(() => () => undefined),
       onFatal: vi.fn((listener: (error: AppError) => void) => {
         proxyFatal = listener;
@@ -240,9 +255,13 @@ describe("SandboxController fail-closed lifecycle", () => {
       controller,
       "managed-egress",
       managed,
+      "default",
+      managedPolicySet,
     );
     const fatal = vi.fn();
     runtime.onFatalFailure(fatal);
+    expect(runtime.networkPolicySetId).toBe("default");
+    expect(runtime.networkPolicySet).toBe(managedPolicySet);
 
     const failure = new AppError(ERROR_CODES.NETWORK_PROXY_FAILED);
     proxyFatal(failure);
@@ -281,6 +300,8 @@ describe("SandboxController fail-closed lifecycle", () => {
     const managed = {
       httpSocketPath: "/private/http.sock",
       socksSocketPath: "/private/socks.sock",
+      policySetId: "default",
+      policySet: managedPolicySet,
       subscribeBlocked: vi.fn(() => () => undefined),
       onFatal: vi.fn(() => () => undefined),
       close: vi.fn(() => networkGate.promise),
@@ -292,8 +313,12 @@ describe("SandboxController fail-closed lifecycle", () => {
       controller,
       "managed-egress",
       managed,
+      "default",
+      managedPolicySet,
     );
 
+    expect(runtime.networkPolicySetId).toBe("default");
+    expect(runtime.networkPolicySet).toBe(managedPolicySet);
     const disposal = runtime.dispose();
     expect(sdkRuntime.dispose).toHaveBeenCalledOnce();
     expect(active.close).toHaveBeenCalledOnce();

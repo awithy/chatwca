@@ -151,6 +151,14 @@ class TrackingRuntime implements PiConversationRuntimePort {
     return this.inner.networkPolicy;
   }
 
+  get networkPolicySetId() {
+    return this.inner.networkPolicySetId;
+  }
+
+  get networkPolicySet() {
+    return this.inner.networkPolicySet;
+  }
+
   get identity(): PiRuntimeIdentity {
     return this.inner.identity;
   }

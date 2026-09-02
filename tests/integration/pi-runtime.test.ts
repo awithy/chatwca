@@ -15,6 +15,7 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ConversationRegistry } from "../../src/server/conversation-registry.js";
+import { loadManagedNetworkConfig } from "../../src/server/network/config.js";
 import {
   PiRuntimeFactory,
   type PiConversationRuntime,
@@ -75,7 +76,7 @@ async function isolatedFactory() {
     sessionOptions: () => ({ model: faux.getModel(), noTools: "all" }),
   });
 
-  return { cwd, factory, faux, strictFaux, serviceCwds };
+  return { root, cwd, agentDir, sessionDir, factory, faux, strictFaux, serviceCwds };
 }
 
 describe("PiRuntimeFactory", () => {
@@ -118,6 +119,82 @@ describe("PiRuntimeFactory", () => {
       await runtime?.dispose();
       await reopened?.dispose();
     }
+  });
+
+  it("fails closed on missing managed destination-set ownership before Pi construction", async () => {
+    const { cwd, factory, serviceCwds } = await isolatedFactory();
+    await expect(factory.createPersistent({
+      workspaceId: "managed-workspace",
+      cwd,
+      sessionDirectory: null,
+      securityProfile: "workspace-sandboxed",
+      networkPolicy: "managed-egress",
+      networkPolicySetId: "default",
+      effectiveNetworkPolicySetId: "default",
+      networkPolicySet: null,
+    })).rejects.toMatchObject({ code: "network_policy_invalid" });
+    expect(serviceCwds).toEqual([]);
+  });
+
+  it("rejects a proxy runtime with different compiled policy bytes before sandbox/Pi startup", async () => {
+    const base = await isolatedFactory();
+    const config = loadManagedNetworkConfig({
+      CHATWCA_MANAGED_EGRESS_MODE: "optional",
+      CHATWCA_NETWORK_ALLOWED_DOMAINS: '["example.com","other.example"]',
+      CHATWCA_NETWORK_ALLOWED_PORTS: "[443]",
+      CHATWCA_NETWORK_POLICY_SETS: JSON.stringify([
+        { id: "default", label: "Default", allowedDomains: ["example.com"], allowedPorts: [443] },
+        { id: "other", label: "Other", allowedDomains: ["other.example"], allowedPorts: [443] },
+      ]),
+      CHATWCA_NETWORK_HELPER_PATH: "/unused/helper",
+    }, "optional");
+    const selected = config.policySets.get("default")!;
+    const wrong = Object.freeze({ ...config.policySets.get("other")!, id: "default" });
+    const close = vi.fn(async () => undefined);
+    const startRuntime = vi.fn(async () => ({
+      httpSocketPath: "/private/http.sock",
+      socksSocketPath: "/private/socks.sock",
+      policySetId: "default",
+      policySet: wrong,
+      subscribeBlocked: () => () => undefined,
+      onFatal: () => () => undefined,
+      close,
+      forceClose: () => undefined,
+    }));
+    const factory = await PiRuntimeFactory.create({
+      modelRuntime: base.factory.modelRuntime,
+      strictModelRuntime: base.factory.strictModelRuntime,
+      agentDir: base.agentDir,
+      sessionDir: base.sessionDir,
+      sandbox: {
+        config: {} as never,
+        host: {} as never,
+        worker: {} as never,
+        hiddenPaths: [],
+        managedNetwork: {
+          config,
+          helper: {} as never,
+          dataDir: path.join(base.root, "network"),
+          startRuntime,
+        },
+      },
+    });
+
+    await expect(factory.createPersistent({
+      workspaceId: "managed-workspace",
+      cwd: base.cwd,
+      sessionDirectory: null,
+      securityProfile: "workspace-sandboxed",
+      networkPolicy: "managed-egress",
+      networkPolicySetId: "default",
+      effectiveNetworkPolicySetId: "default",
+      networkPolicySet: selected,
+    })).rejects.toMatchObject({ code: "network_policy_invalid" });
+    expect(startRuntime).toHaveBeenCalledWith(expect.objectContaining({
+      policySetId: "default",
+      policySet: selected,
+    }));
+    expect(close).toHaveBeenCalledOnce();
   });
 
   it("selects the isolated model catalog by effective profile", async () => {

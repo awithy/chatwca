@@ -450,11 +450,20 @@ export async function runSandboxStartupProbe(input: {
         deniedDomainPatterns: [],
         allowedPorts: [80],
       });
+      const probePolicySet = Object.freeze({
+        id: "default",
+        label: "Startup probe",
+        allowedDomainPatterns: Object.freeze(["127.0.0.1"]),
+        allowedPorts: Object.freeze([80]),
+        destinationPolicy,
+      });
       const probeConfig: ManagedNetworkConfig = Object.freeze({
         ...input.managedNetwork.config,
         allowedDomainPatterns: Object.freeze(["127.0.0.1"]),
         deniedDomainPatterns: Object.freeze([]),
         allowedPorts: Object.freeze([80]),
+        policySets: new Map([[probePolicySet.id, probePolicySet]]),
+        orderedPolicySets: Object.freeze([probePolicySet]),
         allowedPortSet: destinationPolicy.allowedPorts,
         destinationPolicy,
       });
@@ -462,6 +471,8 @@ export async function runSandboxStartupProbe(input: {
         dataDir: input.dataDirectory,
         workspaceId: "startup-probe",
         conversationId: `startup-probe-${randomBytes(8).toString("hex")}`,
+        policySetId: probePolicySet.id,
+        policySet: probePolicySet,
         config: probeConfig,
         diagnosticSink: () => undefined,
       });

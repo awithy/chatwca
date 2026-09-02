@@ -334,7 +334,7 @@ export function Composer({
           rows={3}
           value={draft}
           disabled={!canEdit}
-          placeholder={status === "streaming" ? "Add guidance or queue the next prompt…" : "Ask Pi to work on this project…"}
+          placeholder={status === "streaming" ? "Add guidance or queue the next prompt…" : undefined}
           aria-describedby="composer-hint attachment-limits"
           onChange={(event) => onDraftChange(event.target.value)}
           onKeyDown={handleKeyDown}

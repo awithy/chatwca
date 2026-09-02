@@ -485,12 +485,12 @@ export function App() {
         {selectedWorkspace === undefined ? (
           <section className="welcome-panel">
             <div className="welcome-mark" aria-hidden="true">W</div>
-            <p className="eyebrow">Pi coding agent</p>
+            <p className="eyebrow">Local agent platform</p>
             <h1>{chat.workspaces.length === 0 ? "Add your first workspace" : "Select a workspace"}</h1>
             <p>
               {chat.workspaces.length === 0
                 ? "Register a named project directory to create and find its conversations."
-                : "Choose a workspace to load only its Pi conversation history."}
+                : "Choose a workspace"}
             </p>
             <button
               className="primary-button welcome-create"

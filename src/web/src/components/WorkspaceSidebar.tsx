@@ -358,7 +358,7 @@ export function WorkspaceSidebar({
           <span className="brand-mark" aria-hidden="true">W</span>
           <div>
             <strong>ChatWCA</strong>
-            <small>Pi coding agent</small>
+            <small>Local agent platform</small>
           </div>
         </div>
         <button

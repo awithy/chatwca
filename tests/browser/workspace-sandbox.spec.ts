@@ -2,6 +2,19 @@ import { expect, test, type Page, type WebSocket as PlaywrightWebSocket } from "
 
 import { waitForConnected } from "./helpers.js";
 
+const disabledManagedEgressConfig = {
+  mode: "disabled",
+  selectablePolicies: ["isolated"],
+  allowedDomainPatterns: [],
+  deniedDomainPatterns: [],
+  allowedPorts: [80, 443],
+  supportedProtocols: ["http", "https-connect", "websocket", "websocket-secure", "socks5-tcp"],
+  denyNonPublicAddresses: true,
+  tlsInterception: false,
+  disclosureWarning: "Tools may transmit workspace content to configured destinations.",
+  functionalProbeSucceeded: false,
+} as const;
+
 interface SentFrame {
   readonly type?: string;
   readonly name?: string;
@@ -142,6 +155,7 @@ test("required authoritative mode fixes creation to Workspace sandbox", async ({
         remoteProviderWarning: "Workspace content may still be sent to the configured model provider.",
         functionalProbeSucceeded: true,
       },
+      managedEgress: disabledManagedEgressConfig,
     }),
   }));
   await waitForConnected(page);
@@ -173,6 +187,7 @@ test("disabled authoritative mode fixes creation to Unrestricted", async ({ page
         remoteProviderWarning: "Workspace content may still be sent to the configured model provider.",
         functionalProbeSucceeded: false,
       },
+      managedEgress: disabledManagedEgressConfig,
     }),
   }));
   await waitForConnected(page);

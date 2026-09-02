@@ -5,6 +5,10 @@ import {
   loadSandboxConfig,
   type SandboxConfig,
 } from "./sandbox/config.js";
+import {
+  loadManagedNetworkConfig,
+  type ManagedNetworkConfig,
+} from "./network/config.js";
 
 export { ConfigurationError } from "./sandbox/config.js";
 
@@ -35,6 +39,8 @@ export interface ServerConfig {
   readonly piOffline: boolean;
   /** Complete server-only sandbox policy and runtime configuration. */
   readonly sandbox: Readonly<SandboxConfig>;
+  /** Complete server-only managed-network policy and resource limits. */
+  readonly managedNetwork: Readonly<ManagedNetworkConfig>;
 }
 
 function optionalNonEmpty(
@@ -106,6 +112,11 @@ export function loadConfig(
     );
   }
 
+  const sandbox = loadSandboxConfig(environment);
+  const managedNetwork = loadManagedNetworkConfig(environment, sandbox.mode, {
+    processCwd,
+  });
+
   return Object.freeze({
     host,
     port,
@@ -133,6 +144,7 @@ export function loadConfig(
     shutdownGraceMs,
     piCodingAgentDir: optionalNonEmpty(environment, "PI_CODING_AGENT_DIR"),
     piOffline: environment.PI_OFFLINE !== undefined,
-    sandbox: loadSandboxConfig(environment),
+    sandbox,
+    managedNetwork,
   });
 }

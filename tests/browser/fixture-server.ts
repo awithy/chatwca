@@ -43,7 +43,10 @@ const WORKSPACE: WorkspaceSummary = {
   sessionStorage: "pi-default",
   sessionDirectory: null,
   securityProfile: "unrestricted",
+  networkPolicy: "isolated",
   effectiveSecurityProfile: "unrestricted",
+  effectiveNetworkPolicy: null,
+  networkPolicyIssue: null,
   createdAt: 1,
   updatedAt: 1,
   available: true,
@@ -91,6 +94,7 @@ function emptyState(
   title: string,
   workspace: Pick<WorkspaceSummary, "id" | "path"> & {
     readonly securityProfile?: ConversationState["securityProfile"];
+    readonly effectiveNetworkPolicy?: ConversationState["networkPolicy"];
   } = WORKSPACE,
 ): ConversationState {
   const now = nextTime();
@@ -110,6 +114,7 @@ function emptyState(
     messages: [],
     queue: { steering: [], followUp: [] },
     securityProfile: workspace.securityProfile ?? "unrestricted",
+    networkPolicy: workspace.effectiveNetworkPolicy ?? null,
   };
 }
 
@@ -408,6 +413,7 @@ const registry: ProtocolRegistry = {
       id: workspace.workspaceId,
       path: workspace.cwd,
       securityProfile: workspace.securityProfile,
+      effectiveNetworkPolicy: workspace.networkPolicy,
     }));
     return { id };
   },
@@ -423,6 +429,7 @@ const registry: ProtocolRegistry = {
       ...fixture.state,
       workspaceId: workspace.workspaceId,
       securityProfile: workspace.securityProfile,
+      networkPolicy: workspace.networkPolicy,
       status: "idle",
       lastActiveAt: nextTime(),
     };
@@ -472,6 +479,7 @@ const registry: ProtocolRegistry = {
       id: source.state.workspaceId,
       path: source.state.cwd,
       securityProfile: source.state.securityProfile,
+      effectiveNetworkPolicy: source.state.networkPolicy,
     });
     const forkState: ConversationState = {
       ...fork,
@@ -571,6 +579,7 @@ const workspaces: ProtocolWorkspaceRepository = {
       cwd: workspace.path,
       sessionDirectory: workspace.sessionDirectory,
       securityProfile: workspace.effectiveSecurityProfile,
+      networkPolicy: workspace.effectiveNetworkPolicy,
     };
   },
   create: (input) => {
@@ -585,7 +594,12 @@ const workspaces: ProtocolWorkspaceRepository = {
           ? `${input.path.trim()}/.chatwca/sessions`
           : null,
       securityProfile: input.securityProfile,
+      networkPolicy: input.networkPolicy ?? "isolated",
       effectiveSecurityProfile: input.securityProfile,
+      effectiveNetworkPolicy: input.securityProfile === "workspace-sandboxed"
+        ? input.networkPolicy ?? "isolated"
+        : null,
+      networkPolicyIssue: null,
       createdAt: nextTime(),
       updatedAt: nextTime(),
       available: !input.path.includes("fixture-unavailable"),
@@ -618,6 +632,18 @@ const workspaces: ProtocolWorkspaceRepository = {
         : {
             securityProfile: changes.securityProfile,
             effectiveSecurityProfile: changes.securityProfile,
+            effectiveNetworkPolicy: changes.securityProfile === "workspace-sandboxed"
+              ? changes.networkPolicy ?? current.networkPolicy
+              : null,
+          }),
+      ...(changes.networkPolicy === undefined
+        ? {}
+        : {
+            networkPolicy: changes.networkPolicy,
+            effectiveNetworkPolicy:
+              (changes.securityProfile ?? current.effectiveSecurityProfile) === "workspace-sandboxed"
+                ? changes.networkPolicy
+                : null,
           }),
       available: changes.path === undefined
         ? current.available

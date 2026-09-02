@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   ClientCommandSchema,
   ConversationStateSchema,
+  PublicConfigSchema,
   ServerMessageSchema,
   WorkspaceSchema,
   WorkspaceSummarySchema,
@@ -152,6 +153,7 @@ const conversationState = {
   ],
   queue: { steering: [], followUp: [] },
   securityProfile: "unrestricted",
+  networkPolicy: null,
 } as const;
 
 describe("ClientCommandSchema", () => {
@@ -187,7 +189,7 @@ describe("ClientCommandSchema", () => {
     })).toBe(false);
   });
 
-  it("requires storage and security policy at creation and closes update variants", () => {
+  it("requires storage and security policy at creation and closes update objects", () => {
     expect(
       Value.Check(ClientCommandSchema, {
         type: "workspace.create",
@@ -218,28 +220,35 @@ describe("ClientCommandSchema", () => {
       securityProfile: "unrestricted",
       acknowledgeSecurityDowngrade: true,
     })).toBe(true);
-    for (const smuggled of [
+    for (const acceptedForRepositoryValidation of [
       { name: "Renamed", acknowledgeSecurityDowngrade: true },
       { securityProfile: "workspace-sandboxed", acknowledgeSecurityDowngrade: true },
-      { name: "Renamed", sessionStorage: "workspace" },
+      { networkPolicy: "managed-egress", acknowledgeNetworkExposure: true },
     ]) {
       expect(Value.Check(ClientCommandSchema, {
         type: "workspace.update",
         requestId,
         workspaceId: "workspace-1",
-        ...smuggled,
-      })).toBe(false);
+        ...acceptedForRepositoryValidation,
+      })).toBe(true);
     }
+    expect(Value.Check(ClientCommandSchema, {
+      type: "workspace.update",
+      requestId,
+      workspaceId: "workspace-1",
+      name: "Renamed",
+      sessionStorage: "workspace",
+    })).toBe(false);
   });
 
-  it("requires at least one workspace update field", () => {
+  it("leaves non-empty update enforcement to the repository", () => {
     expect(
       Value.Check(ClientCommandSchema, {
         type: "workspace.update",
         requestId,
         workspaceId: "workspace-1",
       }),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       Value.Check(ClientCommandSchema, {
         type: "workspace.update",
@@ -298,6 +307,39 @@ describe("ClientCommandSchema", () => {
   });
 });
 
+describe("public configuration schema", () => {
+  it("accepts only the client-safe managed-egress projection", () => {
+    const config = {
+      maxImages: 4,
+      maxImageBytes: 1024,
+      maxTotalImageBytes: 4096,
+      sandbox: {
+        mode: "optional",
+        selectableProfiles: ["unrestricted", "workspace-sandboxed"],
+        remoteProviderWarning: "Model disclosure",
+        functionalProbeSucceeded: true,
+      },
+      managedEgress: {
+        mode: "optional",
+        selectablePolicies: ["isolated", "managed-egress"],
+        allowedDomainPatterns: ["example.com"],
+        deniedDomainPatterns: ["deny.example"],
+        allowedPorts: [443],
+        supportedProtocols: ["http", "https-connect", "socks5-tcp"],
+        denyNonPublicAddresses: true,
+        tlsInterception: false,
+        disclosureWarning: "Workspace disclosure",
+        functionalProbeSucceeded: false,
+      },
+    } as const;
+    expect(Value.Check(PublicConfigSchema, config)).toBe(true);
+    expect(Value.Check(PublicConfigSchema, {
+      ...config,
+      managedEgress: { ...config.managedEgress, helperPath: "/private/helper" },
+    })).toBe(false);
+  });
+});
+
 describe("workspace schemas", () => {
   const workspace = {
     id: "workspace-1",
@@ -306,6 +348,7 @@ describe("workspace schemas", () => {
     sessionStorage: "pi-default",
     sessionDirectory: null,
     securityProfile: "unrestricted",
+    networkPolicy: "isolated",
     createdAt: 10,
     updatedAt: 20,
   } as const;
@@ -317,6 +360,8 @@ describe("workspace schemas", () => {
         ...workspace,
         available: true,
         effectiveSecurityProfile: "unrestricted",
+        effectiveNetworkPolicy: null,
+        networkPolicyIssue: null,
         usable: true,
         policyIssue: null,
       }),
@@ -326,6 +371,8 @@ describe("workspace schemas", () => {
         ...workspace,
         available: true,
         effectiveSecurityProfile: "unrestricted",
+        effectiveNetworkPolicy: null,
+        networkPolicyIssue: null,
         usable: true,
         policyIssue: null,
         privateMetadata: "no",
@@ -341,6 +388,8 @@ describe("workspace schemas", () => {
         ...workspace,
         available: true,
         effectiveSecurityProfile: "unrestricted",
+        effectiveNetworkPolicy: null,
+        networkPolicyIssue: null,
         usable: true,
         policyIssue: null,
       }],
@@ -417,7 +466,10 @@ describe("ServerMessageSchema", () => {
             sessionStorage: "workspace",
             sessionDirectory: "/workspace/.chatwca/sessions",
             securityProfile: "workspace-sandboxed",
+            networkPolicy: "isolated",
             effectiveSecurityProfile: "workspace-sandboxed",
+            effectiveNetworkPolicy: "isolated",
+            networkPolicyIssue: null,
             createdAt: 1,
             updatedAt: 2,
             available: true,
@@ -485,6 +537,19 @@ describe("ServerMessageSchema", () => {
           },
         },
       },
+      {
+        type: "network.blocked",
+        workspaceId: "workspace-1",
+        conversationId: "session-1",
+        revision: 3,
+        payload: {
+          host: "example.com",
+          port: 443,
+          protocol: "https-connect",
+          reason: "not_allowed",
+          occurrenceCount: 4,
+        },
+      },
     ];
 
     for (const message of messages) {
@@ -499,6 +564,30 @@ describe("ServerMessageSchema", () => {
       conversationId: "session-1",
       revision: 1,
       payload: { status: "idle" },
+    })).toBe(false);
+  });
+
+  it("keeps blocked-network events bounded and closed", () => {
+    const event = {
+      type: "network.blocked",
+      workspaceId: "workspace-1",
+      conversationId: "session-1",
+      revision: 1,
+      payload: {
+        host: "example.com",
+        port: 443,
+        protocol: "https-connect",
+        reason: "explicit_deny",
+      },
+    };
+    expect(Value.Check(ServerMessageSchema, event)).toBe(true);
+    expect(Value.Check(ServerMessageSchema, {
+      ...event,
+      payload: { ...event.payload, url: "https://example.com/private?token=secret" },
+    })).toBe(false);
+    expect(Value.Check(ServerMessageSchema, {
+      ...event,
+      payload: { ...event.payload, reason: "exception:/private/path" },
     })).toBe(false);
   });
 

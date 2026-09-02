@@ -211,6 +211,18 @@ export const SandboxModeSchema = Type.Union([
 ]);
 export type SandboxMode = Static<typeof SandboxModeSchema>;
 
+export const SandboxNetworkPolicySchema = Type.Union([
+  Type.Literal("isolated"),
+  Type.Literal("managed-egress"),
+]);
+export type SandboxNetworkPolicy = Static<typeof SandboxNetworkPolicySchema>;
+
+export const ManagedEgressModeSchema = Type.Union([
+  Type.Literal("disabled"),
+  Type.Literal("optional"),
+]);
+export type ManagedEgressMode = Static<typeof ManagedEgressModeSchema>;
+
 export const WorkspacePolicyIssueSchema = Type.Union([
   Type.Literal("sandbox_disabled"),
   Type.Literal("outside_workspace_roots"),
@@ -218,6 +230,14 @@ export const WorkspacePolicyIssueSchema = Type.Union([
   Type.Null(),
 ]);
 export type WorkspacePolicyIssue = Static<typeof WorkspacePolicyIssueSchema>;
+
+export const WorkspaceNetworkPolicyIssueSchema = Type.Union([
+  Type.Literal("managed_egress_disabled"),
+  Type.Null(),
+]);
+export type WorkspaceNetworkPolicyIssue = Static<
+  typeof WorkspaceNetworkPolicyIssueSchema
+>;
 
 export const PublicSandboxConfigSchema = strictObject({
   mode: SandboxModeSchema,
@@ -227,11 +247,37 @@ export const PublicSandboxConfigSchema = strictObject({
 });
 export type PublicSandboxConfig = Static<typeof PublicSandboxConfigSchema>;
 
+export const ManagedEgressProtocolSchema = Type.Union([
+  Type.Literal("http"),
+  Type.Literal("https-connect"),
+  Type.Literal("websocket"),
+  Type.Literal("websocket-secure"),
+  Type.Literal("socks5-tcp"),
+]);
+export type ManagedEgressProtocol = Static<typeof ManagedEgressProtocolSchema>;
+
+export const PublicManagedEgressConfigSchema = strictObject({
+  mode: ManagedEgressModeSchema,
+  selectablePolicies: Type.Array(SandboxNetworkPolicySchema),
+  allowedDomainPatterns: Type.Array(Type.String({ minLength: 1 })),
+  deniedDomainPatterns: Type.Array(Type.String({ minLength: 1 })),
+  allowedPorts: Type.Array(Type.Integer({ minimum: 1, maximum: 65_535 })),
+  supportedProtocols: Type.Array(ManagedEgressProtocolSchema),
+  denyNonPublicAddresses: Type.Boolean(),
+  tlsInterception: Type.Boolean(),
+  disclosureWarning: NonEmptyStringSchema,
+  functionalProbeSucceeded: Type.Boolean(),
+});
+export type PublicManagedEgressConfig = Static<
+  typeof PublicManagedEgressConfigSchema
+>;
+
 export const PublicConfigSchema = strictObject({
   maxImages: Type.Integer({ minimum: 1 }),
   maxImageBytes: Type.Integer({ minimum: 1 }),
   maxTotalImageBytes: Type.Integer({ minimum: 1 }),
   sandbox: PublicSandboxConfigSchema,
+  managedEgress: PublicManagedEgressConfigSchema,
 });
 export type PublicConfig = Static<typeof PublicConfigSchema>;
 
@@ -242,6 +288,7 @@ export const WorkspaceSchema = strictObject({
   sessionStorage: WorkspaceSessionStorageSchema,
   sessionDirectory: Type.Union([NonEmptyStringSchema, Type.Null()]),
   securityProfile: WorkspaceSecurityProfileSchema,
+  networkPolicy: SandboxNetworkPolicySchema,
   createdAt: Type.Number({ minimum: 0 }),
   updatedAt: Type.Number({ minimum: 0 }),
 });
@@ -254,10 +301,16 @@ export const WorkspaceSummarySchema = strictObject({
   sessionStorage: WorkspaceSessionStorageSchema,
   sessionDirectory: Type.Union([NonEmptyStringSchema, Type.Null()]),
   securityProfile: WorkspaceSecurityProfileSchema,
+  networkPolicy: SandboxNetworkPolicySchema,
   effectiveSecurityProfile: Type.Union([
     WorkspaceSecurityProfileSchema,
     Type.Null(),
   ]),
+  effectiveNetworkPolicy: Type.Union([
+    SandboxNetworkPolicySchema,
+    Type.Null(),
+  ]),
+  networkPolicyIssue: WorkspaceNetworkPolicyIssueSchema,
   createdAt: Type.Number({ minimum: 0 }),
   updatedAt: Type.Number({ minimum: 0 }),
   available: Type.Boolean(),
@@ -321,6 +374,7 @@ export const ConversationStateSchema = strictObject({
   messages: Type.Array(NormalizedMessageSchema),
   queue: QueueStateSchema,
   securityProfile: WorkspaceSecurityProfileSchema,
+  networkPolicy: Type.Union([SandboxNetworkPolicySchema, Type.Null()]),
 });
 export type ConversationState = Static<typeof ConversationStateSchema>;
 
@@ -335,42 +389,19 @@ export const WorkspaceCreateCommandSchema = strictObject({
   path: NonEmptyStringSchema,
   sessionStorage: WorkspaceSessionStorageSchema,
   securityProfile: WorkspaceSecurityProfileSchema,
+  networkPolicy: Type.Optional(SandboxNetworkPolicySchema),
 });
-const WorkspaceUpdateWithNameSchema = strictObject({
-  type: Type.Literal("workspace.update"),
-  requestId: RequestIdSchema,
-  workspaceId: IdentifierSchema,
-  name: NonEmptyStringSchema,
-  path: Type.Optional(NonEmptyStringSchema),
-});
-const WorkspaceUpdateWithPathSchema = strictObject({
-  type: Type.Literal("workspace.update"),
-  requestId: RequestIdSchema,
-  workspaceId: IdentifierSchema,
-  name: Type.Optional(NonEmptyStringSchema),
-  path: NonEmptyStringSchema,
-});
-const workspaceProfileUpdate = <TProfile extends WorkspaceSecurityProfile>(
-  securityProfile: TProfile,
-  acknowledgeSecurityDowngrade: boolean,
-) => strictObject({
+export const WorkspaceUpdateCommandSchema = strictObject({
   type: Type.Literal("workspace.update"),
   requestId: RequestIdSchema,
   workspaceId: IdentifierSchema,
   name: Type.Optional(NonEmptyStringSchema),
   path: Type.Optional(NonEmptyStringSchema),
-  securityProfile: Type.Literal(securityProfile),
-  ...(acknowledgeSecurityDowngrade
-    ? { acknowledgeSecurityDowngrade: Type.Literal(true) }
-    : {}),
+  securityProfile: Type.Optional(WorkspaceSecurityProfileSchema),
+  networkPolicy: Type.Optional(SandboxNetworkPolicySchema),
+  acknowledgeSecurityDowngrade: Type.Optional(Type.Literal(true)),
+  acknowledgeNetworkExposure: Type.Optional(Type.Literal(true)),
 });
-export const WorkspaceUpdateCommandSchema = Type.Union([
-  WorkspaceUpdateWithNameSchema,
-  WorkspaceUpdateWithPathSchema,
-  workspaceProfileUpdate("workspace-sandboxed", false),
-  workspaceProfileUpdate("unrestricted", false),
-  workspaceProfileUpdate("unrestricted", true),
-]);
 export const WorkspaceDeleteCommandSchema = strictObject({
   type: Type.Literal("workspace.delete"),
   requestId: RequestIdSchema,
@@ -703,6 +734,33 @@ export type StatusNotice = Static<typeof StatusNoticeSchema>;
 export const NoticePayloadSchema = strictObject({ notice: StatusNoticeSchema });
 export type NoticePayload = Static<typeof NoticePayloadSchema>;
 
+export const NetworkBlockedReasonSchema = Type.Union([
+  Type.Literal("explicit_deny"),
+  Type.Literal("not_allowed"),
+  Type.Literal("local_address"),
+  Type.Literal("port_not_allowed"),
+  Type.Literal("dns_failure"),
+  Type.Literal("limit_exceeded"),
+  Type.Literal("proxy_unavailable"),
+]);
+export type NetworkBlockedReason = Static<typeof NetworkBlockedReasonSchema>;
+
+export const NetworkBlockedPayloadSchema = strictObject({
+  host: Type.String({ minLength: 1, maxLength: 253 }),
+  port: Type.Integer({ minimum: 1, maximum: 65_535 }),
+  protocol: Type.Union([
+    Type.Literal("http"),
+    Type.Literal("https-connect"),
+    Type.Literal("socks5-tcp"),
+  ]),
+  reason: NetworkBlockedReasonSchema,
+  occurrenceCount: Type.Optional(Type.Integer({
+    minimum: 1,
+    maximum: Number.MAX_SAFE_INTEGER,
+  })),
+});
+export type NetworkBlockedPayload = Static<typeof NetworkBlockedPayloadSchema>;
+
 export type EventEnvelope<TType extends string, TPayload> = {
   type: TType;
   workspaceId: string;
@@ -759,6 +817,10 @@ export const NoticeEventSchema = eventEnvelope(
   "conversation.notice",
   NoticePayloadSchema,
 );
+export const NetworkBlockedEventSchema = eventEnvelope(
+  "network.blocked",
+  NetworkBlockedPayloadSchema,
+);
 
 export type MessageStartedEvent = Static<typeof MessageStartedEventSchema>;
 export type MessageDeltaEvent = Static<typeof MessageDeltaEventSchema>;
@@ -769,6 +831,7 @@ export type ToolCompletedEvent = Static<typeof ToolCompletedEventSchema>;
 export type QueueEvent = Static<typeof QueueEventSchema>;
 export type StatusEvent = Static<typeof StatusEventSchema>;
 export type NoticeEvent = Static<typeof NoticeEventSchema>;
+export type NetworkBlockedEvent = Static<typeof NetworkBlockedEventSchema>;
 
 export const ConversationEventSchema = Type.Union([
   MessageStartedEventSchema,
@@ -780,6 +843,7 @@ export const ConversationEventSchema = Type.Union([
   QueueEventSchema,
   StatusEventSchema,
   NoticeEventSchema,
+  NetworkBlockedEventSchema,
 ]);
 export type ConversationEvent = Static<typeof ConversationEventSchema>;
 

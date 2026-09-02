@@ -79,6 +79,7 @@ export interface ProtocolWorkspaceRepository {
     readonly path: string;
     readonly sessionStorage: WorkspaceSummary["sessionStorage"];
     readonly securityProfile: WorkspaceSummary["securityProfile"];
+    readonly networkPolicy?: WorkspaceSummary["networkPolicy"];
   }): WorkspaceSummary;
   update(workspaceId: string, changes: UpdateWorkspaceInput): WorkspaceSummary;
   delete(workspaceId: string): void;
@@ -175,6 +176,9 @@ export async function dispatchClientCommand(
         path: command.path,
         sessionStorage: command.sessionStorage,
         securityProfile: command.securityProfile,
+        ...(command.networkPolicy === undefined
+          ? {}
+          : { networkPolicy: command.networkPolicy }),
       });
       const authoritative = workspaces.list();
       return {
@@ -183,11 +187,14 @@ export async function dispatchClientCommand(
       };
     }
     case "workspace.update": {
-      const securityProfile = "securityProfile" in command
-        ? command.securityProfile
-        : undefined;
+      const securityProfile = command.securityProfile;
+      const networkPolicy = command.networkPolicy;
       if (
-        (command.path !== undefined || securityProfile !== undefined) &&
+        (
+          command.path !== undefined ||
+          securityProfile !== undefined ||
+          networkPolicy !== undefined
+        ) &&
         registry.hasLiveWorkspace(command.workspaceId)
       ) {
         throw new AppError(ERROR_CODES.WORKSPACE_BUSY);
@@ -198,9 +205,15 @@ export async function dispatchClientCommand(
         ...(securityProfile === undefined
           ? {}
           : { securityProfile }),
-        ...("acknowledgeSecurityDowngrade" in command
-          ? { acknowledgeSecurityDowngrade: command.acknowledgeSecurityDowngrade }
-          : {}),
+        ...(networkPolicy === undefined
+          ? {}
+          : { networkPolicy }),
+        ...(command.acknowledgeSecurityDowngrade === undefined
+          ? {}
+          : { acknowledgeSecurityDowngrade: command.acknowledgeSecurityDowngrade }),
+        ...(command.acknowledgeNetworkExposure === undefined
+          ? {}
+          : { acknowledgeNetworkExposure: command.acknowledgeNetworkExposure }),
       });
       const authoritative = workspaces.list();
       return {

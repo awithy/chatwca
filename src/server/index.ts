@@ -52,6 +52,7 @@ import {
   type SandboxFunctionalProbeResult,
 } from "./sandbox/probe.js";
 import { publicSandboxConfig } from "./sandbox/config.js";
+import { publicManagedEgressConfig } from "./network/config.js";
 import { serveWebApp } from "./static.js";
 import { hasAllowedWebSocketOrigin } from "./websocket-boundary.js";
 import { WorkspaceRepository } from "./workspace-repository.js";
@@ -82,6 +83,7 @@ export interface ChatWcaProtocolServices {
   /** Production supplies the process-wide SQLite owner. */
   readonly closeStorage?: () => void;
   readonly sandboxFunctionalProbeSucceeded?: boolean;
+  readonly managedNetworkFunctionalProbeSucceeded?: boolean;
   readonly onInternalError?: (error: unknown) => void;
 }
 
@@ -191,6 +193,10 @@ export function createChatWcaServer(
       sandbox: publicSandboxConfig(
         config.sandbox,
         services?.sandboxFunctionalProbeSucceeded ?? false,
+      ),
+      managedEgress: publicManagedEgressConfig(
+        config.managedNetwork,
+        services?.managedNetworkFunctionalProbeSucceeded ?? false,
       ),
     });
   });
@@ -501,6 +507,9 @@ export async function startChatWcaServer(
           dataDirectory,
           piAgentDirectory,
           readOnlyMounts: loadedConfig.sandbox.readOnlyMounts.map((mount) => mount.source),
+          managedEgressMode: loadedConfig.managedNetwork.mode,
+          networkHelperPath: loadedConfig.managedNetwork.helperPath,
+          networkHelperDirectory: loadedConfig.managedNetwork.helperDirectory,
         },
       }))
     )(database.connection, config);

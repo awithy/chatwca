@@ -23,6 +23,7 @@ import type {
   ModelInfo,
   QueueState,
   UiImage,
+  SandboxNetworkPolicy,
   WorkspaceSecurityProfile,
 } from "../shared/protocol.js";
 import {
@@ -85,6 +86,7 @@ export interface ConversationRecord {
   readonly workspacePath: string;
   readonly sessionDirectory: string | null;
   readonly securityProfile: WorkspaceSecurityProfile;
+  readonly networkPolicy: SandboxNetworkPolicy | null;
   /** Locks terminal runtime failures against later Pi idle events. */
   runtimeFailureTerminal: boolean;
   sessionFile: string;
@@ -463,6 +465,7 @@ export class ConversationRegistry {
       }),
       queue: queueOf(record.session),
       securityProfile: record.securityProfile,
+      networkPolicy: record.networkPolicy,
     };
   }
 
@@ -1071,6 +1074,7 @@ export class ConversationRegistry {
       workspacePath: workspace.cwd,
       sessionDirectory: workspace.sessionDirectory,
       securityProfile: workspace.securityProfile,
+      networkPolicy: workspace.networkPolicy,
       runtimeFailureTerminal: false,
       sessionFile,
       cwd: workspace.cwd,
@@ -1142,6 +1146,8 @@ export class ConversationRegistry {
   }
 
   #normalizePolicy(policy: ConversationWorkspace): ConversationWorkspace {
+    const networkPolicy = policy.networkPolicy ??
+      (policy.securityProfile === "workspace-sandboxed" ? "isolated" : null);
     if (
       typeof policy.workspaceId !== "string" ||
       policy.workspaceId.length === 0 ||
@@ -1149,6 +1155,10 @@ export class ConversationRegistry {
       !path.isAbsolute(policy.cwd) ||
       (policy.securityProfile !== "unrestricted" &&
         policy.securityProfile !== "workspace-sandboxed") ||
+      (policy.securityProfile === "unrestricted"
+        ? networkPolicy !== null
+        : networkPolicy !== "isolated" &&
+          networkPolicy !== "managed-egress") ||
       (policy.sessionDirectory !== null &&
         (typeof policy.sessionDirectory !== "string" ||
           !path.isAbsolute(policy.sessionDirectory)))
@@ -1162,6 +1172,7 @@ export class ConversationRegistry {
         ? null
         : path.resolve(policy.sessionDirectory),
       securityProfile: policy.securityProfile,
+      networkPolicy,
     });
   }
 
@@ -1173,7 +1184,8 @@ export class ConversationRegistry {
       record.workspaceId !== workspace.workspaceId ||
       record.workspacePath !== workspace.cwd ||
       record.sessionDirectory !== workspace.sessionDirectory ||
-      record.securityProfile !== workspace.securityProfile
+      record.securityProfile !== workspace.securityProfile ||
+      record.networkPolicy !== workspace.networkPolicy
     ) {
       throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
     }
@@ -1378,6 +1390,7 @@ export class ConversationRegistry {
       cwd: record.workspacePath,
       sessionDirectory: record.sessionDirectory,
       securityProfile: record.securityProfile,
+      networkPolicy: record.networkPolicy,
     });
     const sessionFile = path.resolve(current.sessionFile);
     const idOwner = this.#byId.get(current.sessionId);

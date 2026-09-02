@@ -16,6 +16,7 @@ import {
   loadConfig,
 } from "../../src/server/config.js";
 import { loadSandboxConfig } from "../../src/server/sandbox/config.js";
+import { loadManagedNetworkConfig } from "../../src/server/network/config.js";
 
 describe("loadConfig", () => {
   it("applies defaults", () => {
@@ -33,6 +34,7 @@ describe("loadConfig", () => {
       piCodingAgentDir: undefined,
       piOffline: false,
       sandbox: loadSandboxConfig({}),
+      managedNetwork: loadManagedNetworkConfig({}, "disabled", { processCwd: cwd }),
     });
   });
 
@@ -66,8 +68,28 @@ describe("loadConfig", () => {
       piCodingAgentDir: "/tmp/pi-agent",
       piOffline: true,
       sandbox: loadSandboxConfig({}),
+      managedNetwork: loadManagedNetworkConfig({}, "disabled", { processCwd: cwd }),
     });
     expect(Object.isFrozen(config)).toBe(true);
+  });
+
+  it("composes managed-network policy with the sandbox ceiling", () => {
+    const config = loadConfig({
+      CHATWCA_SANDBOX_MODE: "optional",
+      CHATWCA_MANAGED_EGRESS_MODE: "optional",
+      CHATWCA_NETWORK_ALLOWED_DOMAINS: '["EXAMPLE.com."]',
+    }, "/tmp/base");
+    expect(config.managedNetwork).toMatchObject({
+      mode: "optional",
+      allowedDomainPatterns: ["example.com"],
+      allowedPorts: [80, 443],
+    });
+
+    expect(() => loadConfig({
+      CHATWCA_SANDBOX_MODE: "disabled",
+      CHATWCA_MANAGED_EGRESS_MODE: "optional",
+      CHATWCA_NETWORK_ALLOWED_DOMAINS: '["example.com"]',
+    }, "/tmp/base")).toThrow(/requires CHATWCA_SANDBOX_MODE/);
   });
 
   it("preserves an absolute data-directory override", () => {

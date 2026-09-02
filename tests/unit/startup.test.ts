@@ -150,6 +150,8 @@ describe("production startup wiring", () => {
       CHATWCA_DATA_DIR: path.join(root, "data"),
       CHATWCA_SANDBOX_MODE: "optional",
       CHATWCA_WORKSPACE_ROOTS: "[]",
+      CHATWCA_MANAGED_EGRESS_MODE: "optional",
+      CHATWCA_NETWORK_ALLOWED_DOMAINS: '["EXAMPLE.com."]',
       CHATWCA_SHUTDOWN_GRACE_MS: "25",
     }, root);
     const calls: string[] = [];
@@ -184,9 +186,29 @@ describe("production startup wiring", () => {
     const response = await fetch(`http://127.0.0.1:${String(address.port)}/api/config`);
     await expect(response.json()).resolves.toMatchObject({
       sandbox: { mode: "optional", functionalProbeSucceeded: true },
+      managedEgress: {
+        mode: "optional",
+        selectablePolicies: ["isolated", "managed-egress"],
+        allowedDomainPatterns: ["example.com"],
+        functionalProbeSucceeded: false,
+      },
     });
     await server.shutdown();
     expect(database?.closed).toBe(true);
+  });
+
+  it("fails before storage when managed egress conflicts with disabled sandboxing", async () => {
+    const open = vi.fn(() => openDatabase(temporaryDirectory()));
+    await expect(startChatWcaServer({
+      loadConfiguration: () => loadConfig({
+        CHATWCA_SANDBOX_MODE: "disabled",
+        CHATWCA_MANAGED_EGRESS_MODE: "optional",
+        CHATWCA_NETWORK_ALLOWED_DOMAINS: '["example.com"]',
+      }, temporaryDirectory()),
+      openDatabase: open,
+      createRuntimeFactory: async () => fakeRuntimeFactory(),
+    })).rejects.toThrow(/requires CHATWCA_SANDBOX_MODE/);
+    expect(open).not.toHaveBeenCalled();
   });
 
   it("disabled mode never loads, validates, or probes Bubblewrap", async () => {

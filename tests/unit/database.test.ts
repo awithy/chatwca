@@ -28,7 +28,7 @@ afterEach(() => {
 });
 
 describe("openDatabase", () => {
-  it("creates nested storage and initializes the version-three schema", () => {
+  it("creates nested storage and initializes the version-four schema", () => {
     const dataDir = path.join(temporaryDirectory(), "nested", "data");
     const database = openDatabase(dataDir);
 
@@ -55,6 +55,7 @@ describe("openDatabase", () => {
       expect.objectContaining({ name: "path", notnull: 1, pk: 0 }),
       expect.objectContaining({ name: "session_storage", notnull: 1, pk: 0 }),
       expect.objectContaining({ name: "security_profile", notnull: 1, pk: 0 }),
+      expect.objectContaining({ name: "network_policy", notnull: 1, pk: 0 }),
       expect.objectContaining({ name: "created_at", notnull: 1, pk: 0 }),
       expect.objectContaining({ name: "updated_at", notnull: 1, pk: 0 }),
     ]);
@@ -62,7 +63,7 @@ describe("openDatabase", () => {
     database.close();
   });
 
-  it("accepts and preserves an existing version-three database", () => {
+  it("accepts and preserves an existing version-four database", () => {
     const dataDir = temporaryDirectory();
     const first = openDatabase(dataDir);
     first.connection
@@ -81,6 +82,7 @@ describe("openDatabase", () => {
       path: "/work/example",
       session_storage: "pi-default",
       security_profile: "unrestricted",
+      network_policy: "isolated",
       created_at: 10,
       updated_at: 20,
     });
@@ -116,6 +118,7 @@ describe("openDatabase", () => {
       updated_at: 2,
       session_storage: "pi-default",
       security_profile: "unrestricted",
+      network_policy: "isolated",
     });
     expect(
       migrated.connection.pragma("user_version", { simple: true }),
@@ -147,16 +150,56 @@ describe("openDatabase", () => {
     expect(migrated.connection.prepare(
       "SELECT security_profile FROM workspaces WHERE id = 'version-2'",
     ).get()).toEqual({ security_profile: "unrestricted" });
-    expect(migrated.connection.pragma("user_version", { simple: true })).toBe(3);
+    expect(migrated.connection.pragma("user_version", { simple: true })).toBe(4);
+    expect(migrated.connection.prepare(
+      "SELECT network_policy FROM workspaces WHERE id = 'version-2'",
+    ).get()).toEqual({ network_policy: "isolated" });
     migrated.close();
   });
 
-  it("enforces valid stored security profiles", () => {
+  it("migrates version-three rows to isolated networking", () => {
+    const dataDir = temporaryDirectory();
+    const filename = path.join(dataDir, DATABASE_FILENAME);
+    const legacy = new Database(filename);
+    legacy.exec(`
+      CREATE TABLE workspaces (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        path TEXT NOT NULL UNIQUE,
+        session_storage TEXT NOT NULL DEFAULT 'pi-default',
+        security_profile TEXT NOT NULL DEFAULT 'unrestricted',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      INSERT INTO workspaces VALUES
+        ('version-3a', 'Version 3a', '/work/a', 'pi-default', 'unrestricted', 1, 2),
+        ('version-3b', 'Version 3b', '/work/b', 'workspace', 'workspace-sandboxed', 3, 4);
+      PRAGMA user_version = 3;
+    `);
+    legacy.close();
+
+    const migrated = openDatabase(dataDir);
+    expect(migrated.connection.prepare(
+      "SELECT id, network_policy FROM workspaces ORDER BY id",
+    ).all()).toEqual([
+      { id: "version-3a", network_policy: "isolated" },
+      { id: "version-3b", network_policy: "isolated" },
+    ]);
+    expect(migrated.connection.pragma("user_version", { simple: true })).toBe(4);
+    migrated.close();
+  });
+
+  it("enforces valid stored security and network policies", () => {
     const database = openDatabase(temporaryDirectory(), ":memory:");
     expect(() => database.connection.prepare(`
       INSERT INTO workspaces
         (id, name, path, security_profile, created_at, updated_at)
       VALUES ('bad', 'Bad', '/bad', 'invalid', 1, 1)
+    `).run()).toThrow(/CHECK constraint failed/);
+    expect(() => database.connection.prepare(`
+      INSERT INTO workspaces
+        (id, name, path, network_policy, created_at, updated_at)
+      VALUES ('bad-network', 'Bad', '/bad-network', 'invalid', 1, 1)
     `).run()).toThrow(/CHECK constraint failed/);
     database.close();
   });
@@ -187,6 +230,33 @@ describe("openDatabase", () => {
     inspected.close();
   });
 
+  it("rolls back a failed 3-to-4 migration without advancing user_version", () => {
+    const dataDir = temporaryDirectory();
+    const filename = path.join(dataDir, DATABASE_FILENAME);
+    const broken = new Database(filename);
+    broken.exec(`
+      CREATE TABLE workspaces (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        path TEXT NOT NULL UNIQUE,
+        session_storage TEXT,
+        security_profile TEXT,
+        network_policy TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      PRAGMA user_version = 3;
+    `);
+    broken.close();
+
+    expect(() => openDatabase(dataDir)).toThrow(/duplicate column name/);
+    const inspected = new Database(filename);
+    expect(inspected.pragma("user_version", { simple: true })).toBe(3);
+    expect((inspected.prepare("PRAGMA table_info(workspaces)").all() as Array<{ name: string }>)
+      .filter(({ name }) => name === "network_policy")).toHaveLength(1);
+    inspected.close();
+  });
+
   it("supports an in-memory database for focused consumers", () => {
     const database = openDatabase(temporaryDirectory(), ":memory:");
 
@@ -203,14 +273,14 @@ describe("openDatabase", () => {
     const dataDir = temporaryDirectory();
     const filename = path.join(dataDir, DATABASE_FILENAME);
     const unsupported = new Database(filename);
-    unsupported.pragma("user_version = 4");
+    unsupported.pragma("user_version = 5");
     unsupported.close();
 
     expect(() => openDatabase(dataDir)).toThrow(
       UnsupportedDatabaseVersionError,
     );
     expect(() => openDatabase(dataDir)).toThrow(
-      /schema version 4; expected 3/,
+      /schema version 5; expected 4/,
     );
 
     const afterFailure = new Database(filename);

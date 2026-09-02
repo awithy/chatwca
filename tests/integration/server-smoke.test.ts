@@ -118,6 +118,25 @@ describe("server shell", () => {
           "Workspace content may still be sent to the configured model provider.",
         functionalProbeSucceeded: false,
       },
+      managedEgress: {
+        mode: "disabled",
+        selectablePolicies: ["isolated"],
+        allowedDomainPatterns: [],
+        deniedDomainPatterns: [],
+        allowedPorts: [80, 443],
+        supportedProtocols: [
+          "http",
+          "https-connect",
+          "websocket",
+          "websocket-secure",
+          "socks5-tcp",
+        ],
+        denyNonPublicAddresses: true,
+        tlsInterception: false,
+        disclosureWarning:
+          "Tools may transmit workspace content to configured destinations. Workspace content may also be sent to the configured model provider.",
+        functionalProbeSucceeded: false,
+      },
     });
     expect(JSON.stringify(body)).not.toContain("/private/pi-data");
     expect(JSON.stringify(body)).not.toContain("/tmp/chatwca-smoke-data");

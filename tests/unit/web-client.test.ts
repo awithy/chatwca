@@ -57,7 +57,10 @@ const workspace = {
   sessionStorage: "pi-default",
   sessionDirectory: null,
   securityProfile: "unrestricted",
+  networkPolicy: "isolated",
   effectiveSecurityProfile: "unrestricted",
+  effectiveNetworkPolicy: null,
+  networkPolicyIssue: null,
   createdAt: 1,
   updatedAt: 1,
   available: true,
@@ -82,6 +85,7 @@ function conversation(revision = 0): ConversationState {
     messages: [],
     queue: { steering: [], followUp: [] },
     securityProfile: "unrestricted",
+    networkPolicy: null,
   };
 }
 

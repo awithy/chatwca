@@ -4,7 +4,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 
 export const DATABASE_FILENAME = "chatwca.sqlite";
-export const DATABASE_SCHEMA_VERSION = 3;
+export const DATABASE_SCHEMA_VERSION = 4;
 export const DATABASE_BUSY_TIMEOUT_MS = 5_000;
 
 const INITIAL_SCHEMA = `
@@ -16,6 +16,8 @@ const INITIAL_SCHEMA = `
       CHECK (session_storage IN ('pi-default', 'workspace')),
     security_profile TEXT NOT NULL DEFAULT 'unrestricted'
       CHECK (security_profile IN ('unrestricted', 'workspace-sandboxed')),
+    network_policy TEXT NOT NULL DEFAULT 'isolated'
+      CHECK (network_policy IN ('isolated', 'managed-egress')),
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
   );
@@ -93,6 +95,17 @@ function migrateVersionTwo(connection: Database.Database): void {
   })();
 }
 
+function migrateVersionThree(connection: Database.Database): void {
+  connection.transaction(() => {
+    connection.exec(`
+      ALTER TABLE workspaces
+      ADD COLUMN network_policy TEXT NOT NULL DEFAULT 'isolated'
+        CHECK (network_policy IN ('isolated', 'managed-egress'));
+    `);
+    connection.pragma("user_version = 4");
+  })();
+}
+
 /**
  * Create/open and initialize ChatWCA's SQLite database.
  *
@@ -120,8 +133,12 @@ export function openDatabase(
     } else if (version === 1) {
       migrateVersionOne(connection);
       migrateVersionTwo(connection);
+      migrateVersionThree(connection);
     } else if (version === 2) {
       migrateVersionTwo(connection);
+      migrateVersionThree(connection);
+    } else if (version === 3) {
+      migrateVersionThree(connection);
     } else if (version !== DATABASE_SCHEMA_VERSION) {
       throw new UnsupportedDatabaseVersionError(version);
     }

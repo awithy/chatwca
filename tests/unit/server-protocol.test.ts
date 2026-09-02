@@ -231,6 +231,23 @@ describe("server WebSocket protocol", () => {
       response: { type: "workspaces", requestId: "list", workspaces: [workspace] },
     });
 
+    await dispatchClientCommand(command({
+      type: "workspace.create",
+      requestId: "create-workspace",
+      name: "Managed",
+      path: "/managed",
+      sessionStorage: "pi-default",
+      securityProfile: "workspace-sandboxed",
+      networkPolicy: "managed-egress",
+    }), registry, history, workspaces);
+    expect(workspaces.create).toHaveBeenCalledWith({
+      name: "Managed",
+      path: "/managed",
+      sessionStorage: "pi-default",
+      securityProfile: "workspace-sandboxed",
+      networkPolicy: "managed-egress",
+    });
+
     const renamed = await dispatchClientCommand(command({
       type: "workspace.update",
       requestId: "rename",
@@ -256,10 +273,32 @@ describe("server WebSocket protocol", () => {
       securityProfile: "workspace-sandboxed",
     }), registry, history, workspaces)).rejects.toMatchObject({ code: ERROR_CODES.WORKSPACE_BUSY });
     await expect(dispatchClientCommand(command({
+      type: "workspace.update",
+      requestId: "network",
+      workspaceId: workspace.id,
+      networkPolicy: "managed-egress",
+      acknowledgeNetworkExposure: true,
+    }), registry, history, workspaces)).rejects.toMatchObject({ code: ERROR_CODES.WORKSPACE_BUSY });
+    await expect(dispatchClientCommand(command({
       type: "workspace.delete",
       requestId: "delete",
       workspaceId: workspace.id,
     }), registry, history, workspaces)).rejects.toMatchObject({ code: ERROR_CODES.WORKSPACE_BUSY });
+  });
+
+  it("forwards network exposure acknowledgement only to repository validation", async () => {
+    const { registry, history, workspaces } = services();
+    await dispatchClientCommand(command({
+      type: "workspace.update",
+      requestId: "network",
+      workspaceId: workspace.id,
+      networkPolicy: "managed-egress",
+      acknowledgeNetworkExposure: true,
+    }), registry, history, workspaces);
+    expect(workspaces.update).toHaveBeenCalledWith(workspace.id, {
+      networkPolicy: "managed-egress",
+      acknowledgeNetworkExposure: true,
+    });
   });
 
   it("rejects all protocol admission during shutdown, including workspace writes and abort", async () => {

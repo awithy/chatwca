@@ -598,7 +598,16 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
 
   async #canonicalPolicy(policy: Readonly<RuntimeWorkspacePolicy>): Promise<RuntimeWorkspacePolicy> {
     const cwd = await resolveConversationCwd(policy.cwd);
-    if (cwd !== path.resolve(policy.cwd) || !policy.workspaceId) {
+    const networkPolicy = policy.networkPolicy ??
+      (policy.securityProfile === "workspace-sandboxed" ? "isolated" : null);
+    if (
+      cwd !== path.resolve(policy.cwd) ||
+      !policy.workspaceId ||
+      (policy.securityProfile === "unrestricted"
+        ? networkPolicy !== null
+        : networkPolicy !== "isolated" &&
+          networkPolicy !== "managed-egress")
+    ) {
       throw new AppError(ERROR_CODES.WORKSPACE_UNAVAILABLE);
     }
     return Object.freeze({
@@ -608,6 +617,7 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
         ? null
         : path.resolve(policy.sessionDirectory),
       securityProfile: policy.securityProfile,
+      networkPolicy,
     });
   }
 
@@ -618,6 +628,12 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
     let sandboxController: SandboxController | undefined;
     let sdkRuntime: AgentSessionRuntime | undefined;
     try {
+      if (policy.networkPolicy === "managed-egress") {
+        // The managed launch path is introduced only after the native helper,
+        // bridge, and proxy startup gates exist. Never run it through the
+        // isolated profile as a silent downgrade.
+        throw new AppError(ERROR_CODES.NETWORK_HELPER_UNAVAILABLE);
+      }
       if (policy.securityProfile === "workspace-sandboxed") {
         const sandbox = this.#sandbox;
         if (sandbox === undefined) {

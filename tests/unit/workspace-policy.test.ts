@@ -42,12 +42,19 @@ function seed(
   opened: ChatWcaDatabase,
   workspacePath: string,
   securityProfile: WorkspaceSecurityProfile,
+  networkPolicy: "isolated" | "managed-egress" = "isolated",
 ): void {
   opened.connection.prepare(`
     INSERT INTO workspaces
-      (id, name, path, session_storage, security_profile, created_at, updated_at)
-    VALUES (?, ?, ?, 'pi-default', ?, 1, 1)
-  `).run("workspace-1", "Workspace", realpathSync(workspacePath), securityProfile);
+      (id, name, path, session_storage, security_profile, network_policy, created_at, updated_at)
+    VALUES (?, ?, ?, 'pi-default', ?, ?, 1, 1)
+  `).run(
+    "workspace-1",
+    "Workspace",
+    realpathSync(workspacePath),
+    securityProfile,
+    networkPolicy,
+  );
 }
 afterEach(() => {
   for (const opened of databases.splice(0)) opened.close();
@@ -88,10 +95,45 @@ describe("workspace security policy", () => {
           cwd: realpathSync(workspacePath),
           sessionDirectory: null,
           securityProfile: effective,
+          networkPolicy: effective === "workspace-sandboxed" ? "isolated" : null,
         });
       } else {
         await expect(repository.requireUsable("workspace-1")).rejects.toMatchObject({
           code: ERROR_CODES.SANDBOX_DISABLED,
+        });
+      }
+    },
+  );
+
+  it.each([
+    ["disabled", "unrestricted", "managed-egress", null, null, true],
+    ["disabled", "workspace-sandboxed", "managed-egress", "managed-egress", "managed_egress_disabled", false],
+    ["optional", "workspace-sandboxed", "managed-egress", "managed-egress", null, true],
+  ] as const)(
+    "evaluates %s managed mode for %s workspace network %s",
+    async (managedMode, profile, storedNetwork, effectiveNetwork, issue, usable) => {
+      const root = temporaryDirectory();
+      const workspacePath = path.join(root, "project");
+      mkdirSync(workspacePath);
+      const opened = database();
+      seed(opened, workspacePath, profile, storedNetwork);
+      const repository = new WorkspaceRepository(opened.connection, {
+        policy: policy("optional", root, { managedEgressMode: managedMode }),
+      });
+
+      expect(repository.get("workspace-1")).toMatchObject({
+        networkPolicy: storedNetwork,
+        effectiveNetworkPolicy: effectiveNetwork,
+        networkPolicyIssue: issue,
+        usable,
+      });
+      if (usable) {
+        await expect(repository.requireUsable("workspace-1")).resolves.toMatchObject({
+          networkPolicy: effectiveNetwork,
+        });
+      } else {
+        await expect(repository.requireUsable("workspace-1")).rejects.toMatchObject({
+          code: ERROR_CODES.MANAGED_EGRESS_DISABLED,
         });
       }
     },
@@ -128,8 +170,9 @@ describe("workspace security policy", () => {
     // A row predating the configured root remains listable and history-available,
     // but is never admitted to runtime construction.
     opened.connection.prepare(`
-      INSERT INTO workspaces VALUES
-      ('legacy', 'Legacy', ?, 'pi-default', 'unrestricted', 1, 1)
+      INSERT INTO workspaces
+        (id, name, path, session_storage, security_profile, created_at, updated_at)
+      VALUES ('legacy', 'Legacy', ?, 'pi-default', 'unrestricted', 1, 1)
     `).run(realpathSync(outside));
     expect(repository.get("legacy")).toMatchObject({
       available: true,
@@ -199,6 +242,34 @@ describe("workspace security policy", () => {
     await expect(repository.requireUsable("workspace-1")).rejects.toBe(failure);
   });
 
+  it("protects the managed helper file and installation directory only when usable", async () => {
+    const root = temporaryDirectory();
+    const workspacePath = path.join(root, "project");
+    const helperDirectory = path.join(workspacePath, "installed-helper");
+    const helperPath = path.join(helperDirectory, "chatwca-network-helper");
+    mkdirSync(helperDirectory, { recursive: true });
+    const opened = database();
+    seed(opened, workspacePath, "workspace-sandboxed");
+    const admit = vi.fn(async () => undefined);
+    const repository = new WorkspaceRepository(opened.connection, {
+      policy: policy("optional", root, {
+        managedEgressMode: "optional",
+        networkHelperPath: helperPath,
+        networkHelperDirectory: helperDirectory,
+      }),
+      sandboxAdmission: { admit },
+    });
+
+    expect(repository.get("workspace-1")).toMatchObject({
+      usable: false,
+      policyIssue: "protected_path_overlap",
+    });
+    await expect(repository.requireUsable("workspace-1")).rejects.toMatchObject({
+      code: ERROR_CODES.SANDBOX_WORKSPACE_REJECTED,
+    });
+    expect(admit).not.toHaveBeenCalled();
+  });
+
   it("enforces mode ceilings and explicit downgrade acknowledgement", () => {
     const root = temporaryDirectory();
     const workspacePath = path.join(root, "project");
@@ -249,6 +320,44 @@ describe("workspace security policy", () => {
     expect(() => optional.update(created.id, {
       name: "No smuggled acknowledgement",
       acknowledgeSecurityDowngrade: true,
+    })).toThrow(expect.objectContaining({ code: ERROR_CODES.INVALID_COMMAND }));
+  });
+
+  it("requires acknowledgement only when adding managed network exposure", () => {
+    const root = temporaryDirectory();
+    const workspacePath = path.join(root, "project");
+    mkdirSync(workspacePath);
+    const opened = database();
+    const repository = new WorkspaceRepository(opened.connection, {
+      policy: policy("optional", root, { managedEgressMode: "optional" }),
+      uuid: () => "workspace-network",
+    });
+    const created = repository.create({
+      name: "Network",
+      path: workspacePath,
+      securityProfile: "workspace-sandboxed",
+    });
+
+    expect(() => repository.update(created.id, {
+      networkPolicy: "managed-egress",
+    })).toThrow(expect.objectContaining({ code: ERROR_CODES.INVALID_COMMAND }));
+    expect(repository.update(created.id, {
+      networkPolicy: "managed-egress",
+      acknowledgeNetworkExposure: true,
+    })).toMatchObject({
+      networkPolicy: "managed-egress",
+      effectiveNetworkPolicy: "managed-egress",
+    });
+    expect(() => repository.update(created.id, {
+      networkPolicy: "isolated",
+      acknowledgeNetworkExposure: true,
+    })).toThrow(expect.objectContaining({ code: ERROR_CODES.INVALID_COMMAND }));
+    expect(repository.update(created.id, {
+      networkPolicy: "isolated",
+    })).toMatchObject({ networkPolicy: "isolated" });
+    expect(() => repository.update(created.id, {
+      name: "Smuggled",
+      acknowledgeNetworkExposure: true,
     })).toThrow(expect.objectContaining({ code: ERROR_CODES.INVALID_COMMAND }));
   });
 });

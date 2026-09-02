@@ -21,6 +21,13 @@ export const ERROR_CODES = {
   SANDBOX_WORKER_START_FAILED: "sandbox_worker_start_failed",
   SANDBOX_WORKER_FAILED: "sandbox_worker_failed",
   SANDBOX_OPERATION_FAILED: "sandbox_operation_failed",
+  MANAGED_EGRESS_DISABLED: "managed_egress_disabled",
+  NETWORK_POLICY_INVALID: "network_policy_invalid",
+  NETWORK_HELPER_UNAVAILABLE: "network_helper_unavailable",
+  NETWORK_PROXY_START_FAILED: "network_proxy_start_failed",
+  NETWORK_BRIDGE_START_FAILED: "network_bridge_start_failed",
+  NETWORK_PROXY_FAILED: "network_proxy_failed",
+  NETWORK_DESTINATION_BLOCKED: "network_destination_blocked",
   DATABASE_ERROR: "database_error",
   MODEL_UNAVAILABLE: "model_unavailable",
   MODEL_FAILED: "model_failed",
@@ -63,7 +70,7 @@ const DEFAULT_MESSAGES: Readonly<Record<ErrorCode, string>> = {
   invalid_workspace_path: "The workspace path must be an existing accessible directory.",
   duplicate_workspace_path: "That workspace path is already registered.",
   workspace_unavailable: "The workspace directory is unavailable.",
-  workspace_busy: "Close the workspace's live conversations before changing its path, security profile, or removing it.",
+  workspace_busy: "Close the workspace's live conversations before changing its path, security profile, network policy, or removing it.",
   sandbox_disabled: "Workspace sandboxing is disabled by the server.",
   sandbox_configuration_error: "The server sandbox configuration is invalid.",
   sandbox_unavailable: "Workspace sandboxing is unavailable.",
@@ -71,6 +78,13 @@ const DEFAULT_MESSAGES: Readonly<Record<ErrorCode, string>> = {
   sandbox_worker_start_failed: "The workspace sandbox could not be started.",
   sandbox_worker_failed: "The workspace sandbox failed.",
   sandbox_operation_failed: "The sandboxed operation failed.",
+  managed_egress_disabled: "Managed egress is disabled by the server.",
+  network_policy_invalid: "The server managed-egress policy is invalid.",
+  network_helper_unavailable: "The managed-egress network helper is unavailable.",
+  network_proxy_start_failed: "The managed-egress proxy could not be started.",
+  network_bridge_start_failed: "The managed-egress bridge could not be started.",
+  network_proxy_failed: "The managed-egress proxy failed.",
+  network_destination_blocked: "The network destination was blocked by policy.",
   database_error: "The workspace database operation failed.",
   model_unavailable: "No model is configured or available.",
   model_failed: "The model failed while processing the prompt.",
@@ -145,6 +159,16 @@ export type ErrorContext =
         | "worker-startup"
         | "fatal-worker"
         | "operation";
+    }
+  | {
+      readonly source: "network";
+      readonly phase:
+        | "configuration"
+        | "helper"
+        | "bridge"
+        | "proxy-startup"
+        | "active-proxy"
+        | "destination-denial";
     }
   | {
       readonly source: "registry";
@@ -245,6 +269,21 @@ function contextCode(error: unknown, context: ErrorContext): ErrorCode {
           return ERROR_CODES.SANDBOX_WORKER_FAILED;
         case "operation":
           return ERROR_CODES.SANDBOX_OPERATION_FAILED;
+      }
+    case "network":
+      switch (context.phase) {
+        case "configuration":
+          return ERROR_CODES.NETWORK_POLICY_INVALID;
+        case "helper":
+          return ERROR_CODES.NETWORK_HELPER_UNAVAILABLE;
+        case "bridge":
+          return ERROR_CODES.NETWORK_BRIDGE_START_FAILED;
+        case "proxy-startup":
+          return ERROR_CODES.NETWORK_PROXY_START_FAILED;
+        case "active-proxy":
+          return ERROR_CODES.NETWORK_PROXY_FAILED;
+        case "destination-denial":
+          return ERROR_CODES.NETWORK_DESTINATION_BLOCKED;
       }
     case "registry":
       switch (context.issue) {

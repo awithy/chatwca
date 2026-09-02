@@ -35,6 +35,8 @@ export interface ManagedNetworkConfig {
   readonly mode: ManagedEgressMode;
   readonly helperPath: string;
   readonly helperDirectory: string;
+  /** Packaged identity manifest; configured helper overrides must match it. */
+  readonly helperManifestPath: string;
   readonly allowedDomainPatterns: readonly string[];
   readonly deniedDomainPatterns: readonly string[];
   readonly allowedPorts: readonly number[];
@@ -199,10 +201,19 @@ export function loadManagedNetworkConfig(
     );
   }
   const allowedPorts = parsePorts(environment);
+  const processCwd = path.resolve(options.processCwd ?? process.cwd());
+  const processArch = options.processArch ?? process.arch;
   const helperPath = configuredHelperPath(
     environment,
-    path.resolve(options.processCwd ?? process.cwd()),
-    options.processArch ?? process.arch,
+    processCwd,
+    processArch,
+  );
+  const helperManifestPath = path.join(
+    processCwd,
+    "dist",
+    "native",
+    processArch,
+    "network-helper-manifest.json",
   );
   const destinationPolicy = compileDestinationPolicy({
     allowedDomainPatterns,
@@ -214,6 +225,7 @@ export function loadManagedNetworkConfig(
     mode,
     helperPath,
     helperDirectory: path.dirname(helperPath),
+    helperManifestPath,
     allowedDomainPatterns,
     deniedDomainPatterns,
     allowedPorts,

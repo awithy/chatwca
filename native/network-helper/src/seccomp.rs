@@ -146,7 +146,7 @@ const HOST_ARCHITECTURE: FilterArchitecture = FilterArchitecture::X86_64;
 const HOST_ARCHITECTURE: FilterArchitecture = FilterArchitecture::Aarch64;
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-compile_error!("the Phase 0 network helper supports only x86_64 and aarch64");
+compile_error!("chatwca-network-helper supports only x86_64 and aarch64");
 
 pub fn install() -> io::Result<()> {
     let generated = generate_filter(HOST_ARCHITECTURE);

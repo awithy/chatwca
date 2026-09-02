@@ -53,6 +53,10 @@ import {
 } from "./sandbox/probe.js";
 import { publicSandboxConfig } from "./sandbox/config.js";
 import { publicManagedEgressConfig } from "./network/config.js";
+import {
+  validateNetworkHelper,
+  type ValidatedNetworkHelper,
+} from "./network/helper.js";
 import { serveWebApp } from "./static.js";
 import { hasAllowedWebSocketOrigin } from "./websocket-boundary.js";
 import { WorkspaceRepository } from "./workspace-repository.js";
@@ -392,6 +396,11 @@ export interface ChatWcaStartupOptions {
   readonly validateSandboxHost?: (
     config: Readonly<ServerConfig["sandbox"]>,
   ) => Readonly<ValidatedSandboxHost>;
+  readonly validateNetworkHelper?: (input: {
+    readonly helperPath: string;
+    readonly manifestPath: string;
+    readonly protectedPaths: readonly string[];
+  }) => Readonly<ValidatedNetworkHelper>;
   readonly runSandboxStartupProbe?: (input: {
     readonly config: Readonly<ServerConfig["sandbox"]>;
     readonly host: Readonly<ValidatedSandboxHost>;
@@ -479,6 +488,18 @@ export async function startChatWcaServer(
     let functionalProbeSucceeded = false;
     let sandboxWorker: Readonly<SandboxWorkerArtifact> | undefined;
     let sandboxHost: Readonly<ValidatedSandboxHost> | undefined;
+    if (config.managedNetwork.mode === "optional") {
+      (options.validateNetworkHelper ?? validateNetworkHelper)({
+        helperPath: config.managedNetwork.helperPath,
+        manifestPath: config.managedNetwork.helperManifestPath,
+        protectedPaths: [
+          dataDirectory,
+          piAgentDirectory,
+          ...config.sandbox.workspaceRoots,
+          ...config.sandbox.readOnlyMounts.map((mount) => mount.source),
+        ],
+      });
+    }
     if (config.sandbox.mode !== "disabled") {
       let worker: Readonly<SandboxWorkerArtifact>;
       try {

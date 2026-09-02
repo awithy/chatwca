@@ -164,6 +164,18 @@ describe("production startup wiring", () => {
         return database;
       },
       loadSandboxWorkerArtifact: async () => { calls.push("worker"); return workerArtifact; },
+      validateNetworkHelper: () => {
+        calls.push("network-helper");
+        return {
+          path: loadedConfig.managedNetwork.helperPath,
+          directory: loadedConfig.managedNetwork.helperDirectory,
+          manifestPath: loadedConfig.managedNetwork.helperManifestPath,
+          architecture: "x64",
+          buildVersion: "1.0.0",
+          protocolVersion: 1,
+          sha256: "0".repeat(64),
+        };
+      },
       validateSandboxHost: () => { calls.push("validate"); return validatedHost; },
       runSandboxStartupProbe: async () => {
         calls.push("probe");
@@ -179,7 +191,7 @@ describe("production startup wiring", () => {
     });
     runningServers.push(server);
     expect(calls).toEqual([
-      "config", "sqlite", "worker", "validate", "probe",
+      "config", "sqlite", "network-helper", "worker", "validate", "probe",
       "workspace-repository", "pi-services", "listeners",
     ]);
     const address = server.httpServer.address() as AddressInfo;
@@ -214,11 +226,13 @@ describe("production startup wiring", () => {
   it("disabled mode never loads, validates, or probes Bubblewrap", async () => {
     const root = temporaryDirectory();
     const loadWorker = vi.fn(async () => workerArtifact);
+    const validateNetwork = vi.fn();
     const validateHost = vi.fn(() => validatedHost);
     const probe = vi.fn(async () => ({ succeeded: true as const, bwrapVersion: "", nodeVersion: "", rgVersion: "", workerSha256: "" }));
     const server = await startChatWcaServer({
       loadConfiguration: () => config(root),
       loadSandboxWorkerArtifact: loadWorker,
+      validateNetworkHelper: validateNetwork,
       validateSandboxHost: validateHost,
       runSandboxStartupProbe: probe,
       createRuntimeFactory: async () => fakeRuntimeFactory(),
@@ -227,6 +241,7 @@ describe("production startup wiring", () => {
     });
     runningServers.push(server);
     expect(loadWorker).not.toHaveBeenCalled();
+    expect(validateNetwork).not.toHaveBeenCalled();
     expect(validateHost).not.toHaveBeenCalled();
     expect(probe).not.toHaveBeenCalled();
   });

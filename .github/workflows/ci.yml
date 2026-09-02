@@ -83,14 +83,12 @@ jobs:
           /usr/bin/node --version
           /usr/bin/rg --version
 
-      - name: Install dependencies and build native feasibility artifact
+      - name: Install dependencies and build production native artifact
         run: |
           npm ci
+          npm run build:network-helper
           npm run build:sandbox-worker
-          npm run build:network-helper-phase0
-
-      - name: Native feasibility suite (direct, isolated runner)
-        run: npm run test:network-helper-real
+          npm run test:native
 
       - name: Real sandbox suite (direct, isolated runner)
         env:
@@ -101,21 +99,6 @@ jobs:
         run: |
           sed "s/^User=.*/User=$(id -un)/" systemd/chatwca.service > /tmp/chatwca.service
           systemd-analyze verify /tmp/chatwca.service
-
-      - name: Native feasibility suite under service-unit constraints
-        run: |
-          sudo systemd-run --wait --pipe --collect \
-            --unit=chatwca-network-helper-ci \
-            --uid="$(id -u)" --gid="$(id -g)" \
-            --working-directory="$GITHUB_WORKSPACE" \
-            --property=NoNewPrivileges=true \
-            --property=KillMode=control-group \
-            --property=TasksMax=512 \
-            --property=TimeoutStopSec=30s \
-            --property=PrivateUsers=false \
-            --property=RestrictNamespaces=false \
-            --setenv=CHATWCA_SANDBOX_CAPABLE=1 \
-            "$(command -v npm)" run test:network-helper-feasibility
 
       - name: Real sandbox suite under service-unit constraints
         run: |

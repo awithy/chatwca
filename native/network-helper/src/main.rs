@@ -1,308 +1,140 @@
 mod bridge;
-mod handoff;
+mod capabilities;
+mod namespace;
+mod protocol;
 mod seccomp;
-mod security;
 
-use std::collections::HashMap;
+use protocol::{InnerDescriptor, LaunchDescriptor, OuterMessage};
 use std::env;
 use std::ffi::CString;
-use std::fs;
-use std::io::{self, Seek, SeekFrom, Write};
-use std::net::{Ipv4Addr, TcpListener};
+use std::fs::{self, File};
+use std::io::{self, Seek, SeekFrom};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{self, Command};
-
-const VERSION: &str = "0.0.1-phase0";
-const PROTOCOL_VERSION: u32 = 0;
-const HELPER_DATA_FD: RawFd = 3;
-const WORKER_DATA_FD: RawFd = 4;
-const HTTP_BOOTSTRAP_FD: RawFd = 10;
-const SOCKS_BOOTSTRAP_FD: RawFd = 11;
-const NAMESPACES: [&str; 6] = ["user", "mnt", "pid", "ipc", "uts", "net"];
+use std::process::{self, Child, Command};
+use std::time::{Duration, Instant};
 
 fn main() {
-    if let Err(error) = dispatch() {
-        eprintln!("network-helper Phase 0 failure: {error}");
+    let arguments: Vec<_> = env::args_os().skip(1).collect();
+    let outer = arguments.len() == 1 && arguments[0] == "--outer";
+    if let Err(error) = dispatch(&arguments) {
+        if outer {
+            let _ = protocol::write_frame(
+                protocol::READY_FD,
+                &OuterMessage::Error {
+                    protocol: protocol::PROTOCOL_VERSION,
+                    code: "helper_setup_failed",
+                },
+                protocol::MAX_CONTROL_BYTES,
+            );
+        }
+        eprintln!("chatwca-network-helper failed: {}", error.kind());
         process::exit(1);
     }
 }
 
-fn dispatch() -> io::Result<()> {
-    let arguments: Vec<String> = env::args().skip(1).collect();
-    match arguments.first().map(String::as_str) {
-        Some("--version") if arguments.len() == 1 => {
+fn dispatch(arguments: &[std::ffi::OsString]) -> io::Result<()> {
+    match arguments {
+        [argument] if argument == "--version" => {
+            let version = protocol::VersionMessage {
+                name: "chatwca-network-helper",
+                version: protocol::BUILD_VERSION,
+                protocol: protocol::PROTOCOL_VERSION,
+            };
             println!(
-                "{{\"name\":\"chatwca-network-helper\",\"version\":\"{VERSION}\",\"protocol\":{PROTOCOL_VERSION},\"stage\":\"phase0\"}}"
+                "{}",
+                serde_json::to_string(&version).expect("version message serializes")
             );
             Ok(())
         }
-        Some("--phase0-outer") => run_outer(parse_options(&arguments[1..])?),
-        Some("--phase0-inner") => run_inner(parse_options(&arguments[1..])?),
+        [argument] if argument == "--outer" => run_outer(),
+        [argument] if argument == "--inner" => run_inner(),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "closed Phase 0 command dispatch",
+            "closed helper command dispatch",
         )),
     }
 }
 
-fn parse_options(arguments: &[String]) -> io::Result<HashMap<String, String>> {
-    if arguments.len() & 1 != 0 {
+fn descriptor_is_open(fd: RawFd) -> io::Result<libc::stat> {
+    let mut status: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut status) } != 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(status)
+    }
+}
+
+fn validate_parent_descriptors(value: &LaunchDescriptor) -> io::Result<()> {
+    let mut identities = std::collections::HashSet::new();
+    for fd in [protocol::READY_FD]
+        .into_iter()
+        .chain(value.inherited_fds.iter().copied())
+    {
+        let status = descriptor_is_open(fd)?;
+        if !identities.insert((status.st_dev, status.st_ino)) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "parent descriptors are aliased",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_bwrap(target: &Path) -> io::Result<()> {
+    if fs::canonicalize(target)? != target {
         return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "options require values",
+            io::ErrorKind::PermissionDenied,
+            "Bubblewrap path is not canonical",
         ));
     }
-    let mut options = HashMap::new();
-    for pair in arguments.chunks(2) {
-        if !pair[0].starts_with("--") || pair[0] == "--phase0-outer" || pair[0] == "--phase0-inner"
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid option",
-            ));
-        }
-        if options.insert(pair[0].clone(), pair[1].clone()).is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "duplicate option",
-            ));
-        }
+    let metadata = fs::symlink_metadata(target)?;
+    if !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.mode() & 0o022 != 0
+        || unsafe {
+            libc::access(
+                CString::new(target.as_os_str().as_encoded_bytes())
+                    .map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "invalid Bubblewrap path")
+                    })?
+                    .as_ptr(),
+                libc::X_OK,
+            )
+        } != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Bubblewrap executable metadata is unsafe",
+        ));
     }
-    Ok(options)
+    Ok(())
 }
 
-fn require_option(options: &HashMap<String, String>, name: &str) -> io::Result<String> {
-    options
-        .get(name)
-        .cloned()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, format!("missing {name}")))
+fn validate_proxy_socket(target: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(target)?;
+    if !metadata.file_type().is_socket()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "proxy socket metadata is unsafe",
+        ));
+    }
+    Ok(())
 }
 
-fn reject_unknown(options: &HashMap<String, String>, allowed: &[&str]) -> io::Result<()> {
-    if options.keys().all(|name| allowed.contains(&name.as_str())) {
+fn set_cloexec(fd: RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } != 0 {
+        Err(io::Error::last_os_error())
+    } else {
         Ok(())
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "unknown option",
-        ))
     }
-}
-
-fn validate_token(token: &str) -> io::Result<()> {
-    if (32..=128).contains(&token.len()) && token.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
-        Ok(())
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "invalid bootstrap token",
-        ))
-    }
-}
-
-fn validate_absolute(path: &str) -> io::Result<PathBuf> {
-    let value = PathBuf::from(path);
-    if value.is_absolute() {
-        Ok(value)
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "path must be absolute",
-        ))
-    }
-}
-
-fn run_outer(options: HashMap<String, String>) -> io::Result<()> {
-    reject_unknown(
-        &options,
-        &[
-            "--bwrap",
-            "--worker",
-            "--http-socket",
-            "--socks-socket",
-            "--token",
-        ],
-    )?;
-    let environment_count = env::vars_os().count();
-    let bwrap = validate_absolute(&require_option(&options, "--bwrap")?)?;
-    let worker = validate_absolute(&require_option(&options, "--worker")?)?;
-    let http_socket = validate_absolute(&require_option(&options, "--http-socket")?)?;
-    let socks_socket = validate_absolute(&require_option(&options, "--socks-socket")?)?;
-    let token = require_option(&options, "--token")?;
-    validate_token(&token)?;
-    security::set_parent_death_signal()?;
-
-    let parent_namespaces = namespace_links()?;
-    let helper_artifact = sealed_artifact(Path::new("/proc/self/exe"), "chatwca-phase0-helper")?;
-    let worker_artifact = sealed_artifact(&worker, "chatwca-phase0-worker")?;
-    let (http_bridge_socket, http_inner_socket) = socket_pair()?;
-    let (socks_bridge_socket, socks_inner_socket) = socket_pair()?;
-
-    let http_pid = fork_bridge(
-        http_bridge_socket.as_raw_fd(),
-        http_inner_socket.as_raw_fd(),
-        socks_bridge_socket.as_raw_fd(),
-        socks_inner_socket.as_raw_fd(),
-        format!("{token}:http").into_bytes(),
-        http_socket,
-    )?;
-    let socks_pid = match fork_bridge(
-        socks_bridge_socket.as_raw_fd(),
-        socks_inner_socket.as_raw_fd(),
-        http_bridge_socket.as_raw_fd(),
-        http_inner_socket.as_raw_fd(),
-        format!("{token}:socks").into_bytes(),
-        socks_socket,
-    ) {
-        Ok(pid) => pid,
-        Err(error) => {
-            terminate_and_reap(http_pid);
-            return Err(error);
-        }
-    };
-    drop(http_bridge_socket);
-    drop(socks_bridge_socket);
-
-    // Park every source above the fixed range before replacing any low FD.
-    // Newly-created memfds/socketpairs are otherwise allowed to occupy 3/4/10/11.
-    let parked_helper = park_descriptor(helper_artifact.as_raw_fd())?;
-    let parked_worker = park_descriptor(worker_artifact.as_raw_fd())?;
-    let parked_http = park_descriptor(http_inner_socket.as_raw_fd())?;
-    let parked_socks = park_descriptor(socks_inner_socket.as_raw_fd())?;
-    drop(helper_artifact);
-    drop(worker_artifact);
-    drop(http_inner_socket);
-    drop(socks_inner_socket);
-    duplicate_to(parked_helper.as_raw_fd(), HELPER_DATA_FD)?;
-    duplicate_to(parked_worker.as_raw_fd(), WORKER_DATA_FD)?;
-    duplicate_to(parked_http.as_raw_fd(), HTTP_BOOTSTRAP_FD)?;
-    duplicate_to(parked_socks.as_raw_fd(), SOCKS_BOOTSTRAP_FD)?;
-    drop((parked_helper, parked_worker, parked_http, parked_socks));
-
-    let mut arguments = vec![
-        "--unshare-user".into(),
-        "--unshare-pid".into(),
-        "--unshare-ipc".into(),
-        "--unshare-uts".into(),
-        "--unshare-net".into(),
-        "--hostname".into(),
-        "chatwca-network-phase0".into(),
-        "--cap-drop".into(),
-        "ALL".into(),
-        // CAP_SETPCAP is transition-only: it is needed to empty and lock the
-        // bounding set after CAP_NET_ADMIN has raised loopback.
-        "--cap-add".into(),
-        "CAP_SETPCAP".into(),
-        "--cap-add".into(),
-        "CAP_NET_ADMIN".into(),
-        "--new-session".into(),
-        "--die-with-parent".into(),
-        "--clearenv".into(),
-        "--ro-bind".into(),
-        "/usr".into(),
-        "/usr".into(),
-    ];
-    for (source, target, destination) in [
-        ("/usr/bin", "usr/bin", "/bin"),
-        ("/usr/sbin", "usr/sbin", "/sbin"),
-        ("/usr/lib", "usr/lib", "/lib"),
-        ("/usr/lib64", "usr/lib64", "/lib64"),
-    ] {
-        if Path::new(source).exists() {
-            arguments.extend(["--symlink".into(), target.into(), destination.into()]);
-        }
-    }
-    arguments.extend([
-        "--proc".into(),
-        "/proc".into(),
-        "--dev".into(),
-        "/dev".into(),
-        "--tmpfs".into(),
-        "/tmp".into(),
-        "--dir".into(),
-        "/etc".into(),
-        "--dir".into(),
-        "/app".into(),
-        "--perms".into(),
-        "0500".into(),
-        "--ro-bind-data".into(),
-        HELPER_DATA_FD.to_string(),
-        "/app/network-helper".into(),
-        "--perms".into(),
-        "0400".into(),
-        "--ro-bind-data".into(),
-        WORKER_DATA_FD.to_string(),
-        "/app/worker.cjs".into(),
-        "/app/network-helper".into(),
-        "--phase0-inner".into(),
-        "--token".into(),
-        token,
-    ]);
-    for namespace in NAMESPACES {
-        arguments.push(format!("--parent-{namespace}"));
-        arguments.push(parent_namespaces[namespace].clone());
-    }
-
-    let mut command = Command::new(&bwrap);
-    command.args(&arguments).env_clear();
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) => {
-            terminate_and_reap(http_pid);
-            terminate_and_reap(socks_pid);
-            return Err(error);
-        }
-    };
-    close_fixed_descriptors();
-    println!(
-        "{{\"type\":\"phase0-processes\",\"outerPid\":{},\"bwrapPid\":{},\"bridgePids\":[{},{}],\"environmentCount\":{}}}",
-        process::id(), child.id(), http_pid, socks_pid, environment_count,
-    );
-    io::stdout().flush()?;
-
-    let status = child.wait()?;
-    terminate_and_reap(http_pid);
-    terminate_and_reap(socks_pid);
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!("Bubblewrap exited with {status}")))
-    }
-}
-
-fn namespace_links() -> io::Result<HashMap<&'static str, String>> {
-    NAMESPACES
-        .into_iter()
-        .map(|name| {
-            fs::read_link(format!("/proc/self/ns/{name}"))
-                .map(|value| (name, value.to_string_lossy().into_owned()))
-        })
-        .collect()
-}
-
-fn sealed_artifact(path: &Path, name: &str) -> io::Result<OwnedFd> {
-    let contents = fs::read(path)?;
-    let name = CString::new(name).expect("fixed memfd name");
-    let descriptor = unsafe {
-        libc::syscall(
-            libc::SYS_memfd_create,
-            name.as_ptr(),
-            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
-        ) as RawFd
-    };
-    if descriptor < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let mut file = unsafe { fs::File::from_raw_fd(descriptor) };
-    file.write_all(&contents)?;
-    file.seek(SeekFrom::Start(0))?;
-    let seals = libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
-    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(unsafe { OwnedFd::from_raw_fd(file.into_raw_fd()) })
 }
 
 fn socket_pair() -> io::Result<(OwnedFd, OwnedFd)> {
@@ -321,11 +153,41 @@ fn socket_pair() -> io::Result<(OwnedFd, OwnedFd)> {
     Ok(unsafe { (OwnedFd::from_raw_fd(pair[0]), OwnedFd::from_raw_fd(pair[1])) })
 }
 
+fn sealed_descriptor<T: serde::Serialize>(value: &T, name: &str) -> io::Result<OwnedFd> {
+    let name = CString::new(name).expect("fixed memfd name");
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_memfd_create,
+            name.as_ptr(),
+            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        ) as RawFd
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    protocol::write_frame(file.as_raw_fd(), value, protocol::MAX_CONTROL_BYTES)?;
+    file.seek(SeekFrom::Start(0))?;
+    let seals = libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(file.into_raw_fd()) })
+}
+
+fn random_token() -> io::Result<String> {
+    let mut bytes = [0u8; 32];
+    let result = unsafe { libc::getrandom(bytes.as_mut_ptr().cast(), bytes.len(), 0) };
+    if result != bytes.len() as isize {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 fn fork_bridge(
     bootstrap: RawFd,
-    close_one: RawFd,
-    close_two: RawFd,
-    close_three: RawFd,
+    close_bootstrap: RawFd,
+    ready: *mut u8,
     token: Vec<u8>,
     target: PathBuf,
 ) -> io::Result<libc::pid_t> {
@@ -334,10 +196,8 @@ fn fork_bridge(
         return Err(io::Error::last_os_error());
     }
     if pid == 0 {
-        for descriptor in [close_one, close_two, close_three] {
-            unsafe { libc::close(descriptor) };
-        }
-        let code = if bridge::run(bootstrap, &token, &target).is_ok() {
+        unsafe { libc::close(close_bootstrap) };
+        let code = if bridge::run(bootstrap, ready, &token, &target).is_ok() {
             0
         } else {
             1
@@ -347,32 +207,36 @@ fn fork_bridge(
     Ok(pid)
 }
 
-fn park_descriptor(source: RawFd) -> io::Result<OwnedFd> {
-    let descriptor = unsafe { libc::fcntl(source, libc::F_DUPFD_CLOEXEC, 20) };
-    if descriptor < 0 {
+fn park(fd: RawFd) -> io::Result<OwnedFd> {
+    let parked = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 64) };
+    if parked < 0 {
         Err(io::Error::last_os_error())
     } else {
-        Ok(unsafe { OwnedFd::from_raw_fd(descriptor) })
+        Ok(unsafe { OwnedFd::from_raw_fd(parked) })
     }
 }
 
-fn duplicate_to(source: RawFd, target: RawFd) -> io::Result<()> {
-    let result = unsafe { libc::dup2(source, target) };
-    if result == target {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-fn close_fixed_descriptors() {
-    for descriptor in [
-        HELPER_DATA_FD,
-        WORKER_DATA_FD,
-        HTTP_BOOTSTRAP_FD,
-        SOCKS_BOOTSTRAP_FD,
-    ] {
-        unsafe { libc::close(descriptor) };
+fn wait_bridges(child: &mut Child, ready: *mut u8) -> io::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if unsafe {
+            std::ptr::read_volatile(ready) == 1 && std::ptr::read_volatile(ready.add(1)) == 1
+        } {
+            return Ok(());
+        }
+        if child.try_wait()?.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "Bubblewrap exited during bridge setup",
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "bridge setup timed out",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -390,268 +254,351 @@ fn terminate_and_reap(pid: libc::pid_t) {
     }
 }
 
-fn run_inner(options: HashMap<String, String>) -> io::Result<()> {
-    let mut allowed = vec!["--token"];
-    for namespace in NAMESPACES {
-        allowed.push(Box::leak(format!("--parent-{namespace}").into_boxed_str()));
+fn run_outer() -> io::Result<()> {
+    if env::vars_os().next().is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "outer helper environment is not empty",
+        ));
     }
-    reject_unknown(&options, &allowed)?;
-    let token = require_option(&options, "--token")?;
-    validate_token(&token)?;
-    verify_namespaces(&options).map_err(|error| stage_error("namespace verification", error))?;
-    validate_bootstrap_socket(HTTP_BOOTSTRAP_FD)
-        .map_err(|error| stage_error("HTTP bootstrap validation", error))?;
-    validate_bootstrap_socket(SOCKS_BOOTSTRAP_FD)
-        .map_err(|error| stage_error("SOCKS bootstrap validation", error))?;
-    verify_transition_capabilities()
-        .map_err(|error| stage_error("transition capability check", error))?;
-    bring_up_loopback().map_err(|error| stage_error("loopback setup", error))?;
+    capabilities::set_parent_death_signal()?;
+    capabilities::own_process_group()?;
+    descriptor_is_open(protocol::LAUNCH_FD)?;
+    descriptor_is_open(protocol::READY_FD)?;
+    let descriptor: LaunchDescriptor =
+        protocol::read_frame(protocol::LAUNCH_FD, protocol::MAX_LAUNCH_BYTES)?;
+    unsafe { libc::close(protocol::LAUNCH_FD) };
+    let descriptor = protocol::validate_launch(descriptor)?;
+    validate_parent_descriptors(&descriptor)?;
+    validate_bwrap(Path::new(&descriptor.bwrap_path))?;
+    validate_proxy_socket(Path::new(&descriptor.http_socket))?;
+    validate_proxy_socket(Path::new(&descriptor.socks_socket))?;
+    set_cloexec(protocol::READY_FD)?;
+    let self_artifact = File::open("/proc/self/exe")?;
+    let metadata = self_artifact.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "helper executable is not regular",
+        ));
+    }
+    let inner = InnerDescriptor {
+        protocol: protocol::PROTOCOL_VERSION,
+        build_version: protocol::BUILD_VERSION.into(),
+        token: random_token()?,
+        parent_namespaces: namespace::identities()?,
+    };
+    let inner_artifact = sealed_descriptor(&inner, "chatwca-inner-config")?;
+    let (http_bridge, http_inner) = socket_pair()?;
+    let (socks_bridge, socks_inner) = socket_pair()?;
+    let ready = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            2,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    } as *mut u8;
+    if ready.cast::<libc::c_void>() == libc::MAP_FAILED {
+        return Err(io::Error::last_os_error());
+    }
+    let http_token = format!("H{}", inner.token).into_bytes();
+    let socks_token = format!("S{}", inner.token).into_bytes();
+    let http_pid = match fork_bridge(
+        http_bridge.as_raw_fd(),
+        http_inner.as_raw_fd(),
+        ready,
+        http_token,
+        PathBuf::from(&descriptor.http_socket),
+    ) {
+        Ok(pid) => pid,
+        Err(error) => {
+            unsafe { libc::munmap(ready.cast(), 2) };
+            return Err(error);
+        }
+    };
+    let socks_pid = match fork_bridge(
+        socks_bridge.as_raw_fd(),
+        socks_inner.as_raw_fd(),
+        unsafe { ready.add(1) },
+        socks_token,
+        PathBuf::from(&descriptor.socks_socket),
+    ) {
+        Ok(pid) => pid,
+        Err(error) => {
+            terminate_and_reap(http_pid);
+            unsafe { libc::munmap(ready.cast(), 2) };
+            return Err(error);
+        }
+    };
+    drop((http_bridge, socks_bridge));
+    let parked_inner = park(inner_artifact.as_raw_fd())?;
+    let parked_self = park(self_artifact.as_raw_fd())?;
+    let parked_http = park(http_inner.as_raw_fd())?;
+    let parked_socks = park(socks_inner.as_raw_fd())?;
+    drop((inner_artifact, self_artifact, http_inner, socks_inner));
+    let mut command = Command::new(&descriptor.bwrap_path);
+    command.args(&descriptor.bwrap_args).args([
+        "--perms",
+        "0500",
+        "--ro-bind-data",
+        &protocol::SELF_ARTIFACT_FD.to_string(),
+        "/app/network-helper",
+        "/app/network-helper",
+        "--inner",
+    ]);
+    command.env_clear();
+    let inherited = descriptor.inherited_fds.clone();
+    let parked_assignments = [
+        (parked_inner.as_raw_fd(), protocol::INNER_CONFIG_FD),
+        (parked_http.as_raw_fd(), protocol::HTTP_BOOTSTRAP_FD),
+        (parked_socks.as_raw_fd(), protocol::SOCKS_BOOTSTRAP_FD),
+        (parked_self.as_raw_fd(), protocol::SELF_ARTIFACT_FD),
+    ];
+    unsafe {
+        command.pre_exec(move || {
+            for (source, target) in parked_assignments {
+                if libc::dup2(source, target) != target {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            for fd in &inherited {
+                let flags = libc::fcntl(*fd, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(*fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            terminate_and_reap(http_pid);
+            terminate_and_reap(socks_pid);
+            unsafe { libc::munmap(ready.cast(), 2) };
+            return Err(error);
+        }
+    };
+    drop((parked_inner, parked_http, parked_socks, parked_self));
+    let setup = wait_bridges(&mut child, ready);
+    unsafe { libc::munmap(ready.cast(), 2) };
+    if let Err(error) = setup {
+        let _ = child.kill();
+        let _ = child.wait();
+        terminate_and_reap(http_pid);
+        terminate_and_reap(socks_pid);
+        return Err(error);
+    }
+    protocol::write_frame(
+        protocol::READY_FD,
+        &OuterMessage::Ready {
+            protocol: protocol::PROTOCOL_VERSION,
+            helper_pid: process::id(),
+            bwrap_pid: child.id(),
+        },
+        protocol::MAX_CONTROL_BYTES,
+    )?;
+    unsafe { libc::close(protocol::READY_FD) };
+    let status = child.wait();
+    terminate_and_reap(http_pid);
+    terminate_and_reap(socks_pid);
+    let status = status?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "Bubblewrap exited unsuccessfully",
+        ))
+    }
+}
 
-    let http_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
-    let socks_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+fn require_ack(fd: RawFd) -> io::Result<()> {
+    let mut bytes = [0u8; 3];
+    let received = unsafe { libc::recv(fd, bytes.as_mut_ptr().cast(), bytes.len(), 0) };
+    if received == 2 && &bytes[..2] == b"OK" {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "bridge acknowledgement was invalid",
+        ))
+    }
+}
+
+fn close_unrelated_inner() {
+    let maximum = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) }.clamp(1024, 65_536) as RawFd;
+    for fd in 3..maximum {
+        if ![protocol::WORKER_REQUEST_FD, protocol::WORKER_RESPONSE_FD].contains(&fd) {
+            unsafe { libc::close(fd) };
+        }
+    }
+}
+
+fn proxy_environment(http_port: u16, socks_port: u16) -> Vec<(&'static str, String)> {
+    let http = format!("http://127.0.0.1:{http_port}");
+    let socks = format!("socks5h://127.0.0.1:{socks_port}");
+    let mut values = vec![
+        ("HOME", "/home/sandbox".into()),
+        ("TMPDIR", "/tmp".into()),
+        ("PATH", "/usr/bin:/bin".into()),
+        ("LANG", "C.UTF-8".into()),
+        ("LC_ALL", "C.UTF-8".into()),
+        ("TERM", "dumb".into()),
+        ("NO_COLOR", "1".into()),
+        ("CI", "1".into()),
+        ("USER", "sandbox".into()),
+        ("LOGNAME", "sandbox".into()),
+        ("SHELL", "/bin/bash".into()),
+        ("PWD", "/workspace".into()),
+        ("HTTP_PROXY", http.clone()),
+        ("HTTPS_PROXY", http.clone()),
+        ("WS_PROXY", http.clone()),
+        ("WSS_PROXY", http.clone()),
+        ("ALL_PROXY", socks.clone()),
+        ("NO_PROXY", String::new()),
+        ("http_proxy", http.clone()),
+        ("https_proxy", http.clone()),
+        ("ws_proxy", http.clone()),
+        ("wss_proxy", http.clone()),
+        ("all_proxy", socks),
+        ("no_proxy", String::new()),
+        ("NODE_USE_ENV_PROXY", "1".into()),
+        ("ELECTRON_GET_USE_PROXY", "true".into()),
+        ("CHATWCA_MANAGED_EGRESS", "1".into()),
+    ];
+    for name in [
+        "npm_config_proxy",
+        "npm_config_http_proxy",
+        "npm_config_https_proxy",
+        "yarn_proxy",
+        "yarn_http_proxy",
+        "yarn_https_proxy",
+        "BUNDLE_HTTP_PROXY",
+        "PIP_PROXY",
+        "DOCKER_HTTP_PROXY",
+        "DOCKER_HTTPS_PROXY",
+    ] {
+        values.push((name, http.clone()));
+    }
+    for name in [
+        "npm_config_noproxy",
+        "yarn_no_proxy",
+        "PIP_NO_PROXY",
+        "DOCKER_NO_PROXY",
+    ] {
+        values.push((name, String::new()));
+    }
+    values
+}
+
+fn run_inner() -> io::Result<()> {
+    capabilities::set_parent_death_signal()?;
+    let inner: InnerDescriptor =
+        protocol::read_frame(protocol::INNER_CONFIG_FD, protocol::MAX_CONTROL_BYTES)?;
+    let inner = protocol::validate_inner(inner)?;
+    for fd in [
+        protocol::WORKER_REQUEST_FD,
+        protocol::WORKER_RESPONSE_FD,
+        protocol::HTTP_BOOTSTRAP_FD,
+        protocol::SOCKS_BOOTSTRAP_FD,
+    ] {
+        descriptor_is_open(fd)?;
+    }
+    namespace::validate_bootstrap_socket(protocol::HTTP_BOOTSTRAP_FD)?;
+    namespace::validate_bootstrap_socket(protocol::SOCKS_BOOTSTRAP_FD)?;
+    namespace::verify_isolated(&inner.parent_namespaces)?;
+    capabilities::verify_transition_capabilities()?;
+    namespace::bring_up_loopback_only()?;
+    let http_listener = namespace::create_loopback_listener()?;
+    let socks_listener = namespace::create_loopback_listener()?;
     let http_port = http_listener.local_addr()?.port();
     let socks_port = socks_listener.local_addr()?.port();
-    handoff::send_listener(
-        HTTP_BOOTSTRAP_FD,
-        format!("{token}:http").as_bytes(),
+    bridge::send_listener(
+        protocol::HTTP_BOOTSTRAP_FD,
+        format!("H{}", inner.token).as_bytes(),
         http_listener.as_raw_fd(),
     )?;
-    handoff::send_listener(
-        SOCKS_BOOTSTRAP_FD,
-        format!("{token}:socks").as_bytes(),
+    bridge::send_listener(
+        protocol::SOCKS_BOOTSTRAP_FD,
+        format!("S{}", inner.token).as_bytes(),
         socks_listener.as_raw_fd(),
     )?;
-    require_acknowledgement(HTTP_BOOTSTRAP_FD)
-        .map_err(|error| stage_error("HTTP bridge acknowledgement", error))?;
-    require_acknowledgement(SOCKS_BOOTSTRAP_FD)
-        .map_err(|error| stage_error("SOCKS bridge acknowledgement", error))?;
-    drop(http_listener);
-    drop(socks_listener);
-    unsafe {
-        libc::close(HTTP_BOOTSTRAP_FD);
-        libc::close(SOCKS_BOOTSTRAP_FD);
-    }
-
-    security::drop_all_and_lock().map_err(|error| stage_error("security transition", error))?;
-    seccomp::install().map_err(|error| stage_error("seccomp install", error))?;
-    verify_seccomp_behavior().map_err(|error| stage_error("seccomp behavior", error))?;
-    close_descriptors_from(3);
-
-    let environment = [
-        ("HOME", "/tmp".to_string()),
-        ("TMPDIR", "/tmp".to_string()),
-        ("PATH", "/usr/bin:/bin".to_string()),
-        ("LANG", "C.UTF-8".to_string()),
-        ("LC_ALL", "C.UTF-8".to_string()),
-        ("TERM", "dumb".to_string()),
-        ("NO_COLOR", "1".to_string()),
-        ("CI", "1".to_string()),
-        ("USER", "sandbox".to_string()),
-        ("LOGNAME", "sandbox".to_string()),
-        ("SHELL", "/bin/bash".to_string()),
-        ("PWD", "/tmp".to_string()),
-        ("PHASE0_HTTP_PORT", http_port.to_string()),
-        ("PHASE0_SOCKS_PORT", socks_port.to_string()),
-        ("PHASE0_SECCOMP_CHECKED", "1".to_string()),
-    ];
+    require_ack(protocol::HTTP_BOOTSTRAP_FD)?;
+    require_ack(protocol::SOCKS_BOOTSTRAP_FD)?;
+    drop((http_listener, socks_listener));
+    close_unrelated_inner();
+    capabilities::drop_all_and_lock()?;
+    seccomp::install()?;
     let error = Command::new("/usr/bin/node")
-        .arg("/app/worker.cjs")
+        .arg("/app/worker.mjs")
         .env_clear()
-        .envs(environment)
-        .current_dir("/tmp")
+        .envs(proxy_environment(http_port, socks_port))
+        .current_dir("/workspace")
         .exec();
     Err(error)
 }
 
-fn stage_error(stage: &str, error: io::Error) -> io::Error {
-    io::Error::new(error.kind(), format!("{stage}: {error}"))
-}
-
-fn verify_namespaces(options: &HashMap<String, String>) -> io::Result<()> {
-    for namespace in NAMESPACES {
-        let parent = require_option(options, &format!("--parent-{namespace}"))?;
-        let current = fs::read_link(format!("/proc/self/ns/{namespace}"))?
-            .to_string_lossy()
-            .into_owned();
-        if current == parent {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!("{namespace} namespace was not isolated"),
-            ));
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn dispatch_rejects_every_non_closed_form() {
+        for args in [
+            vec![],
+            vec!["--outer".into(), "extra".into()],
+            vec!["--phase0-outer".into()],
+            vec!["--unknown".into()],
+        ] {
+            assert!(dispatch(&args).is_err());
         }
     }
-    Ok(())
-}
 
-fn validate_bootstrap_socket(descriptor: RawFd) -> io::Result<()> {
-    let mut socket_type = 0;
-    let mut length = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-    let result = unsafe {
-        libc::getsockopt(
-            descriptor,
-            libc::SOL_SOCKET,
-            libc::SO_TYPE,
-            &mut socket_type as *mut libc::c_int as *mut libc::c_void,
-            &mut length,
-        )
-    };
-    if result == 0 && socket_type == libc::SOCK_SEQPACKET {
-        Ok(())
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid bootstrap descriptor",
-        ))
-    }
-}
-
-#[repr(C, align(8))]
-struct InterfaceRequest {
-    name: [libc::c_char; libc::IFNAMSIZ],
-    data: [u8; 24],
-}
-
-fn verify_transition_capabilities() -> io::Result<()> {
-    let status = fs::read_to_string("/proc/self/status")?;
-    const CAP_SETPCAP: u32 = 8;
-    const CAP_NET_ADMIN: u32 = 12;
-    let expected = (1u64 << CAP_NET_ADMIN) | (1u64 << CAP_SETPCAP);
-    for name in ["CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"] {
-        let value = status
-            .lines()
-            .find_map(|line| line.strip_prefix(&format!("{name}:")))
-            .and_then(|value| u64::from_str_radix(value.trim(), 16).ok());
-        if value != Some(expected) {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!("{name} was not the closed transition set"),
-            ));
+    #[test]
+    fn parent_death_signal_kills_child() {
+        let mut pipe_fds = [-1; 2];
+        assert_eq!(
+            unsafe { libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC) },
+            0
+        );
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0);
+        if child == 0 {
+            unsafe { libc::close(pipe_fds[0]) };
+            let grandchild = unsafe { libc::fork() };
+            if grandchild == 0 {
+                capabilities::set_parent_death_signal().unwrap();
+                unsafe {
+                    libc::write(pipe_fds[1], b"R".as_ptr().cast(), 1);
+                    libc::pause();
+                    libc::_exit(2);
+                }
+            }
+            unsafe {
+                libc::_exit(0);
+            }
         }
-    }
-    Ok(())
-}
-
-fn bring_up_loopback() -> io::Result<()> {
-    let descriptor =
-        unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
-    if descriptor < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let mut request = InterfaceRequest {
-        name: [0; libc::IFNAMSIZ],
-        data: [0; 24],
-    };
-    for (destination, source) in request.name.iter_mut().zip(b"lo\0") {
-        *destination = *source as libc::c_char;
-    }
-    let get_result = unsafe { libc::ioctl(descriptor, libc::SIOCGIFFLAGS as _, &mut request) };
-    if get_result != 0 {
-        let error = io::Error::last_os_error();
-        unsafe { libc::close(descriptor) };
-        return Err(error);
-    }
-    let flags = unsafe { *(request.data.as_ptr() as *const libc::c_short) };
-    // Bubblewrap 0.6.1 currently raises lo while constructing --unshare-net.
-    // Treat that as idempotent setup; otherwise the retained namespace
-    // capability raises it here.
-    if flags & libc::IFF_UP as libc::c_short != 0 {
-        unsafe { libc::close(descriptor) };
-        return Ok(());
-    }
-    unsafe {
-        *(request.data.as_mut_ptr() as *mut libc::c_short) = flags | libc::IFF_UP as libc::c_short;
-    }
-    let set_result = unsafe { libc::ioctl(descriptor, libc::SIOCSIFFLAGS as _, &request) };
-    let error = io::Error::last_os_error();
-    unsafe { libc::close(descriptor) };
-    if set_result == 0 {
-        Ok(())
-    } else {
-        Err(error)
-    }
-}
-
-fn require_acknowledgement(descriptor: RawFd) -> io::Result<()> {
-    let mut acknowledgement = [0u8; 3];
-    let received = unsafe {
-        libc::recv(
-            descriptor,
-            acknowledgement.as_mut_ptr().cast(),
-            acknowledgement.len(),
-            0,
-        )
-    };
-    if received == 2 && &acknowledgement[..2] == b"OK" {
-        Ok(())
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "bridge did not acknowledge listener",
-        ))
-    }
-}
-
-fn verify_seccomp_behavior() -> io::Result<()> {
-    let ip = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
-    if ip < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    unsafe { libc::close(ip) };
-
-    let unix = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
-    if unix >= 0 || io::Error::last_os_error().raw_os_error() != Some(libc::EPERM) {
-        if unix >= 0 {
-            unsafe { libc::close(unix) };
-        }
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "AF_UNIX socket was not denied",
-        ));
-    }
-    let mut pair = [-1; 2];
-    if unsafe {
-        libc::socketpair(
-            libc::AF_UNIX,
-            libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
-            0,
-            pair.as_mut_ptr(),
-        )
-    } != 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    unsafe {
-        libc::close(pair[0]);
-        libc::close(pair[1]);
-    }
-
-    for syscall in [
-        libc::SYS_ptrace,
-        libc::SYS_process_vm_readv,
-        libc::SYS_process_vm_writev,
-        libc::SYS_io_uring_setup,
-        libc::SYS_io_uring_enter,
-        libc::SYS_io_uring_register,
-    ] {
-        let result = unsafe { libc::syscall(syscall, 0, 0, 0, 0, 0, 0) };
-        if result != -1 || io::Error::last_os_error().raw_os_error() != Some(libc::EPERM) {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "sensitive syscall was not denied",
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn close_descriptors_from(first: RawFd) {
-    let maximum = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
-    let maximum = if maximum > 0 {
-        maximum.min(65_536) as RawFd
-    } else {
-        1024
-    };
-    for descriptor in first..maximum {
-        unsafe { libc::close(descriptor) };
+        unsafe { libc::close(pipe_fds[1]) };
+        let mut byte = 0u8;
+        assert_eq!(
+            unsafe { libc::read(pipe_fds[0], (&mut byte as *mut u8).cast(), 1) },
+            1
+        );
+        let mut status = 0;
+        unsafe { libc::waitpid(child, &mut status, 0) };
+        assert_eq!(byte, b'R');
+        let mut poll = libc::pollfd {
+            fd: pipe_fds[0],
+            events: libc::POLLIN | libc::POLLHUP,
+            revents: 0,
+        };
+        assert!(unsafe { libc::poll(&mut poll, 1, 2_000) } > 0);
+        assert_eq!(
+            unsafe { libc::read(pipe_fds[0], (&mut byte as *mut u8).cast(), 1) },
+            0
+        );
     }
 }

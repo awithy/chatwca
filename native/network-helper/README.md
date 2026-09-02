@@ -1,19 +1,25 @@
-# Network helper Phase 0 harness
+# ChatWCA managed-network helper
 
-This crate is the disposable native feasibility implementation from Phase 0 of
-`docs/network-sandbox-design.md`. It is invoked only by
-`scripts/phase0-network-helper.mjs` and is not part of the server build or any
-production sandbox launch path.
+This Linux-only helper owns the privileged setup transition for managed-egress
+sandbox workers. The server executes `--outer` with an empty environment and a
+length-prefixed launch descriptor on fixed FD 3. The outer process validates the
+descriptor and inherited FDs, opens its own executable once, creates two
+conversation-owned bridges, and directly launches Bubblewrap. Bubblewrap runs
+the immutable artifact as `--inner`.
 
-The launch transition gives the inner process `CAP_NET_ADMIN` for loopback and
-`CAP_SETPCAP` only so it can empty and lock the capability bounding set. Both
-are removed before the immutable Node probe is executed. The harness fails
-unless every capability set is empty, `NoNewPrivs` and seccomp are active, both
-SCM listener handoffs work, and parent/Bubblewrap death removes the process
-tree.
+The inner process verifies all namespaces and fixed descriptors, raises only
+loopback, performs authenticated one-time `SCM_RIGHTS` listener handoffs, drops
+and locks all capabilities, enables `NoNewPrivs` and the architecture-checked
+seccomp policy, and executes only `/usr/bin/node /app/worker.mjs` with a closed
+proxy environment.
 
-Run architecture-independent native tests with `npm run test:native`. Build the
-host spike with `npm run build:network-helper-phase0`. The real Linux test is
-conditional unless `CHATWCA_SANDBOX_CAPABLE=1`; CI runs
-`npm run test:network-helper-real` directly and under the service-unit
-constraints.
+Build and test with:
+
+```sh
+npm run build:network-helper
+npm run test:native
+```
+
+The build writes an architecture-specific executable and integrity manifest to
+`dist/native/<arch>/`. The server validates both before managed egress can be
+used. Worker-launch integration is intentionally owned by the next phase.

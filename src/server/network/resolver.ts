@@ -169,7 +169,8 @@ export class NodeNumericAddressDialer implements NumericAddressDialer {
 
     // Supplying family and a canonical numeric host prevents any hostname
     // lookup in Node's connection path.
-    const socket = net.createConnection({
+    const socket = new net.Socket({ allowHalfOpen: true });
+    socket.connect({
       host: classified.address,
       port,
       family: classified.family,

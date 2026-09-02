@@ -287,6 +287,8 @@ Public WebSocket errors deliberately omit SDK details, local paths, and stacks. 
 
 ## Development checks
 
+This project does not use GitHub Actions. Run the checks locally before committing or releasing changes.
+
 ```sh
 npm run typecheck
 npm run build

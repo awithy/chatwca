@@ -73,6 +73,7 @@ function renderHeader(contextUsage: ConversationState["contextUsage"]): string {
     connected: true,
     actionPending: null,
     onRename: async () => undefined,
+    onCreate: () => undefined,
     onClose: () => undefined,
     onDelete: () => undefined,
   }));
@@ -96,6 +97,7 @@ describe("conversation header context usage", () => {
       connected: true,
       actionPending: null,
       onRename: async () => undefined,
+      onCreate: () => undefined,
       onClose: () => undefined,
       onDelete: () => undefined,
     }));
@@ -114,6 +116,7 @@ describe("conversation header context usage", () => {
       connected: true,
       actionPending: null,
       onRename: async () => undefined,
+      onCreate: () => undefined,
       onClose: () => undefined,
       onDelete: () => undefined,
     }));

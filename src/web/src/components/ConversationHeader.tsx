@@ -19,8 +19,9 @@ export interface ConversationHeaderProps {
   readonly workspace: WorkspaceSummary;
   readonly loading: boolean;
   readonly connected: boolean;
-  readonly actionPending: "close" | "delete" | "rename" | "other" | null;
+  readonly actionPending: "create" | "close" | "delete" | "rename" | "other" | null;
   readonly onRename: (title: string) => Promise<void>;
+  readonly onCreate: () => void;
   readonly onClose: () => void;
   readonly onDelete: () => void;
 }
@@ -60,6 +61,7 @@ export function ConversationHeader({
   connected,
   actionPending,
   onRename,
+  onCreate,
   onClose,
   onDelete,
 }: ConversationHeaderProps) {
@@ -96,6 +98,7 @@ export function ConversationHeader({
         ? "Sandboxed · Managed egress"
         : "Sandboxed · Network isolated"
       : "Unrestricted";
+  const createEnabled = workspace.available && workspace.usable;
   const closeEnabled = conversation !== undefined && canCloseConversation(conversation.status);
   const deleteEnabled = canDeleteConversation(actualStatus);
   const renameEnabled = conversation !== undefined && connected && !loading && actionPending === null;
@@ -219,6 +222,15 @@ export function ConversationHeader({
           </div>
         </dl>
         <div className="conversation-header-actions">
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={!connected || loading || actionPending !== null || !createEnabled}
+            title={createEnabled ? `Start a new conversation in ${workspace.name}` : "This workspace cannot start conversations"}
+            onClick={onCreate}
+          >
+            {actionPending === "create" ? "Creating…" : "New"}
+          </button>
           <button
             className="secondary-button"
             type="button"

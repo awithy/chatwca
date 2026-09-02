@@ -535,14 +535,17 @@ export function App() {
               connected={connected}
               actionPending={pendingAction === null
                 ? null
-                : pendingAction === "conversation.close"
-                  ? "close"
-                  : pendingAction === "conversation.delete"
-                    ? "delete"
-                    : pendingAction === "conversation.rename"
-                      ? "rename"
-                      : "other"}
+                : pendingAction === "conversation.create"
+                  ? "create"
+                  : pendingAction === "conversation.close"
+                    ? "close"
+                    : pendingAction === "conversation.delete"
+                      ? "delete"
+                      : pendingAction === "conversation.rename"
+                        ? "rename"
+                        : "other"}
               onRename={renameConversation}
+              onCreate={() => void createConversation()}
               onClose={() => void closeConversation()}
               onDelete={() => void deleteConversation()}
             />

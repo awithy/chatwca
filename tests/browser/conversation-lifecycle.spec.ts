@@ -54,7 +54,8 @@ test("create, switch, close, reopen, and delete selected-workspace conversations
   alphaRow = sidebarConversations.getByRole("button", { name: /Custom alpha title/ });
   await expect(alphaRow).toBeVisible();
 
-  await createConversation(page);
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "Message" })).toBeEnabled();
   await submitAndWait(page, betaPrompt);
   const betaRow = sidebarConversations.getByRole("button", { name: new RegExp(betaPrompt) });
 

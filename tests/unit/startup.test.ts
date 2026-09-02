@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
@@ -144,6 +144,8 @@ describe("production startup wiring", () => {
 
   it("runs enabled sandbox loading, validation, and functional probing before Pi services and listeners", async () => {
     const root = temporaryDirectory();
+    const hookRoot = path.join(root, "trusted-hooks");
+    mkdirSync(hookRoot);
     const loadedConfig = loadConfig({
       CHATWCA_HOST: "127.0.0.1",
       CHATWCA_PORT: "8787",
@@ -152,6 +154,7 @@ describe("production startup wiring", () => {
       CHATWCA_WORKSPACE_ROOTS: "[]",
       CHATWCA_MANAGED_EGRESS_MODE: "optional",
       CHATWCA_NETWORK_ALLOWED_DOMAINS: '["EXAMPLE.com."]',
+      CHATWCA_JOB_SCRIPT_ROOTS: JSON.stringify([hookRoot]),
       CHATWCA_NETWORK_POLICY_SETS: JSON.stringify([{
         id: "default",
         label: "Example destinations",
@@ -170,8 +173,9 @@ describe("production startup wiring", () => {
         return database;
       },
       loadSandboxWorkerArtifact: async () => { calls.push("worker"); return workerArtifact; },
-      validateNetworkHelper: () => {
+      validateNetworkHelper: (input) => {
         calls.push("network-helper");
+        expect(input.protectedPaths).toContain(realpathSync(hookRoot));
         return {
           path: loadedConfig.managedNetwork.helperPath,
           directory: loadedConfig.managedNetwork.helperDirectory,
@@ -183,8 +187,9 @@ describe("production startup wiring", () => {
         };
       },
       validateSandboxHost: () => { calls.push("validate"); return validatedHost; },
-      runSandboxStartupProbe: async () => {
+      runSandboxStartupProbe: async (input) => {
         calls.push("probe");
+        expect(input.protectedPaths).toEqual([realpathSync(hookRoot)]);
         return { succeeded: true, managedEgressSucceeded: true, bwrapVersion: "bubblewrap 0.6.1", nodeVersion: "v22.19.0", rgVersion: "ripgrep 14.0.0", workerSha256: workerArtifact.sha256 };
       },
       createWorkspaceRepository: (connection) => {
@@ -218,8 +223,8 @@ describe("production startup wiring", () => {
       },
       jobs: {
         schedulerAvailable: true,
-        hooksAvailable: false,
-        scriptRoots: [],
+        hooksAvailable: true,
+        scriptRoots: [realpathSync(hookRoot)],
         minIntervalMinutes: 1,
         maxIntervalMinutes: 525_600,
       },

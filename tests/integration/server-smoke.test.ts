@@ -118,6 +118,18 @@ describe("server shell", () => {
           "Workspace content may still be sent to the configured model provider.",
         functionalProbeSucceeded: false,
       },
+      jobs: {
+        schedulerAvailable: true,
+        hooksAvailable: false,
+        scriptRoots: [],
+        minIntervalMinutes: 1,
+        maxIntervalMinutes: 525_600,
+        supportedTimeZones: expect.arrayContaining(["UTC"]),
+        hostAuthorityWarning:
+          "Pre-run and post-run scripts run on the host with the ChatWCA service user's authority. Configure only trusted scripts.",
+        unattendedUsageWarning:
+          "Scheduled prompts run unattended and may incur provider costs or disclose readable workspace content to the configured model provider.",
+      },
       managedEgress: {
         mode: "disabled",
         selectablePolicies: ["isolated"],

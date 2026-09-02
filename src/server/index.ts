@@ -409,6 +409,7 @@ export interface ChatWcaStartupOptions {
     readonly worker: Readonly<SandboxWorkerArtifact>;
     readonly dataDirectory: string;
     readonly piAgentDirectory: string;
+    readonly protectedPaths?: readonly string[];
     readonly managedNetwork?: {
       readonly config: Readonly<ServerConfig["managedNetwork"]>;
       readonly helper: Readonly<ValidatedNetworkHelper>;
@@ -505,6 +506,7 @@ export async function startChatWcaServer(
           piAgentDirectory,
           ...config.sandbox.workspaceRoots,
           ...config.sandbox.readOnlyMounts.map((mount) => mount.source),
+          ...config.jobs.scriptRoots,
         ],
       });
     }
@@ -524,6 +526,7 @@ export async function startChatWcaServer(
         worker,
         dataDirectory,
         piAgentDirectory,
+        protectedPaths: config.jobs.scriptRoots,
         ...(networkHelper === undefined ? {} : {
           managedNetwork: { config: config.managedNetwork, helper: networkHelper },
         }),
@@ -543,6 +546,7 @@ export async function startChatWcaServer(
           dataDirectory,
           piAgentDirectory,
           readOnlyMounts: loadedConfig.sandbox.readOnlyMounts.map((mount) => mount.source),
+          jobScriptRoots: loadedConfig.jobs.scriptRoots,
           managedEgressMode: loadedConfig.managedNetwork.mode,
           networkHelperPath: loadedConfig.managedNetwork.helperPath,
           networkHelperDirectory: loadedConfig.managedNetwork.helperDirectory,
@@ -563,7 +567,11 @@ export async function startChatWcaServer(
                 config: loadedConfig.sandbox,
                 host: sandboxHost,
                 worker: sandboxWorker,
-                hiddenPaths: [dataDirectory, piAgentDirectory],
+                hiddenPaths: [
+                  dataDirectory,
+                  piAgentDirectory,
+                  ...loadedConfig.jobs.scriptRoots,
+                ],
                 ...(networkHelper === undefined
                   ? {}
                   : {

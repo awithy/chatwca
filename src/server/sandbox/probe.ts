@@ -453,6 +453,8 @@ export async function runSandboxStartupProbe(input: {
   readonly worker: Readonly<SandboxWorkerArtifact>;
   readonly dataDirectory: string;
   readonly piAgentDirectory: string;
+  /** Additional canonical host paths that must be absent inside the sandbox. */
+  readonly protectedPaths?: readonly string[];
   readonly managedNetwork?: {
     readonly config: Readonly<ManagedNetworkConfig>;
     readonly helper: Readonly<ValidatedNetworkHelper>;
@@ -469,6 +471,7 @@ export async function runSandboxStartupProbe(input: {
       await realpath(canary),
       input.dataDirectory,
       input.piAgentDirectory,
+      ...(input.protectedPaths ?? []),
     ];
     await runSandboxWorkerProbe({ ...input, workspace, hiddenPaths });
     if (input.managedNetwork !== undefined) {

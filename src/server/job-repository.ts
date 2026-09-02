@@ -20,6 +20,10 @@ import {
   type JobScheduleInput,
   type JobSummary,
 } from "../shared/jobs.js";
+import type {
+  JobHookPathAdmission,
+  JobHookWorkspacePolicy,
+} from "./job-hook-path.js";
 import {
   advanceJobOccurrence,
   establishJobSchedule,
@@ -112,8 +116,14 @@ export interface JobRepositoryOptions {
     readonly get: (workspaceId: string) => {
       readonly name: string;
       readonly available: boolean;
+      readonly path?: string;
+      readonly mounts?: readonly { readonly source: string }[];
     };
   };
+  /** Canonical hook admission used by trusted create/update callers. */
+  readonly hookPathAdmission?: Pick<JobHookPathAdmission, "validateForConfiguration">;
+  /** Supplies canonical workspace and mount paths for hook admission. */
+  readonly hookWorkspacePolicy?: (workspaceId: string) => Readonly<JobHookWorkspacePolicy>;
   /** Optional Pi-history probe used only by explicit run detail. */
   readonly conversationAvailable?: (conversationId: string) => boolean;
 }
@@ -223,6 +233,8 @@ export class JobRepository {
   readonly #clock: () => number;
   readonly #workspaceStatus: JobRepositoryOptions["workspaceStatus"];
   readonly #conversationAvailable: JobRepositoryOptions["conversationAvailable"];
+  readonly #hookPathAdmission: JobRepositoryOptions["hookPathAdmission"];
+  readonly #hookWorkspacePolicy: JobRepositoryOptions["hookWorkspacePolicy"];
   readonly #statements: {
     readonly listJobs: Database.Statement<[], JobRow>;
     readonly getJob: Database.Statement<[string], JobRow>;
@@ -263,6 +275,18 @@ export class JobRepository {
         ? undefined
         : (workspaceId) => options.workspaceRepository!.get(workspaceId));
     this.#conversationAvailable = options.conversationAvailable;
+    this.#hookPathAdmission = options.hookPathAdmission;
+    this.#hookWorkspacePolicy = options.hookWorkspacePolicy ??
+      (options.hookPathAdmission === undefined || options.workspaceRepository === undefined
+        ? undefined
+        : (workspaceId) => {
+            const workspace = options.workspaceRepository!.get(workspaceId);
+            if (workspace.path === undefined) throw jobInvalid();
+            return { cwd: workspace.path, mounts: workspace.mounts ?? [] };
+          });
+    if ((this.#hookPathAdmission === undefined) !== (this.#hookWorkspacePolicy === undefined)) {
+      throw new TypeError("Hook path admission and workspace policy must be configured together");
+    }
     try {
       this.#statements = {
         listJobs: connection.prepare<[], JobRow>(
@@ -398,8 +422,8 @@ export class JobRepository {
     const name = this.#name(input.name);
     const workspaceId = this.#workspaceId(input.workspaceId);
     const prompt = this.#prompt(input.prompt);
-    const preRunScript = this.#hook(input.preRunScript ?? null);
-    const postRunScript = this.#hook(input.postRunScript ?? null);
+    const preRunScript = this.#hook(input.preRunScript ?? null, workspaceId);
+    const postRunScript = this.#hook(input.postRunScript ?? null, workspaceId);
     if (typeof input.enabled !== "boolean") throw jobInvalid();
     this.#validateHookAcknowledgement(
       preRunScript !== null || postRunScript !== null,
@@ -458,11 +482,11 @@ export class JobRepository {
         : this.#workspaceId(changes.workspaceId);
       const prompt = changes.prompt === undefined ? this.#prompt(current.prompt) : this.#prompt(changes.prompt);
       const preRunScript = changes.preRunScript === undefined
-        ? this.#hook(current.pre_run_script)
-        : this.#hook(changes.preRunScript);
+        ? this.#hook(current.pre_run_script, workspaceId)
+        : this.#hook(changes.preRunScript, workspaceId);
       const postRunScript = changes.postRunScript === undefined
-        ? this.#hook(current.post_run_script)
-        : this.#hook(changes.postRunScript);
+        ? this.#hook(current.post_run_script, workspaceId)
+        : this.#hook(changes.postRunScript, workspaceId);
       const enabled = changes.enabled === undefined ? current.enabled === 1 : changes.enabled;
       if (typeof enabled !== "boolean") throw jobInvalid();
 
@@ -965,9 +989,16 @@ export class JobRepository {
     return value;
   }
 
-  #hook(value: unknown): string | null {
+  #hook(value: unknown, workspaceId: string): string | null {
     if (!validHook(value)) throw jobInvalid();
-    return value;
+    if (value === null) return null;
+    if (this.#hookPathAdmission === undefined || this.#hookWorkspacePolicy === undefined) {
+      throw new AppError(ERROR_CODES.JOB_SCRIPT_ROOTS_UNAVAILABLE);
+    }
+    return this.#hookPathAdmission.validateForConfiguration(
+      value,
+      this.#hookWorkspacePolicy(workspaceId),
+    );
   }
 
   #phase(value: unknown): asserts value is JobRunPhase | null {

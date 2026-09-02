@@ -9,7 +9,11 @@ import path from "node:path";
 
 import type Database from "better-sqlite3";
 
-import { SandboxWorkspaceAdmission } from "./sandbox/admission.js";
+import {
+  SandboxWorkspaceAdmission,
+  canonicalPathsOverlap,
+  isCanonicalPathContained,
+} from "./sandbox/admission.js";
 import {
   AppError,
   ERROR_CODES,
@@ -90,6 +94,8 @@ export interface WorkspacePolicyInputs {
   readonly piAgentDirectory: string;
   /** Canonical read-only mount source paths. */
   readonly readOnlyMounts: readonly string[];
+  /** Canonical trusted hook roots, protected for every workspace profile. */
+  readonly jobScriptRoots?: readonly string[];
   readonly managedEgressMode?: ManagedEgressMode;
   readonly networkHelperPath?: string;
   readonly networkHelperDirectory?: string;
@@ -163,19 +169,6 @@ export interface UpdateWorkspaceInput {
   readonly acknowledgeSecurityDowngrade?: true;
   readonly acknowledgeNetworkExposure?: true;
   readonly acknowledgeWritableMounts?: true;
-}
-
-function isPathContained(parent: string, child: string): boolean {
-  const relative = path.relative(parent, child);
-  return relative === "" || (
-    relative !== ".." &&
-    !relative.startsWith(`..${path.sep}`) &&
-    !path.isAbsolute(relative)
-  );
-}
-
-function pathsOverlap(left: string, right: string): boolean {
-  return isPathContained(left, right) || isPathContained(right, left);
 }
 
 function workspaceFromRow(row: WorkspaceRow, mounts: readonly WorkspaceMount[]): Workspace {
@@ -263,6 +256,7 @@ export class WorkspaceRepository {
   readonly #listMountsStatement: Database.Statement<[string], WorkspaceMountRow>;
   readonly #insertMountStatement: Database.Statement<[string, string, string, WorkspaceMountAccess]>;
   readonly #deleteMountsStatement: Database.Statement<[string]>;
+  readonly #referencingJobStatement: Database.Statement<[string], { readonly found: number }>;
 
   constructor(
     connection: Database.Database,
@@ -278,6 +272,7 @@ export class WorkspaceRepository {
       ...suppliedPolicy,
       workspaceRoots: Object.freeze([...suppliedPolicy.workspaceRoots]),
       readOnlyMounts: Object.freeze([...suppliedPolicy.readOnlyMounts]),
+      jobScriptRoots: Object.freeze([...(suppliedPolicy.jobScriptRoots ?? [])]),
       managedEgressMode: suppliedPolicy.managedEgressMode ?? "disabled",
     });
     this.#networkPolicySets = new Map(
@@ -313,6 +308,9 @@ export class WorkspaceRepository {
       );
       this.#deleteMountsStatement = connection.prepare<[string]>(
         "DELETE FROM workspace_mounts WHERE workspace_id = ?",
+      );
+      this.#referencingJobStatement = connection.prepare<[string], { readonly found: number }>(
+        "SELECT 1 AS found FROM jobs WHERE workspace_id = ? LIMIT 1",
       );
     } catch (error) {
       throw toAppError(error, { source: "database" });
@@ -659,6 +657,9 @@ export class WorkspaceRepository {
 
   delete(workspaceId: string): void {
     this.#database(() => {
+      if (this.#referencingJobStatement.get(workspaceId) !== undefined) {
+        throw new AppError(ERROR_CODES.WORKSPACE_BUSY);
+      }
       const result = this.#deleteStatement.run(workspaceId);
       if (result.changes !== 1) {
         throw new AppError(ERROR_CODES.WORKSPACE_NOT_FOUND);
@@ -727,9 +728,9 @@ export class WorkspaceRepository {
             (candidate.access === "read-write" ? fsConstants.W_OK : 0),
         );
         if (
-          pathsOverlap(source, workspacePath) ||
-          this.#protectedPaths().some((protectedPath) => pathsOverlap(source, protectedPath)) ||
-          mounts.some((mount) => pathsOverlap(source, mount.source))
+          canonicalPathsOverlap(source, workspacePath) ||
+          this.#protectedPaths().some((protectedPath) => canonicalPathsOverlap(source, protectedPath)) ||
+          mounts.some((mount) => canonicalPathsOverlap(source, mount.source))
         ) {
           throw new Error("mount source overlaps another admitted path");
         }
@@ -927,6 +928,7 @@ export class WorkspaceRepository {
       this.#policy.dataDirectory,
       this.#policy.piAgentDirectory,
       ...this.#policy.readOnlyMounts,
+      ...(this.#policy.jobScriptRoots ?? []),
     ];
     if (this.#policy.managedEgressMode === "optional") {
       if (this.#policy.networkHelperPath !== undefined) {
@@ -986,21 +988,34 @@ export class WorkspaceRepository {
     if (
       policyIssue === null &&
       this.#policy.workspaceRoots.length > 0 &&
-      !this.#policy.workspaceRoots.some((root) => isPathContained(root, workspace.path))
+      !this.#policy.workspaceRoots.some((root) => isCanonicalPathContained(root, workspace.path))
     ) {
       policyIssue = "outside_workspace_roots";
     }
 
+    // Trusted hook roots are protected even for an unrestricted definition.
+    // A later profile switch must never turn a pre-existing overlap into tool
+    // authority over a hook, and unrestricted Pi tools can write the workspace.
+    if (
+      policyIssue === null &&
+      (this.#policy.jobScriptRoots ?? []).some((scriptRoot) =>
+        canonicalPathsOverlap(workspace.path, scriptRoot) ||
+        workspace.mounts.some((mount) => canonicalPathsOverlap(mount.source, scriptRoot))
+      )
+    ) {
+      policyIssue = "protected_path_overlap";
+    }
+
     if (policyIssue === null && effectiveSecurityProfile === "workspace-sandboxed") {
       const mountOverlap = workspace.mounts.some((mount, index) =>
-        pathsOverlap(workspace.path, mount.source) ||
-        this.#protectedPaths().some((protectedPath) => pathsOverlap(mount.source, protectedPath)) ||
+        canonicalPathsOverlap(workspace.path, mount.source) ||
+        this.#protectedPaths().some((protectedPath) => canonicalPathsOverlap(mount.source, protectedPath)) ||
         workspace.mounts.some((other, otherIndex) =>
-          index !== otherIndex && pathsOverlap(mount.source, other.source)
+          index !== otherIndex && canonicalPathsOverlap(mount.source, other.source)
         )
       );
       if (
-        this.#protectedPaths().some((protectedPath) => pathsOverlap(workspace.path, protectedPath)) ||
+        this.#protectedPaths().some((protectedPath) => canonicalPathsOverlap(workspace.path, protectedPath)) ||
         mountOverlap
       ) {
         policyIssue = "protected_path_overlap";

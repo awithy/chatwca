@@ -22,6 +22,8 @@ function makeRepository(options: ConstructorParameters<typeof JobRepository>[1] 
   return new JobRepository(database.connection, {
     uuid: () => `id-${++sequence}`,
     clock: () => now,
+    hookPathAdmission: { validateForConfiguration: (scriptPath) => scriptPath },
+    hookWorkspacePolicy: () => ({ cwd: "/workspace-1", mounts: [] }),
     ...options,
   });
 }
@@ -78,6 +80,19 @@ describe("JobRepository definitions", () => {
   });
 
   it("validates fields, workspace references, and host-hook acknowledgement", () => {
+    const hooksDisabled = new JobRepository(database.connection, {
+      uuid: () => "disabled-hook-job",
+      clock: () => now,
+    });
+    expectCode(() => hooksDisabled.create({
+      name: "Disabled hooks",
+      workspaceId: "workspace-1",
+      prompt: "Run",
+      schedule: { kind: "interval", intervalMinutes: 1 },
+      preRunScript: "/trusted/pre.sh",
+      enabled: false,
+      acknowledgeHostHooks: true,
+    }), ERROR_CODES.JOB_SCRIPT_ROOTS_UNAVAILABLE);
     expectCode(() => createInterval({ name: "  " }), ERROR_CODES.JOB_INVALID);
     expectCode(() => createInterval({ prompt: "\n\t" }), ERROR_CODES.JOB_INVALID);
     expectCode(() => createInterval({ workspaceId: "missing" }), ERROR_CODES.JOB_INVALID);

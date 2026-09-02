@@ -598,7 +598,11 @@ export async function startChatWcaServer(
           (byId?.sessionFile === identity.sessionFile ? byId : undefined);
         return record === undefined
           ? undefined
-          : { workspaceId: record.workspaceId, status: record.status };
+          : {
+              workspaceId: record.workspaceId,
+              status: record.status,
+              ...(record.owner === undefined ? {} : { owner: record.owner }),
+            };
       },
     });
     registry = new ConversationRegistry({

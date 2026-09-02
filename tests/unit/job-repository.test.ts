@@ -244,6 +244,22 @@ describe("JobRepository claims and transitions", () => {
     expect(repository.get(job.id).lastRun?.revision).toBe(5);
   });
 
+  it("allows a running attempt to CAS to skipped when runtime capacity admission fails", () => {
+    const job = createInterval();
+    const claim = repository.claimManual(job.id);
+    const running = repository.startRun(job.id, claim.run.id, null, 1_100, 0);
+    const skipped = repository.finishRun(job.id, claim.run.id, {
+      status: "skipped",
+      errorCode: ERROR_CODES.LIVE_RUNTIME_LIMIT,
+      expectedRevision: running.revision,
+    });
+    expect(skipped).toMatchObject({
+      status: "skipped",
+      errorCode: ERROR_CODES.LIVE_RUNTIME_LIMIT,
+      revision: 2,
+    });
+  });
+
   it("stores post-hook diagnostics only in detail, not summaries", () => {
     const job = createInterval();
     const claim = repository.claimManual(job.id);

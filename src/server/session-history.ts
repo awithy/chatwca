@@ -13,6 +13,7 @@ import {
   toAppError,
 } from "../shared/errors.js";
 import type {
+  ConversationOwner,
   ConversationSummary,
   LiveConversationStatus,
 } from "../shared/protocol.js";
@@ -38,6 +39,7 @@ export type SessionHistoryLiveStatus = LiveConversationStatus;
 export interface SessionHistoryLiveRecord {
   readonly workspaceId: string;
   readonly status: SessionHistoryLiveStatus;
+  readonly owner?: ConversationOwner;
 }
 /** Return only a live record matching the supplied session ID or canonical file. */
 export type SessionHistoryLiveStatusLookup = (
@@ -300,6 +302,7 @@ export class SessionHistory {
       liveRecord?.workspaceId === workspace.id
         ? liveRecord.status
         : undefined;
+    const liveOwner = liveStatus === undefined ? undefined : liveRecord?.owner;
     const createdAt = timestamp(info.created);
     const modifiedAt = timestamp(info.modified) ?? createdAt ?? 0;
     const summary: ConversationSummary = {
@@ -313,6 +316,7 @@ export class SessionHistory {
       messageCount: Math.max(0, Math.trunc(info.messageCount)),
       status: summaryStatus(liveStatus),
       runnable: true,
+      ...(liveOwner === undefined ? {} : { owner: liveOwner }),
     };
     return { info, summary };
   }

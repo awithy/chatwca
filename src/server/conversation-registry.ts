@@ -20,7 +20,9 @@ import {
   NETWORK_POLICY_SET_ID_PATTERN,
 } from "../shared/protocol.js";
 import type {
+  AssistantMessage,
   ConversationEvent,
+  ConversationOwner,
   ConversationState,
   ImageMimeType,
   LiveConversationStatus,
@@ -68,7 +70,23 @@ type RegistryConversationEvent = NormalizedPiEvent | {
   readonly payload: NetworkBlockedPayload;
 };
 
-export type ConversationRegistrationSource = "create" | "open" | "fork";
+export type ConversationRegistrationSource = "create" | "open" | "fork" | "job";
+
+/** Opaque reservation counted against the process-global live-runtime limit. */
+export interface RuntimeCapacityLease {
+  /** Convert this reservation into one registered runtime. Idempotent. */
+  promote(): void;
+  /** Release an unpromoted reservation. Idempotent. */
+  release(): void;
+}
+
+export type JobPromptCompletion =
+  | { readonly kind: "succeeded"; readonly assistant: AssistantMessage }
+  | { readonly kind: "failed"; readonly assistant: AssistantMessage }
+  | { readonly kind: "aborted"; readonly assistant?: AssistantMessage }
+  | { readonly kind: "runtime-failure"; readonly error: AppError };
+
+export type JobConversationAbortListener = (owner: ConversationOwner) => void;
 
 /** Repository-resolved, canonical ownership supplied by trusted server code. */
 export type ConversationWorkspace = Readonly<RuntimeWorkspacePolicy>;
@@ -106,6 +124,8 @@ export interface ConversationRecord {
   readonly effectiveNetworkPolicySetId: string | null;
   /** Exact immutable compiled grant owned by this live runtime. Never projected. */
   readonly networkPolicySet: Readonly<CompiledNetworkPolicySet> | null;
+  /** Live trusted-service ownership. It is attached before registration emits. */
+  readonly owner?: ConversationOwner;
   /** Locks terminal runtime failures against later Pi idle events. */
   runtimeFailureTerminal: boolean;
   sessionFile: string;
@@ -300,6 +320,12 @@ export class ConversationRegistry {
   readonly #fatalUnsubscribes = new WeakMap<ConversationRecord, () => void>();
   readonly #blockedUnsubscribes = new WeakMap<ConversationRecord, () => void>();
   readonly #normalizers = new WeakMap<ConversationRecord, PiEventNormalizer>();
+  readonly #capacityLeases = new WeakMap<RuntimeCapacityLease, {
+    state: "reserved" | "promoted" | "released";
+    readonly releaseCapacity: () => void;
+  }>();
+  readonly #jobAbortListeners = new Set<JobConversationAbortListener>();
+  readonly #jobAbortRequested = new WeakSet<ConversationRecord>();
   #capacityReservations = 0;
   #capacityTail = Promise.resolve();
   #shuttingDown = false;
@@ -357,6 +383,17 @@ export class ConversationRegistry {
     };
   }
 
+  /** Observe browser/operator aborts of active job-owned conversations. */
+  subscribeJobAborts(listener: JobConversationAbortListener): () => void {
+    this.#jobAbortListeners.add(listener);
+    return () => this.#jobAbortListeners.delete(listener);
+  }
+
+  /** Return only the safe live owner identifiers. */
+  getActiveOwner(conversationId: string): ConversationOwner | undefined {
+    return this.#byId.get(conversationId)?.owner;
+  }
+
   get shuttingDown(): boolean {
     return this.#shuttingDown;
   }
@@ -373,6 +410,54 @@ export class ConversationRegistry {
       this.records.filter(isBusy).map((record) => this.abort(record.id)),
     ).then(() => undefined);
     return this.#abortActivePromise;
+  }
+
+  /** Reserve capacity before a job performs any host-side hook effects. */
+  async reserveRuntimeCapacity(): Promise<RuntimeCapacityLease> {
+    this.#assertAcceptingWork();
+    const releaseCapacity = await this.#reserveCapacity();
+    let lease!: RuntimeCapacityLease;
+    lease = Object.freeze({
+      promote: () => this.#settleCapacityLease(lease, "promoted"),
+      release: () => this.#settleCapacityLease(lease, "released"),
+    });
+    this.#capacityLeases.set(lease, { state: "reserved", releaseCapacity });
+    return lease;
+  }
+
+  /**
+   * Consume a capacity lease and atomically register a fresh persistent runtime
+   * with its scheduled-run owner before observers can see it.
+   */
+  async createJobConversation(
+    workspace: ConversationWorkspace,
+    ownerInput: ConversationOwner,
+    lease: RuntimeCapacityLease,
+  ): Promise<ConversationRecord> {
+    this.#assertAcceptingWork();
+    const ownership = this.#normalizePolicy(workspace);
+    const owner = this.#normalizeOwner(ownerInput);
+    this.#requireReservedLease(lease);
+    let runtime: PiConversationRuntimePort | undefined;
+    try {
+      runtime = await this.#runtimeFactory.createPersistent(ownership);
+      this.#assertAcceptingWork();
+      const record = await this.#register(
+        runtime,
+        ownership,
+        "job",
+        () => lease.promote(),
+        owner,
+      );
+      await this.#refreshHistory(record.workspaceId);
+      return record;
+    } catch (error) {
+      lease.release();
+      if (runtime !== undefined && !runtime.disposed) {
+        await this.#disposeRuntime(runtime).catch(() => undefined);
+      }
+      throw error;
+    }
   }
 
   async create(workspace: ConversationWorkspace): Promise<ConversationRecord> {
@@ -488,6 +573,7 @@ export class ConversationRegistry {
       networkPolicy: record.networkPolicy,
       networkPolicySetId: record.networkPolicySetId,
       effectiveNetworkPolicySetId: record.effectiveNetworkPolicySetId,
+      ...(record.owner === undefined ? {} : { owner: record.owner }),
     };
   }
 
@@ -495,6 +581,7 @@ export class ConversationRegistry {
   async rename(conversationId: string, title: string): Promise<ConversationState> {
     this.#assertAcceptingWork();
     const record = this.#required(conversationId);
+    this.#assertInteractiveMutation(record);
     if (this.#pendingCloses.has(record)) {
       throw new AppError(ERROR_CODES.CONVERSATION_BUSY);
     }
@@ -685,6 +772,83 @@ export class ConversationRegistry {
     }
   }
 
+  /** Persist the server-generated title for exactly the owning job run. */
+  async setJobConversationTitle(
+    conversationId: string,
+    owner: ConversationOwner,
+    title: string,
+  ): Promise<void> {
+    this.#assertAcceptingWork();
+    const record = this.#requiredOwned(conversationId, owner);
+    const normalized = title.trim();
+    if (normalized.length === 0) throw new AppError(ERROR_CODES.JOB_INVALID);
+    const previousTitle = record.title;
+    try {
+      record.session.sessionManager.appendSessionInfo(normalized);
+    } catch (error) {
+      throw toAppError(error, { source: "filesystem", target: "session" });
+    }
+    this.#touch(record);
+    await this.#refreshDurability(record);
+    if (record.title === previousTitle) await this.#refreshHistory(record.workspaceId);
+  }
+
+  /**
+   * Run the saved prompt for exactly the owning run and await Pi completion.
+   * Unlike browser prompt(), this deliberately does not acknowledge at preflight.
+   */
+  async runJobPrompt(
+    conversationId: string,
+    owner: ConversationOwner,
+    text: string,
+  ): Promise<JobPromptCompletion> {
+    this.#assertAcceptingWork();
+    const record = this.#requiredOwned(conversationId, owner);
+    if (record.status !== "idle" || record.session.isStreaming || !text.trim()) {
+      throw new AppError(ERROR_CODES.CONVERSATION_BUSY);
+    }
+    this.#touch(record);
+    try {
+      await record.runtime.prompt(text);
+    } catch (error) {
+      if (this.#jobAbortRequested.has(record)) return { kind: "aborted" };
+      return {
+        kind: "runtime-failure",
+        error: toAppError(error, { source: "pi", operation: "model" }),
+      };
+    }
+
+    const assistant = serializeActiveBranch(record.session.sessionManager)
+      .filter((message): message is AssistantMessage => message.role === "assistant")
+      .findLast((message) => message.stopReason !== undefined || message.error !== undefined);
+    if (this.#jobAbortRequested.has(record) || assistant?.stopReason === "aborted") {
+      return assistant === undefined ? { kind: "aborted" } : { kind: "aborted", assistant };
+    }
+    if (assistant?.error !== undefined || assistant?.stopReason === "error") {
+      return { kind: "failed", assistant };
+    }
+    if (
+      record.runtimeFailureTerminal ||
+      assistant === undefined ||
+      (assistant.stopReason !== "stop" && assistant.stopReason !== "length")
+    ) {
+      return {
+        kind: "runtime-failure",
+        error: new AppError(ERROR_CODES.JOB_PROMPT_FAILED),
+      };
+    }
+    return { kind: "succeeded", assistant };
+  }
+
+  /** Release ownership by disposing the runtime while retaining Pi history. */
+  async releaseJobConversation(
+    conversationId: string,
+    owner: ConversationOwner,
+  ): Promise<void> {
+    const record = this.#requiredOwned(conversationId, owner);
+    await this.#disposeRecord(record, "close");
+  }
+
   /** Deliver a validated text/image prompt using Pi's explicit streaming behavior. */
   async prompt(
     conversationId: string,
@@ -694,6 +858,7 @@ export class ConversationRegistry {
   ): Promise<void> {
     this.#assertAcceptingWork();
     const record = this.#required(conversationId);
+    this.#assertInteractiveMutation(record);
     const streaming =
       record.status === "streaming" || record.session.isStreaming;
     if (
@@ -906,6 +1071,12 @@ export class ConversationRegistry {
   /** Request cancellation of an active run. Concurrent repeats share one abort. */
   async abort(conversationId: string): Promise<void> {
     const record = this.#required(conversationId);
+    if (record.owner !== undefined && !this.#jobAbortRequested.has(record)) {
+      this.#jobAbortRequested.add(record);
+      for (const listener of this.#jobAbortListeners) {
+        try { listener(record.owner); } catch (error) { this.#onListenerError(error); }
+      }
+    }
     const pending = this.#pendingAborts.get(record);
     if (pending !== undefined) return pending;
     if (!isBusy(record)) return;
@@ -947,6 +1118,7 @@ export class ConversationRegistry {
   /** Close one idle/error conversation while retaining its persisted history. */
   async close(conversationId: string): Promise<void> {
     const record = this.#required(conversationId);
+    this.#assertInteractiveMutation(record);
     if (isBusy(record) || this.#hasForkReservation(record)) {
       throw new AppError(ERROR_CODES.CONVERSATION_BUSY);
     }
@@ -971,6 +1143,7 @@ export class ConversationRegistry {
       // teardown and must not retain protocol/client objects if an SDK dispose
       // promise stalls.
       this.#listeners.clear();
+      this.#jobAbortListeners.clear();
       await Promise.allSettled(disposals);
       for (const workspaceId of workspaceIds) {
         await this.#refreshHistory(workspaceId);
@@ -1074,6 +1247,7 @@ export class ConversationRegistry {
     workspace: ConversationWorkspace,
     source: ConversationRegistrationSource,
     onRegistered?: () => void,
+    owner?: ConversationOwner,
   ): Promise<ConversationRecord> {
     this.#assertAcceptingWork();
     const identity = runtime.identity;
@@ -1092,6 +1266,7 @@ export class ConversationRegistry {
       this.#byId.get(identity.sessionId) ?? this.#bySessionFile.get(sessionFile);
     if (duplicate !== undefined) {
       await this.#disposeRuntime(runtime);
+      if (owner !== undefined) throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
       this.#assertWorkspaceOwner(duplicate, workspace);
       this.#touch(duplicate);
       return duplicate;
@@ -1108,6 +1283,7 @@ export class ConversationRegistry {
       networkPolicySetId: workspace.networkPolicySetId,
       effectiveNetworkPolicySetId: workspace.effectiveNetworkPolicySetId,
       networkPolicySet: workspace.networkPolicySet,
+      ...(owner === undefined ? {} : { owner }),
       runtimeFailureTerminal: false,
       sessionFile,
       cwd: workspace.cwd,
@@ -1129,6 +1305,7 @@ export class ConversationRegistry {
       this.#byId.get(record.id) ?? this.#bySessionFile.get(record.sessionFile);
     if (raced !== undefined) {
       await this.#disposeRuntime(runtime);
+      if (owner !== undefined) throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
       this.#assertWorkspaceOwner(raced, workspace);
       this.#touch(raced);
       return raced;
@@ -1265,6 +1442,54 @@ export class ConversationRegistry {
     }
   }
 
+  #normalizeOwner(owner: ConversationOwner): ConversationOwner {
+    if (
+      owner.kind !== "scheduled-job" || typeof owner.jobId !== "string" ||
+      owner.jobId.length === 0 || owner.jobId.length > 512 ||
+      typeof owner.runId !== "string" || owner.runId.length === 0 || owner.runId.length > 512
+    ) {
+      throw new AppError(ERROR_CODES.JOB_INVALID);
+    }
+    return Object.freeze({ kind: "scheduled-job", jobId: owner.jobId, runId: owner.runId });
+  }
+
+  #settleCapacityLease(
+    lease: RuntimeCapacityLease,
+    state: "promoted" | "released",
+  ): void {
+    const tracked = this.#capacityLeases.get(lease);
+    if (tracked === undefined) throw new AppError(ERROR_CODES.INTERNAL_ERROR);
+    if (tracked.state !== "reserved") return;
+    tracked.state = state;
+    tracked.releaseCapacity();
+  }
+
+  #requireReservedLease(lease: RuntimeCapacityLease): void {
+    if (this.#capacityLeases.get(lease)?.state !== "reserved") {
+      throw new AppError(ERROR_CODES.LIVE_RUNTIME_LIMIT);
+    }
+  }
+
+  #assertInteractiveMutation(record: ConversationRecord): void {
+    if (record.owner !== undefined) throw new AppError(ERROR_CODES.CONVERSATION_BUSY);
+  }
+
+  #requiredOwned(
+    conversationId: string,
+    ownerInput: ConversationOwner,
+  ): ConversationRecord {
+    const record = this.#required(conversationId);
+    const owner = this.#normalizeOwner(ownerInput);
+    if (
+      record.owner?.kind !== "scheduled-job" ||
+      record.owner.jobId !== owner.jobId || record.owner.runId !== owner.runId ||
+      this.#pendingCloses.has(record)
+    ) {
+      throw new AppError(ERROR_CODES.JOB_BUSY);
+    }
+    return record;
+  }
+
   #assertAcceptingWork(): void {
     if (this.#shuttingDown) {
       throw new AppError(ERROR_CODES.SHUTTING_DOWN);
@@ -1326,6 +1551,7 @@ export class ConversationRegistry {
   }
 
   #assertForkSource(record: ConversationRecord, entryId: string): void {
+    this.#assertInteractiveMutation(record);
     if (
       record.status !== "idle" ||
       record.session.isStreaming ||

@@ -1771,6 +1771,129 @@ describe("ConversationRegistry", () => {
     expect(factory.openPersistent).toHaveBeenCalledOnce();
   });
 
+  it("atomically owns job conversations, holds capacity, and releases them as ordinary history", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessions = path.join(root, "sessions");
+    await Promise.all([mkdir(cwd), mkdir(sessions)]);
+    const runtime = new FakeRuntime(
+      identity("job-conversation", path.join(sessions, "job.jsonl"), cwd),
+    );
+    const interactive = new FakeRuntime(
+      identity("interactive", path.join(sessions, "interactive.jsonl"), cwd),
+    );
+    const factory = new FakeFactory();
+    factory.createPersistent
+      .mockResolvedValueOnce(runtime)
+      .mockResolvedValueOnce(interactive);
+    const registry = new ConversationRegistry({ runtimeFactory: factory, maxLiveConversations: 1 });
+    const events: ConversationRegistryEvent[] = [];
+    registry.subscribe((event) => events.push(event));
+    const lease = await registry.reserveRuntimeCapacity();
+
+    await expect(registry.create(ownership(cwd))).rejects.toMatchObject({
+      code: ERROR_CODES.LIVE_RUNTIME_LIMIT,
+    });
+    expect(factory.createPersistent).not.toHaveBeenCalled();
+
+    const owner = { kind: "scheduled-job", jobId: "job-1", runId: "run-1" } as const;
+    const record = await registry.createJobConversation(ownership(cwd, "workspace-1"), owner, lease);
+    expect(events[0]).toMatchObject({
+      type: "conversation.registered",
+      source: "job",
+      record: { owner },
+    });
+    await expect(registry.getState(record.id)).resolves.toMatchObject({ owner });
+    expect(registry.getActiveOwner(record.id)).toEqual(owner);
+
+    await registry.setJobConversationTitle(record.id, owner, "[Job] Report — now");
+    expect(runtime.session.sessionManager.getSessionName()).toBe("[Job] Report — now");
+    await expect(registry.rename(record.id, "browser title")).rejects.toMatchObject({
+      code: ERROR_CODES.CONVERSATION_BUSY,
+    });
+    await expect(registry.prompt(record.id, "browser prompt", [])).rejects.toMatchObject({
+      code: ERROR_CODES.CONVERSATION_BUSY,
+    });
+    await expect(registry.close(record.id)).rejects.toMatchObject({
+      code: ERROR_CODES.CONVERSATION_BUSY,
+    });
+
+    await registry.releaseJobConversation(record.id, owner);
+    expect(registry.getActiveOwner(record.id)).toBeUndefined();
+    await expect(registry.create(ownership(cwd, "workspace-1"))).resolves.toMatchObject({ id: "interactive" });
+  });
+
+  it("uses the existing idle LRU eviction rules for job capacity leases", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessions = path.join(root, "sessions");
+    await Promise.all([mkdir(cwd), mkdir(sessions)]);
+    const older = new FakeRuntime(identity("older", path.join(sessions, "older.jsonl"), cwd));
+    const newer = new FakeRuntime(identity("newer", path.join(sessions, "newer.jsonl"), cwd));
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValueOnce(older).mockResolvedValueOnce(newer);
+    let now = 10;
+    const registry = new ConversationRegistry({
+      runtimeFactory: factory,
+      maxLiveConversations: 2,
+      now: () => now++,
+    });
+    const first = await registry.create(ownership(cwd));
+    const second = await registry.create(ownership(cwd));
+    await registry.getState(second.id);
+
+    const lease = await registry.reserveRuntimeCapacity();
+    expect(older.disposed).toBe(true);
+    expect(newer.disposed).toBe(false);
+    expect(registry.records).toEqual([second]);
+    second.status = "streaming";
+    await expect(registry.reserveRuntimeCapacity()).rejects.toMatchObject({
+      code: ERROR_CODES.LIVE_RUNTIME_LIMIT,
+    });
+    lease.release();
+    expect(first.id).toBe("older");
+  });
+
+  it("classifies job prompt completion and routes external abort to its owner", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessions = path.join(root, "sessions");
+    await Promise.all([mkdir(cwd), mkdir(sessions)]);
+    const branch = [{
+      type: "message",
+      id: "assistant-1",
+      message: { role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" },
+    }];
+    const runtime = new FakeRuntime(
+      identity("job-prompt", path.join(sessions, "job.jsonl"), cwd),
+      { branch },
+    );
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(runtime);
+    const registry = new ConversationRegistry({ runtimeFactory: factory });
+    const owner = { kind: "scheduled-job", jobId: "job-1", runId: "run-1" } as const;
+    const record = await registry.createJobConversation(
+      ownership(cwd, "workspace-1"), owner, await registry.reserveRuntimeCapacity(),
+    );
+
+    await expect(registry.runJobPrompt(record.id, owner, "saved prompt")).resolves.toMatchObject({
+      kind: "succeeded",
+      assistant: { stopReason: "stop" },
+    });
+    (branch[0]!.message as { stopReason: string }).stopReason = "error";
+    await expect(registry.runJobPrompt(record.id, owner, "saved prompt")).resolves.toMatchObject({
+      kind: "failed",
+    });
+
+    const aborted: unknown[] = [];
+    registry.subscribeJobAborts((value) => aborted.push(value));
+    record.status = "streaming";
+    await registry.abort(record.id);
+    await registry.abort(record.id);
+    expect(aborted).toEqual([owner]);
+    expect(runtime.abortSpy).toHaveBeenCalledOnce();
+  });
+
   it("validates the configured live-runtime limit", () => {
     const factory = new FakeFactory();
     expect(

@@ -706,7 +706,7 @@ export class JobRepository {
     const expectedStatuses: readonly JobRunStatus[] = input.status === "interrupted"
       ? ["queued", "running"]
       : input.status === "skipped"
-        ? ["queued"]
+        ? ["queued", "running"]
         : ["running"];
     return this.#mutateRun(jobId, runId, expectedStatuses, input.expectedRevision, (row) =>
       this.#statements.finishRun.run(

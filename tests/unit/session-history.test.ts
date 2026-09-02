@@ -112,7 +112,11 @@ describe("SessionHistory", () => {
       listSessions,
       getLiveStatus: ({ id }) =>
         id === "a-tie"
-          ? { workspaceId: workspaceA.id, status: "aborting" }
+          ? {
+              workspaceId: workspaceA.id,
+              status: "aborting",
+              owner: { kind: "scheduled-job", jobId: "job-1", runId: "run-1" },
+            }
           : id === "older"
             ? { workspaceId: workspaceA.id, status: "idle" }
             : id === "z-tie"
@@ -134,11 +138,13 @@ describe("SessionHistory", () => {
       title: "Explicit Pi name",
       status: "streaming",
       runnable: true,
+      owner: { kind: "scheduled-job", jobId: "job-1", runId: "run-1" },
     });
     expect(snapshot.conversations[1]).toMatchObject({
       id: "z-tie",
       status: "closed",
     });
+    expect(snapshot.conversations[1]).not.toHaveProperty("owner");
     expect(snapshot.conversations[2]).toMatchObject({
       title: "fallback prompt",
       status: "idle",

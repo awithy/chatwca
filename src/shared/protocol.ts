@@ -418,6 +418,13 @@ export const WorkspaceSummarySchema = strictObject({
 });
 export type WorkspaceSummary = Static<typeof WorkspaceSummarySchema>;
 
+export const ConversationOwnerSchema = strictObject({
+  kind: Type.Literal("scheduled-job"),
+  jobId: IdentifierSchema,
+  runId: IdentifierSchema,
+});
+export type ConversationOwner = Static<typeof ConversationOwnerSchema>;
+
 export const ConversationSummarySchema = strictObject({
   id: IdentifierSchema,
   workspaceId: IdentifierSchema,
@@ -434,6 +441,8 @@ export const ConversationSummarySchema = strictObject({
     Type.Literal("error"),
   ]),
   runnable: Type.Boolean(),
+  /** Present only while a scheduled run owns the live runtime. */
+  owner: Type.Optional(ConversationOwnerSchema),
 });
 export type ConversationSummary = Static<typeof ConversationSummarySchema>;
 
@@ -476,6 +485,8 @@ export const ConversationStateSchema = strictObject({
   networkPolicy: Type.Union([SandboxNetworkPolicySchema, Type.Null()]),
   networkPolicySetId: NetworkPolicySetIdSchema,
   effectiveNetworkPolicySetId: Type.Union([NetworkPolicySetIdSchema, Type.Null()]),
+  /** Safe live ownership; closed persisted sessions have no owner. */
+  owner: Type.Optional(ConversationOwnerSchema),
 });
 export type ConversationState = Static<typeof ConversationStateSchema>;
 

@@ -2,9 +2,6 @@
 
 ChatWCA is a single-user, dark-only web interface for the [Pi coding agent](https://pi.dev/). A Node.js server runs the pinned `@earendil-works/pi-coding-agent` SDK in-process and serves a React client over HTTP and WebSocket.
 
-> [!CAUTION]
-> **ChatWCA has no authentication or authorization.** It listens on `0.0.0.0` by default, and every accepted client has full ChatWCA authority: it can operate Pi, access configured conversations, and request tools. Prefer `CHATWCA_HOST=127.0.0.1` behind an authenticated mTLS reverse proxy. If binding to a LAN address, isolate the port with host/network firewall rules on a trusted, segmented LAN. Do not expose it directly to the public internet or an untrusted network. Bubblewrap workspace sandboxing limits tool authority; it does not authenticate clients.
-
 ![ChatWCA web interface showing workspaces, conversations, and a Pi coding session](docs/assets/chatwca-interface.png)
 
 ## Requirements

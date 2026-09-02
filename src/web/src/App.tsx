@@ -11,12 +11,12 @@ import {
 import { useChatSocket } from "./api/index.js";
 import { Composer } from "./components/Composer.js";
 import { ConversationHeader } from "./components/ConversationHeader.js";
+import { WorkspaceConversationPicker } from "./components/WorkspaceConversationPicker.js";
 import { WorkspaceSidebar } from "./components/WorkspaceSidebar.js";
 import type { WorkspaceFormValues } from "./components/WorkspaceForm.js";
 import { MessageTimeline } from "./components/MessageTimeline.js";
 import { NetworkBlockedNotices } from "./components/NetworkBlockedNotices.js";
 import type { PromptAction } from "./components/chat-interactions.js";
-import { orderConversations } from "./components/conversation-list.js";
 
 interface HealthResponse {
   readonly ready: boolean;
@@ -229,20 +229,13 @@ export function App() {
   }
 
   async function changeWorkspace(workspaceId: string): Promise<void> {
-    const changed = client.getState().selectedWorkspaceId !== workspaceId;
     setConversationError(null);
     setLoadingConversationId(null);
+    if (client.getState().selectedWorkspaceId === workspaceId) {
+      client.selectConversation(null);
+      return;
+    }
     await client.selectWorkspace(workspaceId);
-    if (!changed) return;
-
-    const state = client.getState();
-    if (
-      state.selectedWorkspaceId !== workspaceId ||
-      state.historyWorkspaceId !== workspaceId
-    ) return;
-
-    const latest = orderConversations(state.history)[0];
-    if (latest !== undefined) selectConversation(latest);
   }
 
   function selectConversation(summary: ConversationSummary): void {
@@ -489,31 +482,15 @@ export function App() {
           <span className={`connection-dot${connected ? " is-connected" : ""}`} title={connected ? "Connected" : "Disconnected"} />
         </div>
 
-        {selectedSummary === undefined || selectedWorkspace === undefined ? (
+        {selectedWorkspace === undefined ? (
           <section className="welcome-panel">
             <div className="welcome-mark" aria-hidden="true">W</div>
             <p className="eyebrow">Pi coding agent</p>
-            <h1>
-              {chat.workspaces.length === 0
-                ? "Add your first workspace"
-                : selectedWorkspace === undefined
-                  ? "Select a workspace"
-                  : selectedWorkspaceUnavailable
-                    ? "Workspace unavailable"
-                    : selectedWorkspaceBlocked
-                      ? "Workspace blocked by policy"
-                      : `Start in ${selectedWorkspace.name}`}
-            </h1>
+            <h1>{chat.workspaces.length === 0 ? "Add your first workspace" : "Select a workspace"}</h1>
             <p>
               {chat.workspaces.length === 0
                 ? "Register a named project directory to create and find its conversations."
-                : selectedWorkspace === undefined
-                  ? "Choose a workspace to load only its Pi conversation history."
-                  : selectedWorkspaceUnavailable
-                    ? `Restore the directory at ${selectedWorkspace.path} before loading or creating conversations.`
-                    : selectedWorkspaceBlocked
-                      ? "Conversation history and Workspace Info remain available, but server policy prevents starting or reopening runtimes."
-                      : "Create a new conversation, or choose one from this workspace's history."}
+                : "Choose a workspace to load only its Pi conversation history."}
             </p>
             <button
               className="primary-button welcome-create"
@@ -533,6 +510,21 @@ export function App() {
               <p className="page-error" role="alert">{visibleError}</p>
             )}
           </section>
+        ) : selectedSummary === undefined ? (
+          <WorkspaceConversationPicker
+            workspace={selectedWorkspace}
+            conversations={chat.historyWorkspaceId === selectedWorkspace.id ? chat.history : []}
+            liveStatuses={liveStatuses}
+            connected={connected}
+            historyPending={chat.pendingHistoryWorkspaceId === selectedWorkspace.id}
+            historyError={chat.historyError?.workspaceId === selectedWorkspace.id
+              ? chat.historyError.message
+              : null}
+            actionPending={pendingAction !== null}
+            error={visibleError ?? null}
+            onCreate={createConversation}
+            onSelect={selectConversation}
+          />
         ) : (
           <>
             <ConversationHeader

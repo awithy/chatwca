@@ -32,7 +32,7 @@ test("streams text while its background sidebar status remains authoritative", a
 
 test("thinking and linked tool details are collapsed until explicitly expanded", async ({ page }) => {
   await waitForConnected(page);
-  await page.getByRole("button", { name: /Thinking and tools/ }).click();
+  await page.locator(".workspace-picker-row").filter({ hasText: "Thinking and tools" }).click();
 
   const thinking = page.locator("details.thinking-block");
   const tool = page.locator("details.tool-call-card");

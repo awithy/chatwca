@@ -8,7 +8,7 @@ export async function waitForConnected(page: Page): Promise<void> {
   const mobileMenu = page.getByRole("button", { name: "Open workspaces and conversations" });
   if (await mobileMenu.isVisible()) await mobileMenu.click();
   await page.getByRole("button", { name: /Browser workspace/ }).first().click();
-  await expect(page.getByRole("heading", { name: "Conversations" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Start in Browser workspace" })).toBeVisible();
 }
 
 export async function createConversation(page: Page): Promise<void> {

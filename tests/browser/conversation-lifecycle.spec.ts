@@ -43,19 +43,20 @@ test("create, switch, close, reopen, and delete selected-workspace conversations
   await waitForConnected(page);
   await createConversation(page);
   await submitAndWait(page, alphaPrompt);
-  let alphaRow = page.getByRole("button", { name: new RegExp(alphaPrompt) });
+  const sidebarConversations = page.locator(".conversation-list-panel");
+  let alphaRow = sidebarConversations.getByRole("button", { name: new RegExp(alphaPrompt) });
   await expect(alphaRow).toContainText("Idle");
 
   await page.getByRole("button", { name: "Edit conversation title" }).click();
   await page.getByLabel("Conversation title").fill("Custom alpha title");
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Custom alpha title" })).toBeVisible();
-  alphaRow = page.getByRole("button", { name: /Custom alpha title/ });
+  alphaRow = sidebarConversations.getByRole("button", { name: /Custom alpha title/ });
   await expect(alphaRow).toBeVisible();
 
   await createConversation(page);
   await submitAndWait(page, betaPrompt);
-  const betaRow = page.getByRole("button", { name: new RegExp(betaPrompt) });
+  const betaRow = sidebarConversations.getByRole("button", { name: new RegExp(betaPrompt) });
 
   await alphaRow.click();
   await expect(page.locator(".message-user")).toContainText(alphaPrompt);

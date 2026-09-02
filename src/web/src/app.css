@@ -759,6 +759,11 @@ pre {
   box-shadow: 0 0.6rem 1.5rem rgb(0 0 0 / 35%);
 }
 
+.workspace-actions-menu.workspace-actions-menu-portal {
+  position: fixed;
+  z-index: 30;
+}
+
 .workspace-actions-menu button {
   min-height: 1.9rem;
   padding: 0.3rem 0.55rem;
@@ -2193,6 +2198,186 @@ pre {
   margin-top: 1rem;
 }
 
+.workspace-conversation-picker {
+  grid-row: 1 / -1;
+  min-height: 0;
+  padding: clamp(2rem, 5vw, 4.5rem) clamp(1.25rem, 6vw, 5rem);
+  overflow-y: auto;
+}
+
+.workspace-picker-header,
+.workspace-picker-list-wrap,
+.workspace-picker-state,
+.workspace-picker-error {
+  width: min(58rem, 100%);
+  margin-inline: auto;
+}
+
+.workspace-picker-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 2rem;
+  padding-bottom: 1.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.workspace-picker-header > div {
+  min-width: 0;
+}
+
+.workspace-picker-header h1 {
+  margin: 0;
+  color: var(--text);
+  font-size: clamp(1.7rem, 4vw, 2.6rem);
+  letter-spacing: -0.025em;
+}
+
+.workspace-picker-path {
+  margin: 0.5rem 0 0;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.workspace-picker-create {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex: 0 0 auto;
+  min-height: 2.5rem;
+  padding: 0.5rem 0.85rem;
+}
+
+.workspace-picker-list-wrap {
+  padding-top: 1.5rem;
+}
+
+.workspace-picker-list-heading {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin-bottom: 0.75rem;
+}
+
+.workspace-picker-list-heading h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.85rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.workspace-picker-list-heading > span {
+  display: inline-grid;
+  place-items: center;
+  min-width: 1.35rem;
+  height: 1.35rem;
+  padding-inline: 0.35rem;
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  background: var(--panel-raised);
+}
+
+.workspace-picker-list {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0;
+  padding: 0 0 2rem;
+  list-style: none;
+}
+
+.workspace-picker-row {
+  display: grid;
+  gap: 0.65rem;
+  width: 100%;
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+  color: var(--text);
+  text-align: left;
+  background: var(--panel);
+  box-shadow: 0 0.3rem 1rem rgb(0 0 0 / 10%);
+}
+
+.workspace-picker-row:hover:not(:disabled) {
+  border-color: var(--selection-border);
+  background: var(--panel-hover);
+  transform: translateY(-1px);
+}
+
+.workspace-picker-row:disabled {
+  opacity: 0.62;
+}
+
+.workspace-picker-row-heading,
+.workspace-picker-row-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.workspace-picker-row-heading strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 0.95rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-picker-row-meta {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.workspace-picker-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 15rem;
+  color: var(--muted);
+  text-align: center;
+}
+
+.workspace-picker-state h2,
+.workspace-picker-state p {
+  margin: 0;
+}
+
+.workspace-picker-state h2 {
+  color: var(--text);
+  font-size: 1.05rem;
+}
+
+.workspace-picker-state p {
+  max-width: 34rem;
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.workspace-picker-state .loading-spinner {
+  margin-bottom: 0.75rem;
+}
+
+.workspace-picker-state-error {
+  color: var(--danger-text);
+}
+
+.workspace-picker-error {
+  margin-top: 1rem;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid var(--danger-border);
+  border-radius: 0.45rem;
+  background: var(--danger-bg);
+}
+
 .conversation-alert {
   position: absolute;
   z-index: 2;
@@ -2307,7 +2492,8 @@ pre {
     gap: 0.75rem;
   }
 
-  .welcome-panel {
+  .welcome-panel,
+  .workspace-conversation-picker {
     grid-row: 2 / -1;
   }
 
@@ -2366,8 +2552,30 @@ pre {
   }
 
   .content-empty,
-  .welcome-panel {
+  .welcome-panel,
+  .workspace-conversation-picker {
     padding: 1.25rem;
+  }
+
+  .workspace-picker-header {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
+
+  .workspace-picker-create {
+    justify-content: center;
+    width: 100%;
+  }
+
+  .workspace-picker-row-heading,
+  .workspace-picker-row-meta {
+    align-items: flex-start;
+  }
+
+  .workspace-picker-row-meta {
+    flex-direction: column;
+    gap: 0.25rem;
   }
 
   .message-list {

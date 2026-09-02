@@ -1,5 +1,6 @@
 import * as React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 import type {
   ConversationSummary,
@@ -182,6 +183,10 @@ export function WorkspaceSidebar({
   const [submitting, setSubmitting] = useState(false);
   const [removingId, setRemovingId] = useState<string | null>(null);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [openMenuPosition, setOpenMenuPosition] = useState<{
+    readonly top: number;
+    readonly right: number;
+  } | null>(null);
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
   const [recentWorkspaceIds, setRecentWorkspaceIds] = useState<readonly string[]>([]);
   const formReturnFocus = useRef<HTMLButtonElement | null>(null);
@@ -237,7 +242,11 @@ export function WorkspaceSidebar({
     if (openMenuId === null || (formMode !== null && formMode.type !== "info")) return;
 
     function dismissOnOutsidePress(event: PointerEvent): void {
-      if (event.target instanceof Node && !openMenu.current?.contains(event.target)) {
+      if (
+        event.target instanceof Node &&
+        !openMenu.current?.contains(event.target) &&
+        !openMenuTrigger.current?.contains(event.target)
+      ) {
         setOpenMenuId(null);
       }
     }
@@ -255,6 +264,37 @@ export function WorkspaceSidebar({
       document.removeEventListener("keydown", dismissOnEscape);
     };
   }, [formMode, openMenuId]);
+
+  useEffect(() => {
+    if (openMenuId === null) return;
+
+    function updatePosition(): void {
+      const trigger = openMenuTrigger.current;
+      if (trigger === null) return;
+
+      const triggerRect = trigger.getBoundingClientRect();
+      const menuHeight = openMenu.current?.getBoundingClientRect().height ?? 0;
+      const gap = 4;
+      const viewportInset = 8;
+      const below = triggerRect.bottom + gap;
+      const top = menuHeight > 0 && below + menuHeight > window.innerHeight - viewportInset
+        ? Math.max(viewportInset, triggerRect.top - gap - menuHeight)
+        : below;
+
+      setOpenMenuPosition({
+        top,
+        right: Math.max(viewportInset, window.innerWidth - triggerRect.right),
+      });
+    }
+
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [openMenuId]);
 
   async function submitWorkspace(values: WorkspaceFormValues): Promise<void> {
     if (formMode === null || submitting || actionPending) return;
@@ -558,6 +598,55 @@ export function WorkspaceSidebar({
               const busy = actionPending || submitting || removingId !== null;
               const menuOpen = openMenuId === workspace.id;
               const menuId = `workspace-actions-${workspace.id}`;
+              const actionsMenu = (
+                <div
+                  className={`workspace-actions-menu${menuOpen ? " workspace-actions-menu-portal" : ""}`}
+                  id={menuId}
+                  ref={menuOpen ? openMenu : undefined}
+                  role="group"
+                  aria-label={`Actions for ${workspace.name}`}
+                  hidden={!menuOpen}
+                  style={menuOpen && openMenuPosition !== null ? {
+                    top: `${String(openMenuPosition.top)}px`,
+                    right: `${String(openMenuPosition.right)}px`,
+                  } : undefined}
+                >
+                  <button
+                    type="button"
+                    disabled={!connected || busy}
+                    aria-label={`Workspace info ${workspace.name}`}
+                    onClick={() => {
+                      formReturnFocus.current = openMenuTrigger.current;
+                      setOpenMenuId(null);
+                      setFormMode({ type: "info", workspace });
+                      setWorkspaceError(null);
+                    }}
+                  >
+                    Info
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!connected || publicSandboxConfig === undefined || publicManagedEgressConfig === undefined || busy}
+                    aria-label={`Edit workspace ${workspace.name}`}
+                    onClick={(event) => {
+                      formReturnFocus.current = event.currentTarget;
+                      setFormMode({ type: "edit", workspace });
+                      setWorkspaceError(null);
+                    }}
+                  >
+                    Edit
+                  </button>
+                  <button
+                    className="workspace-remove-button"
+                    type="button"
+                    disabled={!connected || busy}
+                    aria-label={`Remove workspace ${workspace.name}`}
+                    onClick={() => void removeWorkspace(workspace)}
+                  >
+                    {removingId === workspace.id ? "Removing…" : "Remove"}
+                  </button>
+                </div>
+              );
               return (
                 <li
                   className={`workspace-item${selected ? " is-selected" : ""}${menuOpen ? " has-open-menu" : ""}`}
@@ -582,10 +671,7 @@ export function WorkspaceSidebar({
                     </span>
                     <code title={workspace.path}>{workspace.path}</code>
                   </button>
-                  <div
-                    className="workspace-item-menu"
-                    ref={menuOpen ? openMenu : undefined}
-                  >
+                  <div className="workspace-item-menu">
                     <button
                       className="workspace-menu-trigger"
                       type="button"
@@ -595,54 +681,25 @@ export function WorkspaceSidebar({
                       aria-controls={menuId}
                       onClick={(event) => {
                         openMenuTrigger.current = event.currentTarget;
-                        setOpenMenuId(menuOpen ? null : workspace.id);
+                        if (menuOpen) {
+                          setOpenMenuId(null);
+                          setOpenMenuPosition(null);
+                          return;
+                        }
+
+                        const triggerRect = event.currentTarget.getBoundingClientRect();
+                        setOpenMenuPosition({
+                          top: triggerRect.bottom + 4,
+                          right: Math.max(8, window.innerWidth - triggerRect.right),
+                        });
+                        setOpenMenuId(workspace.id);
                       }}
                     >
                       <span aria-hidden="true">…</span>
                     </button>
-                    <div
-                      className="workspace-actions-menu"
-                      id={menuId}
-                      role="group"
-                      aria-label={`Actions for ${workspace.name}`}
-                      hidden={!menuOpen}
-                    >
-                      <button
-                        type="button"
-                        disabled={!connected || busy}
-                        aria-label={`Workspace info ${workspace.name}`}
-                        onClick={() => {
-                          formReturnFocus.current = openMenuTrigger.current;
-                          setOpenMenuId(null);
-                          setFormMode({ type: "info", workspace });
-                          setWorkspaceError(null);
-                        }}
-                      >
-                        Info
-                      </button>
-                      <button
-                        type="button"
-                        disabled={!connected || publicSandboxConfig === undefined || publicManagedEgressConfig === undefined || busy}
-                        aria-label={`Edit workspace ${workspace.name}`}
-                        onClick={(event) => {
-                          formReturnFocus.current = event.currentTarget;
-                          setFormMode({ type: "edit", workspace });
-                          setWorkspaceError(null);
-                        }}
-                      >
-                        Edit
-                      </button>
-                      <button
-                        className="workspace-remove-button"
-                        type="button"
-                        disabled={!connected || busy}
-                        aria-label={`Remove workspace ${workspace.name}`}
-                        onClick={() => void removeWorkspace(workspace)}
-                      >
-                        {removingId === workspace.id ? "Removing…" : "Remove"}
-                      </button>
-                    </div>
+                    {!menuOpen && actionsMenu}
                   </div>
+                  {menuOpen && typeof document !== "undefined" && createPortal(actionsMenu, document.body)}
                 </li>
               );
             })}

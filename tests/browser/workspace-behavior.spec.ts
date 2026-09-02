@@ -65,6 +65,22 @@ test("does not request Pi history before a workspace is selected", async ({ page
   await expect.poll(() => frames.sent.filter(({ type }) => type === "history.list")).toHaveLength(1);
 });
 
+test("workspace actions menu escapes the workspace panel clipping layer", async ({ page }) => {
+  await waitForConnected(page);
+  await page.getByRole("button", { name: "Workspace actions for Browser workspace" }).click();
+
+  const menu = page.getByRole("group", { name: "Actions for Browser workspace" });
+  await expect(menu).toBeVisible();
+  await expect(menu).toHaveCSS("position", "fixed");
+  expect(await menu.evaluate((element) => element.parentElement === document.body)).toBe(true);
+
+  const menuZIndex = Number(await menu.evaluate((element) => getComputedStyle(element).zIndex));
+  const sidebarZIndex = Number(await page.locator(".conversation-sidebar").evaluate(
+    (element) => getComputedStyle(element).zIndex,
+  ));
+  expect(menuZIndex).toBeGreaterThan(sidebarZIndex);
+});
+
 test("orders workspaces by most recently selected", async ({ page }) => {
   await waitForConnected(page);
   await addWorkspace(page, "Recent workspace A", "/tmp/chatwca-recent-a");
@@ -78,7 +94,7 @@ test("orders workspaces by most recently selected", async ({ page }) => {
   await expect(items.nth(1)).toContainText("Recent workspace B");
 });
 
-test("opens the most recent conversation when changing workspaces", async ({ page }) => {
+test("shows workspace conversations in the main view without opening one", async ({ page }) => {
   const olderPrompt = "Older workspace conversation";
   const latestPrompt = "Most recent workspace conversation";
 
@@ -102,12 +118,16 @@ test("opens the most recent conversation when changing workspaces", async ({ pag
 
   await page.getByRole("button", { name: /Recent conversations.*chatwca-recent-conversations/ }).click();
 
+  await expect(page.getByRole("heading", { name: "Start in Recent conversations" })).toBeVisible();
+  await expect(page.locator(".message-user")).toHaveCount(0);
+  const pickerRows = page.locator(".workspace-picker-row");
+  await expect(pickerRows).toHaveCount(2);
+  await expect(pickerRows.first()).toContainText(latestPrompt);
+  await expect(pickerRows.nth(1)).toContainText(olderPrompt);
+
+  await pickerRows.first().click();
   await expect(page.locator(".message-user")).toContainText(latestPrompt);
   await expect(page.locator(".message-user")).not.toContainText(olderPrompt);
-  await expect(page.getByRole("button", { name: new RegExp(latestPrompt) })).toHaveAttribute(
-    "aria-current",
-    "page",
-  );
 });
 
 test("creates immutable workspace-local storage and shows it in workspace info", async ({ page }) => {
@@ -166,10 +186,9 @@ test("isolates workspace histories while a run continues in the background", asy
 
   await page.getByRole("button", { name: /Isolated A.*chatwca-isolated-a/ }).click();
   await expect(page.getByRole("button", { name: new RegExp(foregroundPrompt) })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: new RegExp(backgroundPrompt) })).toContainText("Idle", {
-    timeout: 4_000,
-  });
-  await page.getByRole("button", { name: new RegExp(backgroundPrompt) }).click();
+  const backgroundPickerRow = page.locator(".workspace-picker-row").filter({ hasText: backgroundPrompt });
+  await expect(backgroundPickerRow).toContainText("Idle", { timeout: 4_000 });
+  await backgroundPickerRow.click();
   await expect(page.locator(".message-assistant").last()).toContainText(
     `Deterministic response to: ${backgroundPrompt}`,
   );
@@ -243,8 +262,10 @@ test("busy workspace mutation is rejected and removal retains closed sessions", 
   await expect(page.locator("button.workspace-select-button").filter({ hasText: workspaceName })).toHaveCount(0);
 
   await addWorkspace(page, workspaceName, workspacePath);
-  const retained = page.getByRole("button", { name: new RegExp(prompt) });
-  await expect(retained).toContainText("Idle");
-  await expect(retained).toHaveAttribute("aria-current", "page");
+  const retained = page.locator(".workspace-picker-row").filter({ hasText: prompt });
+  await expect(retained).toContainText("Closed");
+  await expect(page.locator(".message-user")).toHaveCount(0);
+  await retained.click();
+  await expect(page.locator(".header-status")).toContainText("Idle");
   await expect(page.locator(".message-user")).toContainText(prompt);
 });

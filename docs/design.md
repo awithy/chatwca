@@ -375,7 +375,7 @@ stateDiagram-v2
 
 ### 9.3 Switching
 
-Switching workspaces or conversations is a frontend selection change, not a runtime replacement. Selecting a workspace requests only that workspace's history, then selects and opens its most recently modified conversation when one exists. Selecting a conversation requests its full state. Other conversations continue running.
+Switching workspaces or conversations is a frontend selection change, not a runtime replacement. Selecting a workspace requests only that workspace's history and shows its conversation picker in the main view without opening a runtime. Selecting a conversation requests its full state. Other conversations continue running.
 
 ### 9.4 Closing and eviction
 
@@ -601,7 +601,7 @@ Bubblewrap's network namespace applies only to workspace tools. Parent model-pro
         └── Submit / steer / follow-up / abort
 ```
 
-The sidebar initially renders workspace definitions without requesting Pi history. Within each browser session, it orders workspaces by most recently selected while preserving the server order for workspaces not yet selected. Selecting a workspace requests only that workspace's conversations, establishes the socket's workspace-history subscription, and opens the most recently modified conversation when history is non-empty. The conversation list distinguishes persisted closed sessions from live idle or streaming sessions, and switching to a closed session lazily opens its runtime. If no workspace is selected, no history request is made and conversation creation is disabled.
+The sidebar initially renders workspace definitions without requesting Pi history. Within each browser session, it orders workspaces by most recently selected while preserving the server order for workspaces not yet selected. Selecting a workspace requests only that workspace's conversations, establishes the socket's workspace-history subscription, and shows the ordered conversation picker in the main view without automatically opening a runtime. The conversation lists distinguish persisted closed sessions from live idle or streaming sessions, and selecting a closed session lazily opens its runtime. If no workspace is selected, no history request is made and conversation creation is disabled.
 
 Workspace creation and editing use a portal-backed, responsive accessible modal with fields for name and path plus a default-disabled **Store sessions in this workspace** checkbox. The session-storage selection is not editable later. Depending on server policy, the modal also provides **Security profile**, **Sandbox network**, and administrator-defined **Destination policy** controls. It never accepts arbitrary destinations or ports. Enabling managed egress, changing a managed destination set, or reducing protection requires the corresponding explicit confirmation while preserving the underlying form state. Path and policy controls are locked while the workspace owns a live runtime; name editing remains available.
 

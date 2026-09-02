@@ -10,7 +10,9 @@
 
 ChatWCA is a single-operator, dark-only web interface for the Pi coding agent. A Node.js server runs the Pi SDK in-process and serves a React application to browsers through an authenticated reverse proxy or a tightly isolated local network.
 
-The server defaults to `0.0.0.0` for compatibility and has no authentication or authorization. The recommended deployment binds ChatWCA to loopback behind an mTLS reverse proxy; direct LAN binding requires host/network firewall isolation. Every client accepted by that infrastructure has full ChatWCA authority. Workspace sandboxing is specified separately in [`bubblewrap-design.md`](bubblewrap-design.md) and does not authenticate clients.
+The server defaults to `0.0.0.0` for compatibility and has no authentication or authorization. The recommended deployment binds ChatWCA to loopback behind an mTLS reverse proxy; direct LAN binding requires host/network firewall isolation. Every client accepted by that infrastructure has full ChatWCA authority.
+
+On Linux, a workspace can use the Bubblewrap security profile specified in [`bubblewrap-design.md`](bubblewrap-design.md). Sandboxed tools can remain network-isolated or use the administrator-filtered managed-egress path specified in [`network-sandbox-design.md`](network-sandbox-design.md). These boundaries constrain coding tools; they do not authenticate clients, isolate the parent model runtime, or prevent workspace content from being sent to the configured model provider.
 
 A workspace is a user-named, canonical path to a directory with an immutable session-storage policy. ChatWCA stores workspace definitions in its own SQLite database. The server does not scan Pi's global session history during startup or browser connection; it lists Pi sessions only for a workspace selected by the browser.
 
@@ -41,10 +43,13 @@ Each conversation:
 - Recover cleanly after browser disconnects.
 - Use a dark-only interface on desktop and laptop-sized screens.
 - Support configurable loopback or LAN binding; direct LAN reachability requires external isolation.
+- Support unrestricted and Bubblewrap-sandboxed workspace profiles under an administrator-controlled policy ceiling.
+- Keep sandboxed tools network-isolated by default, with optional administrator-filtered managed egress.
+- Select managed-egress destinations through immutable, administrator-defined per-workspace policy sets.
 
 ## 3. Non-goals
 
-The first version will not include:
+The implemented design does not include:
 
 - Authentication, authorization, accounts, or multi-user isolation
 - Internet-facing deployment hardening
@@ -58,8 +63,12 @@ The first version will not include:
 - In-place visualization of every branch in Pi's session tree
 - Automatic discovery or import of workspaces by scanning all Pi sessions
 - Migration from the pre-workspace, global-history design
+- Browser-authored network destinations or interactive one-time egress approvals
+- Confidentiality from the configured model provider
+- Protection against harmful changes within a writable workspace
+- Per-conversation cgroup CPU, memory, process, disk, or bandwidth quotas
 
-Pi resources already configured on the host—models, credentials, context files, skills, and extensions—remain available through the SDK.
+Pi resources already configured on the host remain available to unrestricted runtimes through the SDK. Strict sandboxed runtimes share administrator-controlled credentials and model configuration through a separate model runtime, but disable extensions, skills, prompt templates, unapproved tools, project/global packages, and context discovery outside the workspace.
 
 ## 4. Deployment assumptions
 
@@ -70,7 +79,9 @@ Pi resources already configured on the host—models, credentials, context files
 - The Node.js process has the same filesystem permissions as the operator.
 - The process can create and write the configured ChatWCA data directory (`./data` by default) containing the SQLite database, plus any workspace configured for local session storage.
 - There is one ChatWCA server process. A restart interrupts active model requests, but completed session history remains persisted by Pi.
-- Unrestricted workspaces run Pi tools with the server process's permissions. Workspace-sandboxed conversations use the separate Bubblewrap boundary, with the residual risks documented in `bubblewrap-design.md`.
+- Unrestricted workspaces run Pi tools with the server process's permissions. Workspace-sandboxed conversations use the Bubblewrap boundary, with the residual risks documented in `bubblewrap-design.md`.
+- Sandboxed workspaces default to no tool network access. Managed egress, when enabled by the administrator and selected by the workspace, remains inside the isolated namespace and reaches only destinations admitted by the selected named policy set and mandatory global controls.
+- Model-provider requests, Pi session persistence, SQLite, HTTP, and WebSocket handling always remain in the parent process.
 
 Default listener:
 
@@ -97,7 +108,13 @@ flowchart LR
     C --> P
     D --> P
     P --> S[Pi JSONL session store]
-    P --> F[Workspace files and tools]
+    P --> F[Unrestricted workspace files and tools]
+    P --> T[App-owned sandbox tool definitions]
+    T <-->|Bounded typed IPC| BW[Per-conversation Bubblewrap worker]
+    BW --> SW[Workspace mounted read/write]
+    BW -. managed only .-> BR[Guest-loopback native bridges]
+    BR --> NP[Parent HTTP and SOCKS5 policy proxies]
+    NP --> NET[Allowed public destinations]
     W --> M[Profile-separated ModelRuntimes]
     A --> M
     C --> M
@@ -146,12 +163,28 @@ interface Workspace {
   path: string;                  // Canonical absolute directory path
   sessionStorage: "pi-default" | "workspace";
   sessionDirectory: string | null; // Derived local path; null for Pi default
+  securityProfile: "unrestricted" | "workspace-sandboxed";
+  networkPolicy: "isolated" | "managed-egress";
+  networkPolicySetId: string;    // Administrator-defined stable ID
   createdAt: number;
   updatedAt: number;
 }
 
 interface WorkspaceSummary extends Workspace {
   available: boolean;            // Current path exists and is a directory
+  usable: boolean;               // Availability plus effective server policy
+  effectiveSecurityProfile: "unrestricted" | "workspace-sandboxed" | null;
+  effectiveNetworkPolicy: "isolated" | "managed-egress" | null;
+  effectiveNetworkPolicySetId: string | null;
+  policyIssue:
+    | "sandbox_disabled"
+    | "outside_workspace_roots"
+    | "protected_path_overlap"
+    | null;
+  networkPolicyIssue:
+    | "managed_egress_disabled"
+    | "managed_egress_policy_set_unavailable"
+    | null;
 }
 ```
 
@@ -159,7 +192,7 @@ The workspace repository stores metadata in `./data/chatwca.sqlite`, resolved re
 
 The server creates the data directory and initializes the database during startup. `better-sqlite3` is used because workspace operations are small and serialized, and it avoids relying on Node's experimental `node:sqlite` API. The connection enables foreign keys, a bounded busy timeout, and WAL mode, and is closed during graceful shutdown. Operational backups should stop ChatWCA before a plain file copy so `chatwca.sqlite` and any WAL/shared-memory sidecars are captured consistently; Pi's agent/session directory and every workspace-local `.chatwca/sessions` directory must be backed up separately.
 
-Current schema:
+Current schema (with the bounded lowercase policy-set slug constraint abridged):
 
 ```sql
 CREATE TABLE IF NOT EXISTS workspaces (
@@ -171,15 +204,21 @@ CREATE TABLE IF NOT EXISTS workspaces (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   security_profile TEXT NOT NULL DEFAULT 'unrestricted'
-    CHECK (security_profile IN ('unrestricted', 'workspace-sandboxed'))
+    CHECK (security_profile IN ('unrestricted', 'workspace-sandboxed')),
+  network_policy TEXT NOT NULL DEFAULT 'isolated'
+    CHECK (network_policy IN ('isolated', 'managed-egress')),
+  network_policy_set_id TEXT NOT NULL DEFAULT 'default'
+    CHECK (/* bounded lowercase ASCII slug */)
 );
 
-PRAGMA user_version = 3;
+PRAGMA user_version = 5;
 ```
 
 Workspace names must be non-empty. A path is resolved, verified as a directory, and canonicalized before insertion or update; canonical paths are unique. Creation selects an immutable `pi-default` or `workspace` session-storage policy, with `pi-default` used when migrating version-one rows. Workspace-local storage resolves to `<workspace>/.chatwca/sessions`; registering the workspace does not create that directory. The Pi SDK creates it when the first local runtime is created. A registered workspace remains visible if its directory later disappears, but it is marked unavailable and cannot list, create, or open conversations until the path is restored.
 
-Removing a workspace deletes only its database row. It never deletes the directory or any Pi session. Removal and path changes are rejected while that workspace owns a live runtime; renaming remains allowed. The session-storage policy is not accepted by workspace updates and cannot change after creation. Database version two migrated existing rows to `pi-default`; version three adds requested security profiles defaulted to `unrestricted`. Neither migration moves Pi sessions.
+Removing a workspace deletes only its database row. It never deletes the directory or any Pi session. Removal and path, security-profile, network-policy, or destination-policy-set changes are rejected while that workspace owns a live runtime; renaming remains allowed. The session-storage policy is not accepted by workspace updates and cannot change after creation. Protection-reducing or network-exposing changes require explicit safety acknowledgements and remain subject to the administrator's server modes.
+
+Database version two migrated existing rows to `pi-default`; version three added requested security profiles defaulted to `unrestricted`; version four added network policies defaulted to `isolated`; and version five added destination-policy-set IDs defaulted to `default`. Migrations are transactional and do not move Pi sessions. A missing configured destination set leaves a managed workspace policy-blocked without rewriting its stored selection.
 
 ### 6.3 Conversation registry
 
@@ -196,6 +235,11 @@ interface ConversationRecord {
   createdAt: number;
   lastActiveAt: number;
   revision: number;
+  securityProfile: "unrestricted" | "workspace-sandboxed"; // Effective, immutable
+  networkPolicy: "isolated" | "managed-egress";            // Stored runtime snapshot
+  networkPolicySetId: string;                               // Stored runtime snapshot
+  effectiveNetworkPolicy: "isolated" | "managed-egress" | null;
+  effectiveNetworkPolicySetId: string | null;
   unsubscribe: () => void;
 }
 ```
@@ -214,17 +258,22 @@ The limit is configurable with `CHATWCA_MAX_LIVE_CONVERSATIONS`.
 
 ### 7.1 Runtime factory
 
-Every live conversation is created through `createAgentSessionRuntime()`. The runtime factory uses `createAgentSessionServices()` and `createAgentSessionFromServices()` so CWD-bound resources are rebuilt correctly when a session operation changes the effective working directory.
+Every live conversation is created through `createAgentSessionRuntime()` using a trusted workspace policy freshly resolved by `WorkspaceRepository.requireUsable()`. The policy contains the workspace ID, canonical CWD, session directory, effective security profile, effective network policy, and compiled destination-policy-set snapshot where applicable. Browser-supplied runtime paths or policy objects are never accepted.
+
+The runtime factory uses `createAgentSessionServices()` and `createAgentSessionFromServices()` so CWD-bound resources are rebuilt correctly when a session operation changes the effective working directory. Unrestricted sessions use Pi's ordinary tools. Sandboxed sessions disable extensions and unapproved resources, use an app-owned `read`, `write`, `edit`, `bash`, `ls`, `grep`, and `find` tool set, and route every tool implementation through a per-conversation Bubblewrap worker. Managed-egress runtimes additionally own private parent HTTP/SOCKS5 proxies and native bridge processes; model-provider traffic remains in the parent.
 
 Conceptually:
 
 ```text
-createConversation(workspaceId, workspacePath, sessionManager)
+createConversation(workspaceId)
+  resolve trusted workspace and immutable effective policy
+  start optional managed proxies and native bridges
+  start optional Bubblewrap worker and verify handshake
   create AgentSessionRuntime
-    create cwd-bound Pi services
+    create profile-specific cwd-bound Pi services and tools
     create AgentSession from services
   subscribe to session events
-  register by Pi session ID
+  register by Pi session ID only after every required boundary is ready
 ```
 
 New conversations use Pi's default session location or the workspace-local directory selected at workspace creation:
@@ -243,7 +292,7 @@ History for a selected workspace is discovered with `SessionManager.list(workspa
 
 ### 7.2 Runtime replacement
 
-Pi runtime operations such as `switchSession()` and `fork()` replace `runtime.session`. Event subscriptions belong to the old `AgentSession`, so every replacement must:
+Pi runtime operations such as `switchSession()` and `fork()` replace `runtime.session`. Event subscriptions belong to the old `AgentSession`, so every replacement must retain the runtime's immutable worker/network policy and:
 
 1. unsubscribe from the old session;
 2. update the registry's `session` reference;
@@ -253,14 +302,16 @@ Pi runtime operations such as `switchSession()` and `fork()` replace `runtime.se
 
 ### 7.3 Workspaces and working directories
 
-A new conversation request contains a `workspaceId`, not an arbitrary working-directory or session-directory path. The server:
+A new conversation request contains a `workspaceId`, not an arbitrary working-directory, session-directory, security-policy, or destination-policy object. The server:
 
-1. resolves the workspace through SQLite;
-2. verifies that its stored canonical path still exists and is a directory;
-3. derives the immutable session directory from the stored policy and uses it with `SessionManager.create()`; and
-4. records the workspace ID on the live conversation record.
+1. resolves the workspace through SQLite and derives its effective security/network policy;
+2. verifies path availability and every applicable sandbox admission rule;
+3. resolves the selected named destination set beneath the global ceiling when managed egress applies;
+4. derives the immutable session directory from the stored policy and uses it with `SessionManager.create()`;
+5. establishes and probes every required worker, proxy, and bridge boundary; and
+6. records the workspace ID and immutable effective policy on the live conversation record.
 
-The workspace registry is the working-directory allowlist for browser commands. The selected workspace name and path are shown prominently in the UI.
+The workspace registry is the working-directory allowlist for browser commands. Before runtime creation, the repository revalidates path availability, approved-root membership, protected-path overlap, `.chatwca`, socket-file admission, server security mode, managed-egress mode, and selected destination-set availability as applicable. The selected workspace name and path are shown prominently in the UI.
 
 A reopened session is resolved from a fresh listing for the workspace's configured session directory before its file is opened. Its Pi session header must identify the same canonical CWD as the workspace. A session ID or path discovered in one workspace cannot be used to open or delete a session through another workspace. If the workspace directory no longer exists, the workspace remains visible but its conversations cannot be listed or run until the same path is restored.
 
@@ -309,17 +360,18 @@ stateDiagram-v2
 
 ### 9.1 Creating
 
-- Resolve and validate the selected workspace from SQLite.
+- Resolve the selected workspace and fresh effective policy through `requireUsable()`.
 - Create a persistent `SessionManager` using the workspace's canonical path.
-- Create and register a runtime with the workspace ID.
-- Return a full empty conversation state.
+- Establish any required managed proxy, bridge, and Bubblewrap worker before constructing the strict Pi session.
+- Register the runtime only after all required boundaries pass their handshake.
+- Return a full empty conversation state containing immutable effective policy.
 
 ### 9.2 Opening
 
 - Resolve the requested item from a fresh Pi history listing scoped to the specified workspace.
 - Verify that the listed session CWD matches the workspace path.
 - Return an existing live runtime if present.
-- Otherwise open it with `SessionManager.open()` and register it with the workspace ID.
+- Otherwise resolve fresh effective workspace policy, establish all required boundaries, open it with `SessionManager.open()`, and register it only after complete success.
 
 ### 9.3 Switching
 
@@ -327,7 +379,7 @@ Switching workspaces or conversations is a frontend selection change, not a runt
 
 ### 9.4 Closing and eviction
 
-Closing disposes the event subscription and runtime but does not delete the Pi session file. A streaming conversation must be aborted or allowed to finish before it can be closed.
+Closing disposes the event subscription and runtime but does not delete the Pi session file. A streaming conversation must be aborted or allowed to finish before it can be closed. Runtime disposal also terminates the Bubblewrap worker and descendants, native bridges, managed proxy connections, and private proxy sockets owned by that conversation. Abort destroys the worker namespace; after Pi becomes idle, a sandboxed runtime must establish a fresh worker before accepting another prompt. No failure path falls back to unrestricted tools or networking.
 
 ### 9.5 Shutdown
 
@@ -370,7 +422,8 @@ Fork rules:
 
 - The selected entry must be a user message on the source's current branch.
 - The source must be idle.
-- The fork inherits the source workspace, CWD, and current model where available.
+- The fork inherits the source workspace, CWD, and current model where available, but freshly resolves the workspace's current effective security, network, and destination-set policy.
+- The temporary fork owns a distinct worker and, for managed egress, a distinct proxy runtime, private socket directory, and bridge set. Promotion transfers those resources to the new record.
 - `runtime.fork(entryId)` creates/replaces the temporary runtime's active session; it does not replace the source registry record.
 - The SDK's returned `editorText` pre-fills the composer, matching Pi's `/fork` behavior.
 - The user may edit and submit that prompt in the new conversation.
@@ -438,6 +491,7 @@ Important mappings:
 | `agent_start` | `conversation.status` = streaming |
 | `agent_end` | `conversation.status` = idle |
 | retry/compaction events | typed status notices |
+| managed-egress policy denial | `network.blocked` |
 
 Every event includes:
 
@@ -455,11 +509,13 @@ Revisions are monotonic per conversation. If the browser detects a gap, reconnec
 
 Streaming text deltas are high-priority messages. Workspace-scoped history is sent only on workspace selection, reconnect, fork, or explicit resynchronization. A `history.list` command establishes that socket's current workspace-history subscription; subsequent history updates are sent only for that workspace and include its `workspaceId`. The server does not serialize the complete conversation on every token and never performs a global history scan to produce an update.
 
+A managed-egress policy decision is recorded as a bounded audit event with workspace/conversation and selected-set identity, protocol, normalized host, port, decision, and stable reason. Blocked decisions may emit rate-limited `network.blocked` events. Audit and browser payloads exclude URL paths, queries, headers, bodies, TLS data, credentials, command output, resolved addresses, host paths, and private diagnostics.
+
 Tool-result text sent to the browser is bounded and may be visually truncated. Supported image blocks in canonical tool-result entries are represented by same-origin image URLs rather than copied into WebSocket snapshots; the HTTP handler resolves only an image on the open conversation's active branch, validates its encoded data and signature, and returns it with `Cache-Control: private, no-store`. Markdown destinations for supported image formats are rewritten to a separate conversation-scoped endpoint that resolves relative paths against the workspace and admits absolute, `file:`, or `sandbox:` paths only when their real canonical target remains inside that workspace. It rejects symlink escapes, unsupported formats, oversized files, and invalid signatures. Pi remains responsible for the canonical persisted result and model context; ChatWCA does not expose a general workspace file server.
 
 ## 13. WebSocket protocol
 
-The HTTP server provides static assets and two operational endpoints:
+The HTTP server provides static assets and these operational routes:
 
 ```text
 GET /api/health
@@ -474,8 +530,8 @@ Representative client commands:
 ```ts
 type ClientCommand =
   | { type: "workspace.list" }
-  | { type: "workspace.create"; name: string; path: string; sessionStorage: "pi-default" | "workspace" }
-  | { type: "workspace.update"; workspaceId: string; name?: string; path?: string }
+  | { type: "workspace.create"; name: string; path: string; sessionStorage: "pi-default" | "workspace"; securityProfile: "unrestricted" | "workspace-sandboxed"; networkPolicy?: "isolated" | "managed-egress"; networkPolicySetId?: string; acknowledgeNetworkExposure?: true }
+  | { type: "workspace.update"; workspaceId: string; name?: string; path?: string; securityProfile?: "unrestricted" | "workspace-sandboxed"; networkPolicy?: "isolated" | "managed-egress"; networkPolicySetId?: string; acknowledgeSecurityDowngrade?: true; acknowledgeNetworkExposure?: true }
   | { type: "workspace.delete"; workspaceId: string }
   | { type: "history.list"; workspaceId: string }
   | { type: "conversation.create"; workspaceId: string }
@@ -506,7 +562,9 @@ type ServerMessage =
   | { type: "error"; requestId?: string; code: string; message: string };
 ```
 
-Commands include a client-generated `requestId` in the concrete schema so responses and errors can be correlated. TypeBox validates every incoming message before dispatch. Workspace CRUD broadcasts a fresh authoritative workspace list. History responses and notifications always include `workspaceId`; the browser discards a response that no longer matches its selected workspace.
+Commands include a client-generated `requestId` in the concrete schema so responses and errors can be correlated. TypeBox validates every incoming message before dispatch. Closed workspace schemas reject arbitrary destination domains, ports, and raw policy documents. Workspace CRUD broadcasts a fresh authoritative workspace list. History responses and notifications always include `workspaceId`; the browser discards a response that no longer matches its selected workspace.
+
+`GET /api/config` exposes only client-safe sandbox mode, selectable profiles, selectable named destination-set IDs/labels and normalized public rules, warning text, and probe availability. It does not expose helper or Bubblewrap paths, approved roots, protected paths, proxy sockets, resolved addresses, credentials, or private diagnostics.
 
 ## 14. Network behavior
 
@@ -516,7 +574,7 @@ There is no application login, token, cookie, API key, role, or authorization ch
 
 The server serves the frontend and WebSocket endpoint from the same authority. It does not enable broad CORS. Browser WebSocket upgrades must have an `Origin` whose authority matches the request `Host`; this prevents unrelated web pages from driving the socket and does not add user authentication. Direct non-browser clients without `Origin` are accepted. A proxy must preserve the browser-facing `Host` header and WebSocket upgrade headers.
 
-Bubblewrap's network namespace applies only to workspace tools. Parent model-provider traffic and accepted browser traffic remain outside it.
+Bubblewrap's network namespace applies only to workspace tools. Parent model-provider traffic and accepted browser traffic remain outside it. Isolated workers have no usable IPv4, IPv6, DNS, or loopback path. Managed-egress workers still have no direct external route: only two designated guest-loopback endpoints are bridged to conversation-owned parent HTTP and SOCKS5 proxies. Those proxies enforce the immutable named policy set beneath global deny, domain, port, DNS-pinning, non-public-address, protocol, and resource controls.
 
 ## 15. Frontend design
 
@@ -531,7 +589,7 @@ Bubblewrap's network namespace applies only to workspace tools. Parent model-pro
 │       ├── New conversation
 │       └── Selected-workspace conversation rows with status
 └── <ConversationPage>
-    ├── <ConversationHeader> workspace, editable title, cwd, model, context usage, status
+    ├── <ConversationHeader> workspace, editable title, cwd, model, context usage, status, immutable security/network badge
     ├── <MessageTimeline>
     │   ├── User messages and images
     │   ├── Assistant markdown
@@ -545,7 +603,9 @@ Bubblewrap's network namespace applies only to workspace tools. Parent model-pro
 
 The sidebar initially renders workspace definitions without requesting Pi history. Within each browser session, it orders workspaces by most recently selected while preserving the server order for workspaces not yet selected. Selecting a workspace requests only that workspace's conversations, establishes the socket's workspace-history subscription, and opens the most recently modified conversation when history is non-empty. The conversation list distinguishes persisted closed sessions from live idle or streaming sessions, and switching to a closed session lazily opens its runtime. If no workspace is selected, no history request is made and conversation creation is disabled.
 
-Workspace creation uses explicit fields for name and path plus a default-disabled **Store sessions in this workspace** checkbox. The selection is not shown as an editable field later. **Workspace Info** shows the authoritative storage policy and the resolved local session directory when applicable. Removing a workspace requires confirmation and clearly states that files and Pi sessions are retained. The browser keeps workspace and conversation selection in memory; reconnecting re-lists workspaces and then re-requests history only for the workspace already selected in that browser instance.
+Workspace creation and editing use a portal-backed, responsive accessible modal with fields for name and path plus a default-disabled **Store sessions in this workspace** checkbox. The session-storage selection is not editable later. Depending on server policy, the modal also provides **Security profile**, **Sandbox network**, and administrator-defined **Destination policy** controls. It never accepts arbitrary destinations or ports. Enabling managed egress, changing a managed destination set, or reducing protection requires the corresponding explicit confirmation while preserving the underlying form state. Path and policy controls are locked while the workspace owns a live runtime; name editing remains available.
+
+The modal provides dialog semantics, initial focus, contained Tab navigation, Escape cancellation while idle, background suppression, and trigger-focus restoration. Small viewports use an inset full-height sheet. **Workspace Info** shows stored and effective storage, security, network, and destination-set policy; normalized managed-egress grants; mandatory restrictions; configured public disclosures; and policy-block reasons. Conversation headers show **Unrestricted**, **Sandboxed · Network isolated**, or **Sandboxed · Managed egress** from immutable live conversation state. Removing a workspace requires confirmation and clearly states that files and Pi sessions are retained. The browser keeps workspace and conversation selection in memory; reconnecting re-lists workspaces and then re-requests history only for the workspace already selected in that browser instance.
 
 ### 15.2 Dark-only styling
 
@@ -595,12 +655,19 @@ Errors use stable codes and human-readable messages. Important cases include:
 - fork attempted while the source is streaming;
 - live-runtime limit with no idle eviction candidate;
 - WebSocket revision gap;
-- Pi runtime creation or replacement failure; and
+- Pi runtime creation or replacement failure;
+- sandbox disabled, unavailable, misconfigured, or rejected for the workspace;
+- sandbox worker startup, protocol, or operation failure;
+- managed egress disabled or destination policy set unavailable;
+- native helper, bridge, or parent proxy startup/runtime failure;
+- destination denied by domain, port, DNS, address, or resource policy; and
 - session file removed outside the application.
 
 An accepted prompt's later model failure is represented in the message/event stream, not as a failed command acknowledgement.
 
 ## 17. Configuration
+
+### 17.1 Core
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -615,23 +682,53 @@ An accepted prompt's later model failure is represented in the message/event str
 | `PI_CODING_AGENT_DIR` | Pi default | Pi configuration and session root |
 | `PI_OFFLINE` | unset | Use Pi's existing offline behavior |
 
-Provider credentials continue to use Pi's standard credential store and environment variables. ChatWCA never sends provider credentials to the browser.
+### 17.2 Bubblewrap sandbox
 
-## 18. Proposed source layout
+| Variable | Default | Purpose |
+|---|---|---|
+| `CHATWCA_SANDBOX_MODE` | `disabled` | `disabled`, `optional`, or `required` security ceiling |
+| `CHATWCA_BWRAP_PATH` | `/usr/bin/bwrap` | Absolute trusted Bubblewrap executable |
+| `CHATWCA_WORKSPACE_ROOTS` | `[]` | JSON array of canonical approved workspace roots |
+| `CHATWCA_SANDBOX_RO_MOUNTS` | `[]` | JSON array of extra trusted read-only toolchain mounts |
+| `CHATWCA_SANDBOX_PATH` | `/usr/bin:/bin` | Fixed guest executable search path |
+| `CHATWCA_SANDBOX_START_TIMEOUT_MS` | `5000` | Probe and worker-handshake deadline |
+| `CHATWCA_SANDBOX_COMMAND_TIMEOUT_MS` | `900000` | Hard sandbox command deadline |
+| `CHATWCA_SANDBOX_MAX_COMMAND_OUTPUT_BYTES` | `67108864` | Maximum complete command output retained by a worker |
+
+### 17.3 Managed egress
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CHATWCA_MANAGED_EGRESS_MODE` | `disabled` | `disabled` or `optional` availability ceiling |
+| `CHATWCA_NETWORK_HELPER_PATH` | packaged helper | Canonical native Linux network helper |
+| `CHATWCA_NETWORK_ALLOWED_DOMAINS` | `[]` | JSON global domain-pattern ceiling |
+| `CHATWCA_NETWORK_DENIED_DOMAINS` | `[]` | JSON explicit deny patterns; deny wins |
+| `CHATWCA_NETWORK_ALLOWED_PORTS` | `[80,443]` | JSON global TCP-port ceiling |
+| `CHATWCA_NETWORK_POLICY_SETS` | unset | Closed JSON named exact-subset policies; unset synthesizes `default` |
+| `CHATWCA_NETWORK_MAX_CONNECTIONS` | `32` | Concurrent proxy connections per conversation |
+| `CHATWCA_NETWORK_CONNECT_TIMEOUT_MS` | `10000` | DNS and connection setup deadline |
+| `CHATWCA_NETWORK_IDLE_TIMEOUT_MS` | `300000` | Bidirectional idle deadline |
+| `CHATWCA_NETWORK_MAX_CONNECTION_BYTES` | `1073741824` | Aggregate byte limit per connection |
+
+Provider credentials continue to use Pi's standard credential store and environment variables. ChatWCA never sends provider credentials to the browser or sandbox. In `optional` and `required` sandbox modes, startup validates Bubblewrap configuration and performs a functional probe. Enabling managed egress also validates its policy, native helper, proxies, bridges, and profile-specific probe. Invalid enabled security configuration prevents startup rather than weakening policy.
+
+## 18. Representative source layout
 
 ```text
 src/
 ├── server/
 │   ├── index.ts                 # HTTP/WS startup and shutdown
-│   ├── config.ts                # environment parsing
-│   ├── database.ts              # SQLite open/schema/close lifecycle
-│   ├── workspace-repository.ts  # persistent workspace CRUD
+│   ├── config.ts                # top-level environment parsing
+│   ├── database.ts              # SQLite open/schema/migration/close lifecycle
+│   ├── workspace-repository.ts  # persistent workspace CRUD and effective policy
 │   ├── protocol.ts              # command dispatch
-│   ├── conversation-registry.ts # live runtime ownership and eviction
-│   ├── pi-runtime.ts            # SDK runtime factory
+│   ├── conversation-registry.ts # live runtime and worker ownership/eviction
+│   ├── pi-runtime.ts            # trusted-policy SDK runtime factory
 │   ├── session-history.ts       # workspace-scoped Pi listing/deletion
 │   ├── serialize.ts             # SDK messages to UI messages
-│   └── images.ts                # image validation/conversion
+│   ├── images.ts                # image validation/conversion
+│   ├── sandbox/                 # Bubblewrap config, worker, IPC, probes, and tools
+│   └── network/                 # policies, proxies, DNS, audit, helper integration
 ├── shared/
 │   ├── protocol.ts              # TypeBox wire schemas and TS types
 │   └── errors.ts                # stable error codes
@@ -642,7 +739,7 @@ src/
     │   └── reducer.ts
     ├── components/
     │   ├── WorkspaceSidebar.tsx
-    │   ├── WorkspaceForm.tsx
+    │   ├── WorkspaceModal.tsx
     │   ├── ConversationList.tsx
     │   ├── ConversationHeader.tsx
     │   ├── MessageTimeline.tsx
@@ -652,6 +749,8 @@ src/
     │   └── Composer.tsx
     └── styles/
         └── app.css
+
+native/network-helper/            # Rust outer/inner helper and fixed bridges
 ```
 
 ## 19. Testing strategy
@@ -660,7 +759,10 @@ src/
 
 - protocol validation and unknown-message rejection;
 - SQLite schema initialization and workspace CRUD;
-- workspace name validation, path canonicalization, uniqueness, availability, immutable storage policy, and version-one database migration;
+- workspace name validation, path canonicalization, uniqueness, availability, immutable storage policy, and schema-v1-through-v5 migrations;
+- stored/effective security and network policy, server-mode ceilings, acknowledgements, busy checks, and unavailable-set fail closure;
+- Bubblewrap argument/environment construction, protected-path and root checks, framed IPC, cancellation, protocol limits, and Pi tool compatibility;
+- domain and port policy normalization, deny precedence, IP classification, DNS pinning, HTTP/CONNECT and SOCKS5 parsing, audit redaction, and resource limits;
 - message serialization for text, thinking, images, and tools;
 - conversation registry workspace ownership, indexing, and idle eviction;
 - image MIME and size limits;
@@ -680,12 +782,18 @@ Use temporary SQLite databases, temporary Pi sessions, and a fake model/provider
 - switching workspaces while a background conversation streams;
 - fork creation without source mutation;
 - event re-subscription after runtime replacement;
-- abort behavior; and
-- reconnect/full-state reconciliation.
+- abort behavior;
+- reconnect/full-state reconciliation;
+- sandbox filesystem and environment isolation, app-owned tools, worker cleanup, abort replacement, and fail-closed behavior;
+- managed-egress direct-network denial, designated proxy reachability, destination enforcement, pinned connections, and lifecycle cleanup; and
+- concurrent unrestricted, isolated, and differently scoped managed-egress conversations without shared workers, routes, or policy.
 
 ### Browser tests
 
-- create default and workspace-local workspaces, inspect storage policy, rename, update, select, and remove workspaces;
+- create default and workspace-local workspaces, inspect storage and stored/effective security/network policy, rename, update, select, and remove workspaces;
+- use the accessible responsive workspace modal with focus containment/restoration and preserved state across confirmations;
+- select only administrator-defined destination sets, acknowledge exposure/downgrades, and show unavailable-policy failures;
+- lock path and policy controls while a runtime is live and show immutable conversation badges and blocked-network notices;
 - verify that no conversation history is requested before workspace selection;
 - create and switch conversations within selected workspaces;
 - LAN-style host access against a server bound to `0.0.0.0`;
@@ -708,10 +816,13 @@ Use temporary SQLite databases, temporary Pi sessions, and a fake model/provider
 8. **Images** — paste/drop/select, resizing, validation, Pi image prompts.
 9. **Forking** — entry IDs, temporary fork runtime, prefilled editor, source-preservation tests.
 10. **Hardening** — reconnect revisions, scoped history broadcasts, backpressure, shutdown, payload bounds, browser tests.
+11. **Bubblewrap workspace sandbox** — schema v3, admission policy, synthetic root, worker IPC, app-owned tools, probes, lifecycle integration, and strict resource path.
+12. **Managed egress** — schemas v4/v5, destination policies and named sets, HTTP/SOCKS5 proxies, native bridges, DNS pinning, audit events, probes, and fail-closed lifecycle.
+13. **Workspace policy UI** — responsive accessible modal, acknowledgements, stored/effective policy details, immutable badges, and network-blocked notices.
 
 ## 21. Acceptance criteria
 
-The initial release is complete when:
+The current implemented design is complete when:
 
 - the server listens on `0.0.0.0` by default and is usable from another LAN machine;
 - no authentication or authorization flow exists;
@@ -730,5 +841,14 @@ The initial release is complete when:
 - a user can fork from an earlier user message and edit the copied prompt;
 - a user can rewind from an earlier user message, replacing the source only after fork creation succeeds;
 - a normal fork leaves the source conversation unchanged and switchable;
+- schema-v5 workspace rows preserve requested security, network, and named destination-set policy while exposing separately derived effective policy;
+- server modes, approved roots, protected paths, live-runtime locks, and explicit acknowledgements prevent browser commands from silently widening authority;
+- every sandboxed tool executes through a conversation-owned Bubblewrap worker with a synthetic root, fixed environment, hidden ChatWCA/Pi/session data, and no extension fallback;
+- isolated workers have no usable network path and managed workers retain the isolated namespace with only conversation-owned HTTP/SOCKS5 proxy bridges;
+- managed destinations pass the immutable selected named set plus mandatory deny, port, DNS, public-address, protocol, and resource controls before connection;
+- browser commands cannot submit destinations or policy documents, and a missing set policy-blocks the workspace without silent substitution;
+- abort, close, eviction, crash, rewind replacement, and shutdown clean up workers, descendants, bridges, proxies, connections, and socket files;
+- unrestricted, isolated, and differently scoped managed conversations can coexist without sharing workers, extension-mutated model runtimes, network policy, or routes;
+- the workspace modal is keyboard-accessible and responsive, and live headers show immutable effective security/network state and required disclosure warnings;
 - the UI is dark-only and works at common laptop resolutions; and
 - sessions remain readable by the Pi CLI.

@@ -26,6 +26,7 @@ interface SentFrame {
   readonly name?: string;
   readonly securityProfile?: string;
   readonly networkPolicy?: string;
+  readonly networkPolicySetId?: string;
   readonly acknowledgeSecurityDowngrade?: boolean;
   readonly acknowledgeNetworkExposure?: boolean;
 }
@@ -80,13 +81,15 @@ test("optional mode defaults to Unrestricted and creates a network-isolated Work
   await expect(info).toContainText("Stored profile");
   await expect(info).toContainText("Effective profile");
   await expect(info).toContainText("Optional — sandboxing is not required");
-  await expect(info).toContainText("Stored network policy");
-  await expect(info).toContainText("Effective network policy");
+  await expect(info).toContainText("Stored network type");
+  await expect(info).toContainText("Effective network type");
+  await expect(info).toContainText("Stored destination policy");
+  await expect(info).toContainText("Effective destination policy");
   await expect(info).toContainText("No network policy issue");
   await expect(info).toContainText("Available — startup functional probe passed");
-  await expect(info).toContainText("**.example.com");
+  await expect(info).toContainText("registry.npmjs.org");
   await expect(info).toContainText("blocked.example.com");
-  await expect(info).toContainText("80, 443");
+  await expect(info).toContainText("443");
   await expect(info).toContainText("http, https-connect, websocket, websocket-secure, socks5-tcp");
   await expect(info).toContainText("loopback, LAN, link-local, metadata");
   await expect(info).toContainText("UDP and inbound connections");
@@ -117,6 +120,9 @@ test("managed egress creation and isolated-to-managed updates require confirmati
   const createForm = page.getByRole("form", { name: "Create workspace" });
   await createForm.getByLabel("Security profile", { exact: true }).selectOption("workspace-sandboxed");
   await createForm.getByLabel("Sandbox network", { exact: true }).selectOption("managed-egress");
+  await expect(createForm.getByLabel("Destination policy", { exact: true })).toHaveValue("default");
+  await createForm.getByLabel("Destination policy", { exact: true }).selectOption("web");
+  await expect(createForm).toContainText("**.example.com");
 
   page.once("dialog", (dialog) => dialog.dismiss());
   await page.getByRole("button", { name: "Add workspace", exact: true }).click();
@@ -129,6 +135,7 @@ test("managed egress creation and isolated-to-managed updates require confirmati
   expect(sent.find((frame) => frame.type === "workspace.create" && frame.name === name)).toMatchObject({
     securityProfile: "workspace-sandboxed",
     networkPolicy: "managed-egress",
+    networkPolicySetId: "web",
   });
 
   const isolatedName = "Network update project";

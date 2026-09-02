@@ -14,16 +14,18 @@ import type {
 } from "../../../shared/protocol.js";
 import { ConversationList } from "./ConversationList.js";
 import {
-  WorkspaceForm,
+  networkPolicyIssueText,
   networkPolicyLabel,
   type WorkspaceFormValues,
 } from "./WorkspaceForm.js";
+import { WorkspaceDialog } from "./WorkspaceDialog.js";
 
 interface WorkspaceUpdateValues {
   readonly name: string;
   readonly path?: string;
   readonly securityProfile?: WorkspaceSecurityProfile;
   readonly networkPolicy?: SandboxNetworkPolicy;
+  readonly networkPolicySetId?: string;
   readonly acknowledgeSecurityDowngrade?: true;
   readonly acknowledgeNetworkExposure?: true;
 }
@@ -84,14 +86,48 @@ export function securityDowngradeConfirmation(workspace: WorkspaceSummary): stri
 }
 
 export function networkPolicyIssueLabel(issue: WorkspaceNetworkPolicyIssue): string {
-  return issue === "managed_egress_disabled"
-    ? "Managed egress is disabled by the administrator."
-    : "No network policy issue";
+  return networkPolicyIssueText(issue);
 }
 
 export function networkExposureConfirmation(workspaceName?: string): string {
   const target = workspaceName === undefined ? "this workspace" : `“${workspaceName}”`;
-  return `Enable Managed egress for ${target}? Tools may transmit workspace content to administrator-configured destinations through a filtered proxy. Workspace content may also be sent to the configured model provider.`;
+  return `Enable or change Managed egress for ${target}? Tools may transmit workspace content to destinations in the selected administrator-defined policy through a filtered proxy. Workspace content may also be sent to the configured model provider.`;
+}
+
+export function workspaceUpdatePlan(workspace: WorkspaceSummary, values: WorkspaceFormValues): {
+  readonly downgrade: boolean;
+  readonly addsNetworkExposure: boolean;
+  readonly changes: WorkspaceUpdateValues;
+} {
+  const profileChanged = values.securityProfile !== workspace.securityProfile;
+  const networkPolicyChanged = values.networkPolicy !== workspace.networkPolicy;
+  const networkPolicySetChanged = values.networkPolicySetId !== workspace.networkPolicySetId;
+  const downgrade = profileChanged &&
+    workspace.securityProfile === "workspace-sandboxed" &&
+    values.securityProfile === "unrestricted";
+  const enablesManagedEgress =
+    values.securityProfile === "workspace-sandboxed" &&
+    values.networkPolicy === "managed-egress" &&
+    !(workspace.securityProfile === "workspace-sandboxed" && workspace.networkPolicy === "managed-egress");
+  const selectsManagedNetwork = workspace.networkPolicy === "isolated" &&
+    values.networkPolicy === "managed-egress";
+  const changesManagedSet = networkPolicySetChanged &&
+    (workspace.networkPolicy === "managed-egress" || values.networkPolicy === "managed-egress");
+  const addsNetworkExposure = enablesManagedEgress || selectsManagedNetwork || changesManagedSet;
+
+  return {
+    downgrade,
+    addsNetworkExposure,
+    changes: {
+      name: values.name,
+      ...(values.path === workspace.path ? {} : { path: values.path }),
+      ...(profileChanged ? { securityProfile: values.securityProfile } : {}),
+      ...(networkPolicyChanged ? { networkPolicy: values.networkPolicy } : {}),
+      ...(networkPolicySetChanged ? { networkPolicySetId: values.networkPolicySetId } : {}),
+      ...(downgrade ? { acknowledgeSecurityDowngrade: true } : {}),
+      ...(addsNetworkExposure ? { acknowledgeNetworkExposure: true } : {}),
+    },
+  };
 }
 
 export function workspaceRemovalConfirmation(workspace: WorkspaceSummary): string {
@@ -198,7 +234,7 @@ export function WorkspaceSidebar({
   }, [formMode, openMenuId, workspaces]);
 
   useEffect(() => {
-    if (openMenuId === null) return;
+    if (openMenuId === null || (formMode !== null && formMode.type !== "info")) return;
 
     function dismissOnOutsidePress(event: PointerEvent): void {
       if (event.target instanceof Node && !openMenu.current?.contains(event.target)) {
@@ -207,7 +243,7 @@ export function WorkspaceSidebar({
     }
 
     function dismissOnEscape(event: KeyboardEvent): void {
-      if (event.key !== "Escape") return;
+      if (event.key !== "Escape" || document.querySelector("[role='dialog'][aria-modal='true']") !== null) return;
       setOpenMenuId(null);
       openMenuTrigger.current?.focus();
     }
@@ -218,7 +254,7 @@ export function WorkspaceSidebar({
       document.removeEventListener("pointerdown", dismissOnOutsidePress);
       document.removeEventListener("keydown", dismissOnEscape);
     };
-  }, [openMenuId]);
+  }, [formMode, openMenuId]);
 
   async function submitWorkspace(values: WorkspaceFormValues): Promise<void> {
     if (formMode === null || submitting || actionPending) return;
@@ -235,28 +271,14 @@ export function WorkspaceSidebar({
         }
         await onCreateWorkspace(values);
       } else if (formMode.type === "edit") {
-        const profileChanged = values.securityProfile !== formMode.workspace.securityProfile;
-        const networkPolicyChanged = values.networkPolicy !== formMode.workspace.networkPolicy;
-        const downgrade = profileChanged &&
-          formMode.workspace.securityProfile === "workspace-sandboxed" &&
-          values.securityProfile === "unrestricted";
-        if (downgrade && !window.confirm(securityDowngradeConfirmation(formMode.workspace))) {
+        const plan = workspaceUpdatePlan(formMode.workspace, values);
+        if (plan.downgrade && !window.confirm(securityDowngradeConfirmation(formMode.workspace))) {
           return;
         }
-        const addsNetworkExposure = networkPolicyChanged &&
-          formMode.workspace.networkPolicy === "isolated" &&
-          values.networkPolicy === "managed-egress";
-        if (addsNetworkExposure && !window.confirm(networkExposureConfirmation(formMode.workspace.name))) {
+        if (plan.addsNetworkExposure && !window.confirm(networkExposureConfirmation(formMode.workspace.name))) {
           return;
         }
-        await onUpdateWorkspace(formMode.workspace.id, {
-          name: values.name,
-          ...(values.path === formMode.workspace.path ? {} : { path: values.path }),
-          ...(profileChanged ? { securityProfile: values.securityProfile } : {}),
-          ...(networkPolicyChanged ? { networkPolicy: values.networkPolicy } : {}),
-          ...(downgrade ? { acknowledgeSecurityDowngrade: true } : {}),
-          ...(addsNetworkExposure ? { acknowledgeNetworkExposure: true } : {}),
-        });
+        await onUpdateWorkspace(formMode.workspace.id, plan.changes);
       }
       setFormMode(null);
     } catch (error) {
@@ -328,7 +350,7 @@ export function WorkspaceSidebar({
         </div>
 
         {formMode !== null && formMode.type !== "info" && publicSandboxConfig !== undefined && publicManagedEgressConfig !== undefined && (
-          <WorkspaceForm
+          <WorkspaceDialog
             key={formMode.type === "create" ? "create" : formMode.workspace.id}
             mode={formMode.type}
             {...(formMode.type === "edit" ? {
@@ -338,8 +360,10 @@ export function WorkspaceSidebar({
                 sessionStorage: formMode.workspace.sessionStorage,
                 securityProfile: formMode.workspace.securityProfile,
                 networkPolicy: formMode.workspace.networkPolicy,
+                networkPolicySetId: formMode.workspace.networkPolicySetId,
                 effectiveSecurityProfile: formMode.workspace.effectiveSecurityProfile,
                 effectiveNetworkPolicy: formMode.workspace.effectiveNetworkPolicy,
+                effectiveNetworkPolicySetId: formMode.workspace.effectiveNetworkPolicySetId,
                 networkPolicyIssue: formMode.workspace.networkPolicyIssue,
               },
             } : {})}
@@ -348,10 +372,13 @@ export function WorkspaceSidebar({
             securityControlsLocked={formMode.type === "edit" && liveWorkspaceIds.has(formMode.workspace.id)}
             submitting={submitting}
             error={workspaceError}
+            returnFocusRef={formReturnFocus}
             onSubmit={submitWorkspace}
-            onCancel={() => {
+            onClose={() => {
+              if (submitting) return;
               setFormMode(null);
               setWorkspaceError(null);
+              window.requestAnimationFrame(() => formReturnFocus.current?.focus());
             }}
           />
         )}
@@ -404,14 +431,24 @@ export function WorkspaceSidebar({
                       : "Disabled — sandboxing is unavailable"}</dd>
               </div>
               <div>
-                <dt>Stored network policy</dt>
+                <dt>Stored network type</dt>
                 <dd>{networkPolicyLabel(formMode.workspace.networkPolicy)}</dd>
               </div>
               <div>
-                <dt>Effective network policy</dt>
+                <dt>Effective network type</dt>
                 <dd>{formMode.workspace.effectiveNetworkPolicy === null
                   ? "None — not a usable Workspace sandbox runtime"
                   : networkPolicyLabel(formMode.workspace.effectiveNetworkPolicy)}</dd>
+              </div>
+              <div>
+                <dt>Stored destination policy</dt>
+                <dd>{publicManagedEgressConfig?.policySets.find(({ id }) => id === formMode.workspace.networkPolicySetId)?.label ?? "Unavailable"} ({formMode.workspace.networkPolicySetId})</dd>
+              </div>
+              <div>
+                <dt>Effective destination policy</dt>
+                <dd>{formMode.workspace.effectiveNetworkPolicySetId === null
+                  ? "None"
+                  : `${publicManagedEgressConfig?.policySets.find(({ id }) => id === formMode.workspace.effectiveNetworkPolicySetId)?.label ?? "Unavailable"} (${formMode.workspace.effectiveNetworkPolicySetId})`}</dd>
               </div>
               <div>
                 <dt>Network policy issue</dt>
@@ -437,10 +474,10 @@ export function WorkspaceSidebar({
                   : <code>{formMode.workspace.sessionDirectory}</code>}</dd>
               </div>
               <div>
-                <dt>Allowed domain patterns</dt>
-                <dd className="workspace-info-values">{publicManagedEgressConfig === undefined || publicManagedEgressConfig.allowedDomainPatterns.length === 0
-                  ? "None configured"
-                  : publicManagedEgressConfig.allowedDomainPatterns.map((pattern) => <code key={pattern}>{pattern}</code>)}</dd>
+                <dt>Selected policy domain patterns</dt>
+                <dd className="workspace-info-values">{publicManagedEgressConfig?.policySets
+                  .find(({ id }) => id === formMode.workspace.networkPolicySetId)?.allowedDomainPatterns
+                  .map((pattern) => <code key={pattern}>{pattern}</code>) ?? "Unavailable"}</dd>
               </div>
               <div>
                 <dt>Denied domain patterns</dt>
@@ -449,10 +486,9 @@ export function WorkspaceSidebar({
                   : publicManagedEgressConfig.deniedDomainPatterns.map((pattern) => <code key={pattern}>{pattern}</code>)}</dd>
               </div>
               <div>
-                <dt>Allowed TCP ports</dt>
-                <dd>{publicManagedEgressConfig === undefined
-                  ? "Configuration unavailable"
-                  : publicManagedEgressConfig.allowedPorts.join(", ") || "None configured"}</dd>
+                <dt>Selected policy TCP ports</dt>
+                <dd>{publicManagedEgressConfig?.policySets
+                  .find(({ id }) => id === formMode.workspace.networkPolicySetId)?.allowedPorts.join(", ") ?? "Unavailable"}</dd>
               </div>
               <div>
                 <dt>Supported protocols</dt>
@@ -588,9 +624,8 @@ export function WorkspaceSidebar({
                         type="button"
                         disabled={!connected || publicSandboxConfig === undefined || publicManagedEgressConfig === undefined || busy}
                         aria-label={`Edit workspace ${workspace.name}`}
-                        onClick={() => {
-                          formReturnFocus.current = openMenuTrigger.current;
-                          setOpenMenuId(null);
+                        onClick={(event) => {
+                          formReturnFocus.current = event.currentTarget;
                           setFormMode({ type: "edit", workspace });
                           setWorkspaceError(null);
                         }}

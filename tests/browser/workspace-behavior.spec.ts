@@ -232,7 +232,7 @@ test("busy workspace mutation is rejected and removal retains closed sessions", 
   await page.getByRole("button", { name: "Cancel" }).click();
 
   page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("button", { name: `Workspace actions for ${workspaceName}` }).click();
+  // Cancel restores focus to the still-open Edit action menu.
   await page.getByRole("button", { name: `Remove workspace ${workspaceName}` }).click();
   await expect(page.getByRole("alert")).toContainText("Close the workspace's live conversations");
 

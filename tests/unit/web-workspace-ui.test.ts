@@ -11,6 +11,7 @@ import { WorkspaceForm } from "../../src/web/src/components/WorkspaceForm.js";
 import {
   WorkspaceSidebar,
   networkPolicyIssueLabel,
+  workspaceUpdatePlan,
   securityDowngradeConfirmation,
   sortWorkspacesByMostRecentlyUsed,
   workspacePolicyIssueLabel,
@@ -27,6 +28,10 @@ const optionalConfig: PublicSandboxConfig = {
 const managedConfig: PublicManagedEgressConfig = {
   mode: "optional",
   selectablePolicies: ["isolated", "managed-egress"],
+  policySets: [
+    { id: "default", label: "Package registries", allowedDomainPatterns: ["registry.npmjs.org"], allowedPorts: [443] },
+    { id: "web", label: "Example web", allowedDomainPatterns: ["**.example.com"], allowedPorts: [80, 443] },
+  ],
   allowedDomainPatterns: ["**.example.com"],
   deniedDomainPatterns: ["blocked.example.com"],
   allowedPorts: [80, 443],
@@ -47,6 +52,8 @@ const workspace: WorkspaceSummary = {
   networkPolicy: "isolated",
   effectiveSecurityProfile: "unrestricted",
   effectiveNetworkPolicy: null,
+  networkPolicySetId: "default",
+  effectiveNetworkPolicySetId: null,
   networkPolicyIssue: null,
   createdAt: 1,
   updatedAt: 2,
@@ -188,8 +195,10 @@ describe("workspace form", () => {
         sessionStorage: workspace.sessionStorage,
         securityProfile: "unrestricted",
         networkPolicy: "isolated",
+        networkPolicySetId: "default",
         effectiveSecurityProfile: "workspace-sandboxed",
         effectiveNetworkPolicy: "isolated",
+        effectiveNetworkPolicySetId: null,
         networkPolicyIssue: null,
       },
       securityControlsLocked: true,
@@ -199,8 +208,10 @@ describe("workspace form", () => {
     expect(html).toContain('aria-label="Edit workspace"');
     expect(html).toContain("Stored profile");
     expect(html).toContain("Effective profile");
-    expect(html).toContain("Stored network policy");
-    expect(html).toContain("Effective network policy");
+    expect(html).toContain("Stored network type");
+    expect(html).toContain("Effective network type");
+    expect(html).toContain("Stored destination policy");
+    expect(html).toContain("Effective destination policy");
     expect(html).toContain("Network policy issue");
     expect(html).toContain("Sandbox network");
     expect(html).toContain("Close this workspace’s live conversations");
@@ -217,9 +228,11 @@ describe("workspace form", () => {
         sessionStorage: workspace.sessionStorage,
         securityProfile: "workspace-sandboxed",
         networkPolicy: "managed-egress",
+        networkPolicySetId: "retired",
         effectiveSecurityProfile: "workspace-sandboxed",
         effectiveNetworkPolicy: null,
-        networkPolicyIssue: "managed_egress_disabled",
+        effectiveNetworkPolicySetId: null,
+        networkPolicyIssue: "managed_egress_policy_set_unavailable",
       },
       publicManagedEgressConfig: {
         ...managedConfig,
@@ -231,9 +244,64 @@ describe("workspace form", () => {
     });
 
     expect(html).toContain("Managed egress — unavailable");
-    expect(html).toContain("Managed egress is disabled by the administrator");
+    expect(html).toContain("retired — unavailable");
+    expect(html).toContain("stored destination policy is no longer available");
     expect(html).toContain('<option value="isolated">Isolated</option>');
     expect(html).not.toContain('<option value="managed-egress">Managed egress</option>');
+  });
+
+  it("shows only named destination sets and read-only normalized disclosures for managed egress", () => {
+    const html = renderForm(optionalConfig, {
+      mode: "edit",
+      initialValues: {
+        name: workspace.name,
+        path: workspace.path,
+        sessionStorage: workspace.sessionStorage,
+        securityProfile: "workspace-sandboxed",
+        networkPolicy: "managed-egress",
+        networkPolicySetId: "web",
+        effectiveSecurityProfile: "workspace-sandboxed",
+        effectiveNetworkPolicy: "managed-egress",
+        effectiveNetworkPolicySetId: "web",
+        networkPolicyIssue: null,
+      },
+    });
+
+    expect(html).toContain("Destination policy");
+    expect(html).toContain("Package registries (default)");
+    expect(html).toContain("Example web (web)");
+    expect(html).toContain("**.example.com");
+    expect(html).toContain("80, 443");
+    expect(html).not.toContain('name="allowedDomains"');
+    expect(html).not.toContain('name="allowedPorts"');
+  });
+
+  it("builds exact set-change and acknowledgement updates without destination rules", () => {
+    const managed = {
+      ...workspace,
+      securityProfile: "workspace-sandboxed" as const,
+      networkPolicy: "managed-egress" as const,
+      effectiveSecurityProfile: "workspace-sandboxed" as const,
+      effectiveNetworkPolicy: "managed-egress" as const,
+      effectiveNetworkPolicySetId: "default",
+    };
+    const plan = workspaceUpdatePlan(managed, {
+      name: managed.name,
+      path: managed.path,
+      sessionStorage: managed.sessionStorage,
+      securityProfile: "workspace-sandboxed",
+      networkPolicy: "managed-egress",
+      networkPolicySetId: "web",
+    });
+
+    expect(plan.addsNetworkExposure).toBe(true);
+    expect(plan.changes).toEqual({
+      name: managed.name,
+      networkPolicySetId: "web",
+      acknowledgeNetworkExposure: true,
+    });
+    expect(plan.changes).not.toHaveProperty("allowedDomains");
+    expect(plan.changes).not.toHaveProperty("allowedPorts");
   });
 
   it("implements disabled, optional, and required profile semantics", () => {

@@ -147,6 +147,7 @@ export function App() {
       sessionStorage: values.sessionStorage,
       securityProfile: values.securityProfile,
       networkPolicy: values.networkPolicy,
+      networkPolicySetId: values.networkPolicySetId,
     }));
     const created = result.workspaces.find((workspace) => !knownIds.has(workspace.id));
     if (created !== undefined) {
@@ -161,6 +162,7 @@ export function App() {
       readonly path?: string;
       readonly securityProfile?: WorkspaceFormValues["securityProfile"];
       readonly networkPolicy?: WorkspaceFormValues["networkPolicy"];
+      readonly networkPolicySetId?: string;
       readonly acknowledgeSecurityDowngrade?: true;
       readonly acknowledgeNetworkExposure?: true;
     },
@@ -176,6 +178,9 @@ export function App() {
       ...(values.networkPolicy === undefined
         ? {}
         : { networkPolicy: values.networkPolicy }),
+      ...(values.networkPolicySetId === undefined
+        ? {}
+        : { networkPolicySetId: values.networkPolicySetId }),
       ...(values.acknowledgeSecurityDowngrade === true
         ? { acknowledgeSecurityDowngrade: true as const }
         : {}),

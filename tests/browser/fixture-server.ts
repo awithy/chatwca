@@ -613,7 +613,12 @@ const workspaces: ProtocolWorkspaceRepository = {
     };
   },
   create: (input) => {
+    if (input.path.includes("fixture-slow-submit")) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 600);
+    }
     workspaceSequence += 1;
+    const unavailableSet = input.path.includes("fixture-policy-set-unavailable");
+    const selectedSetId = unavailableSet ? "retired-policy" : input.networkPolicySetId ?? "default";
     const workspace: WorkspaceSummary = {
       id: `browser-workspace-${String(workspaceSequence)}`,
       name: input.name.trim(),
@@ -625,21 +630,21 @@ const workspaces: ProtocolWorkspaceRepository = {
           : null,
       securityProfile: input.securityProfile,
       networkPolicy: input.networkPolicy ?? "isolated",
-      networkPolicySetId: input.networkPolicySetId ?? "default",
+      networkPolicySetId: selectedSetId,
       effectiveSecurityProfile: input.securityProfile,
       effectiveNetworkPolicy: input.securityProfile === "workspace-sandboxed"
         ? input.networkPolicy ?? "isolated"
         : null,
       effectiveNetworkPolicySetId:
-        input.securityProfile === "workspace-sandboxed" &&
+        !unavailableSet && input.securityProfile === "workspace-sandboxed" &&
           (input.networkPolicy ?? "isolated") === "managed-egress"
-          ? input.networkPolicySetId ?? "default"
+          ? selectedSetId
           : null,
-      networkPolicyIssue: null,
+      networkPolicyIssue: unavailableSet ? "managed_egress_policy_set_unavailable" : null,
       createdAt: nextTime(),
       updatedAt: nextTime(),
       available: !input.path.includes("fixture-unavailable"),
-      usable: !input.path.includes("fixture-unavailable") &&
+      usable: !unavailableSet && !input.path.includes("fixture-unavailable") &&
         !input.path.includes("fixture-policy-blocked"),
       policyIssue: input.path.includes("fixture-policy-blocked")
         ? "outside_workspace_roots"
@@ -681,11 +686,24 @@ const workspaces: ProtocolWorkspaceRepository = {
                 ? changes.networkPolicy
                 : null,
           }),
+      ...(changes.networkPolicySetId === undefined
+        ? {}
+        : {
+            networkPolicySetId: changes.networkPolicySetId,
+            effectiveNetworkPolicySetId:
+              (changes.securityProfile ?? current.securityProfile) === "workspace-sandboxed" &&
+                (changes.networkPolicy ?? current.networkPolicy) === "managed-egress"
+                ? changes.networkPolicySetId
+                : null,
+            networkPolicyIssue: null,
+          }),
       available: changes.path === undefined
         ? current.available
         : !changes.path.includes("fixture-unavailable"),
       usable: changes.path === undefined
-        ? current.usable
+        ? changes.networkPolicySetId !== undefined && current.networkPolicyIssue === "managed_egress_policy_set_unavailable"
+          ? true
+          : current.usable
         : !changes.path.includes("fixture-unavailable") &&
           !changes.path.includes("fixture-policy-blocked"),
       policyIssue: changes.path === undefined
@@ -729,6 +747,7 @@ const config = loadConfig(
     CHATWCA_NETWORK_ALLOWED_DOMAINS: '["**.example.com","registry.npmjs.org"]',
     CHATWCA_NETWORK_DENIED_DOMAINS: '["blocked.example.com"]',
     CHATWCA_NETWORK_ALLOWED_PORTS: "[80,443]",
+    CHATWCA_NETWORK_POLICY_SETS: '[{"id":"default","label":"Package registries","allowedDomains":["registry.npmjs.org"],"allowedPorts":[443]},{"id":"web","label":"Example web","allowedDomains":["**.example.com"],"allowedPorts":[80,443]}]',
   },
   CWD,
 );

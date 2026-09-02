@@ -30,7 +30,7 @@ test("creates, edits, selects, and removes a workspace with retention confirmati
     expect(dialog.message()).toContain("will not be deleted");
     await dialog.accept();
   });
-  await page.getByRole("button", { name: "Workspace actions for Renamed project" }).click();
+  // The menu remains open so focus can return to the exact Edit action after the modal closes.
   await page.getByRole("button", { name: "Remove workspace Renamed project" }).click();
   await expect(page.getByRole("button", { name: /Renamed project/ })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Select a workspace" })).toBeVisible();

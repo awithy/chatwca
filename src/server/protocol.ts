@@ -80,6 +80,7 @@ export interface ProtocolWorkspaceRepository {
     readonly sessionStorage: WorkspaceSummary["sessionStorage"];
     readonly securityProfile: WorkspaceSummary["securityProfile"];
     readonly networkPolicy?: WorkspaceSummary["networkPolicy"];
+    readonly networkPolicySetId?: WorkspaceSummary["networkPolicySetId"];
   }): WorkspaceSummary;
   update(workspaceId: string, changes: UpdateWorkspaceInput): WorkspaceSummary;
   delete(workspaceId: string): void;
@@ -179,6 +180,9 @@ export async function dispatchClientCommand(
         ...(command.networkPolicy === undefined
           ? {}
           : { networkPolicy: command.networkPolicy }),
+        ...(command.networkPolicySetId === undefined
+          ? {}
+          : { networkPolicySetId: command.networkPolicySetId }),
       });
       const authoritative = workspaces.list();
       return {
@@ -189,11 +193,13 @@ export async function dispatchClientCommand(
     case "workspace.update": {
       const securityProfile = command.securityProfile;
       const networkPolicy = command.networkPolicy;
+      const networkPolicySetId = command.networkPolicySetId;
       if (
         (
           command.path !== undefined ||
           securityProfile !== undefined ||
-          networkPolicy !== undefined
+          networkPolicy !== undefined ||
+          networkPolicySetId !== undefined
         ) &&
         registry.hasLiveWorkspace(command.workspaceId)
       ) {
@@ -208,6 +214,9 @@ export async function dispatchClientCommand(
         ...(networkPolicy === undefined
           ? {}
           : { networkPolicy }),
+        ...(networkPolicySetId === undefined
+          ? {}
+          : { networkPolicySetId }),
         ...(command.acknowledgeSecurityDowngrade === undefined
           ? {}
           : { acknowledgeSecurityDowngrade: command.acknowledgeSecurityDowngrade }),

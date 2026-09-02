@@ -121,6 +121,12 @@ describe("server shell", () => {
       managedEgress: {
         mode: "disabled",
         selectablePolicies: ["isolated"],
+        policySets: [{
+          id: "default",
+          label: "Default",
+          allowedDomainPatterns: [],
+          allowedPorts: [80, 443],
+        }],
         allowedDomainPatterns: [],
         deniedDomainPatterns: [],
         allowedPorts: [80, 443],

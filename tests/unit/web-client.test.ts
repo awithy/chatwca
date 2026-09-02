@@ -60,6 +60,8 @@ const workspace = {
   networkPolicy: "isolated",
   effectiveSecurityProfile: "unrestricted",
   effectiveNetworkPolicy: null,
+  networkPolicySetId: "default",
+  effectiveNetworkPolicySetId: null,
   networkPolicyIssue: null,
   createdAt: 1,
   updatedAt: 1,
@@ -86,6 +88,8 @@ function conversation(revision = 0): ConversationState {
     queue: { steering: [], followUp: [] },
     securityProfile: "unrestricted",
     networkPolicy: null,
+    networkPolicySetId: "default",
+    effectiveNetworkPolicySetId: null,
   };
 }
 

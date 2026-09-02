@@ -217,6 +217,16 @@ export const SandboxNetworkPolicySchema = Type.Union([
 ]);
 export type SandboxNetworkPolicy = Static<typeof SandboxNetworkPolicySchema>;
 
+/** Stable administrator-defined destination-policy set identifier. */
+export const NETWORK_POLICY_SET_ID_MAX_LENGTH = 64;
+export const NETWORK_POLICY_SET_ID_PATTERN = "^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$";
+export const NetworkPolicySetIdSchema = Type.String({
+  minLength: 1,
+  maxLength: NETWORK_POLICY_SET_ID_MAX_LENGTH,
+  pattern: NETWORK_POLICY_SET_ID_PATTERN,
+});
+export type NetworkPolicySetId = Static<typeof NetworkPolicySetIdSchema>;
+
 export const ManagedEgressModeSchema = Type.Union([
   Type.Literal("disabled"),
   Type.Literal("optional"),
@@ -233,6 +243,7 @@ export type WorkspacePolicyIssue = Static<typeof WorkspacePolicyIssueSchema>;
 
 export const WorkspaceNetworkPolicyIssueSchema = Type.Union([
   Type.Literal("managed_egress_disabled"),
+  Type.Literal("managed_egress_policy_set_unavailable"),
   Type.Null(),
 ]);
 export type WorkspaceNetworkPolicyIssue = Static<
@@ -256,9 +267,26 @@ export const ManagedEgressProtocolSchema = Type.Union([
 ]);
 export type ManagedEgressProtocol = Static<typeof ManagedEgressProtocolSchema>;
 
+export const NETWORK_POLICY_SET_LABEL_MAX_LENGTH = 128;
+export const MAX_PUBLIC_NETWORK_POLICY_SETS = 64;
+
+export const PublicNetworkPolicySetSchema = strictObject({
+  id: NetworkPolicySetIdSchema,
+  label: Type.String({ minLength: 1, maxLength: NETWORK_POLICY_SET_LABEL_MAX_LENGTH }),
+  // Synthesized `default` mirrors legacy ceilings exactly, including an empty
+  // disabled-mode ceiling. Explicit configured sets are non-empty at startup.
+  allowedDomainPatterns: Type.Array(Type.String({ minLength: 1 })),
+  allowedPorts: Type.Array(Type.Integer({ minimum: 1, maximum: 65_535 })),
+});
+export type PublicNetworkPolicySet = Static<typeof PublicNetworkPolicySetSchema>;
+
 export const PublicManagedEgressConfigSchema = strictObject({
   mode: ManagedEgressModeSchema,
   selectablePolicies: Type.Array(SandboxNetworkPolicySchema),
+  policySets: Type.Array(PublicNetworkPolicySetSchema, {
+    minItems: 1,
+    maxItems: MAX_PUBLIC_NETWORK_POLICY_SETS,
+  }),
   allowedDomainPatterns: Type.Array(Type.String({ minLength: 1 })),
   deniedDomainPatterns: Type.Array(Type.String({ minLength: 1 })),
   allowedPorts: Type.Array(Type.Integer({ minimum: 1, maximum: 65_535 })),
@@ -289,6 +317,7 @@ export const WorkspaceSchema = strictObject({
   sessionDirectory: Type.Union([NonEmptyStringSchema, Type.Null()]),
   securityProfile: WorkspaceSecurityProfileSchema,
   networkPolicy: SandboxNetworkPolicySchema,
+  networkPolicySetId: NetworkPolicySetIdSchema,
   createdAt: Type.Number({ minimum: 0 }),
   updatedAt: Type.Number({ minimum: 0 }),
 });
@@ -308,6 +337,11 @@ export const WorkspaceSummarySchema = strictObject({
   ]),
   effectiveNetworkPolicy: Type.Union([
     SandboxNetworkPolicySchema,
+    Type.Null(),
+  ]),
+  networkPolicySetId: NetworkPolicySetIdSchema,
+  effectiveNetworkPolicySetId: Type.Union([
+    NetworkPolicySetIdSchema,
     Type.Null(),
   ]),
   networkPolicyIssue: WorkspaceNetworkPolicyIssueSchema,
@@ -375,6 +409,8 @@ export const ConversationStateSchema = strictObject({
   queue: QueueStateSchema,
   securityProfile: WorkspaceSecurityProfileSchema,
   networkPolicy: Type.Union([SandboxNetworkPolicySchema, Type.Null()]),
+  networkPolicySetId: NetworkPolicySetIdSchema,
+  effectiveNetworkPolicySetId: Type.Union([NetworkPolicySetIdSchema, Type.Null()]),
 });
 export type ConversationState = Static<typeof ConversationStateSchema>;
 
@@ -390,6 +426,7 @@ export const WorkspaceCreateCommandSchema = strictObject({
   sessionStorage: WorkspaceSessionStorageSchema,
   securityProfile: WorkspaceSecurityProfileSchema,
   networkPolicy: Type.Optional(SandboxNetworkPolicySchema),
+  networkPolicySetId: Type.Optional(NetworkPolicySetIdSchema),
 });
 export const WorkspaceUpdateCommandSchema = strictObject({
   type: Type.Literal("workspace.update"),
@@ -399,6 +436,7 @@ export const WorkspaceUpdateCommandSchema = strictObject({
   path: Type.Optional(NonEmptyStringSchema),
   securityProfile: Type.Optional(WorkspaceSecurityProfileSchema),
   networkPolicy: Type.Optional(SandboxNetworkPolicySchema),
+  networkPolicySetId: Type.Optional(NetworkPolicySetIdSchema),
   acknowledgeSecurityDowngrade: Type.Optional(Type.Literal(true)),
   acknowledgeNetworkExposure: Type.Optional(Type.Literal(true)),
 });

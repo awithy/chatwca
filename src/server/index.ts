@@ -544,6 +544,7 @@ export async function startChatWcaServer(
           managedEgressMode: loadedConfig.managedNetwork.mode,
           networkHelperPath: loadedConfig.managedNetwork.helperPath,
           networkHelperDirectory: loadedConfig.managedNetwork.helperDirectory,
+          networkPolicySets: loadedConfig.managedNetwork.policySets,
         },
       }))
     )(database.connection, config);

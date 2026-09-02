@@ -239,6 +239,7 @@ describe("server WebSocket protocol", () => {
       sessionStorage: "pi-default",
       securityProfile: "workspace-sandboxed",
       networkPolicy: "managed-egress",
+      networkPolicySetId: "github",
     }), registry, history, workspaces);
     expect(workspaces.create).toHaveBeenCalledWith({
       name: "Managed",
@@ -246,6 +247,7 @@ describe("server WebSocket protocol", () => {
       sessionStorage: "pi-default",
       securityProfile: "workspace-sandboxed",
       networkPolicy: "managed-egress",
+      networkPolicySetId: "github",
     });
 
     const renamed = await dispatchClientCommand(command({
@@ -280,6 +282,13 @@ describe("server WebSocket protocol", () => {
       acknowledgeNetworkExposure: true,
     }), registry, history, workspaces)).rejects.toMatchObject({ code: ERROR_CODES.WORKSPACE_BUSY });
     await expect(dispatchClientCommand(command({
+      type: "workspace.update",
+      requestId: "set",
+      workspaceId: workspace.id,
+      networkPolicySetId: "github",
+      acknowledgeNetworkExposure: true,
+    }), registry, history, workspaces)).rejects.toMatchObject({ code: ERROR_CODES.WORKSPACE_BUSY });
+    await expect(dispatchClientCommand(command({
       type: "workspace.delete",
       requestId: "delete",
       workspaceId: workspace.id,
@@ -297,6 +306,21 @@ describe("server WebSocket protocol", () => {
     }), registry, history, workspaces);
     expect(workspaces.update).toHaveBeenCalledWith(workspace.id, {
       networkPolicy: "managed-egress",
+      acknowledgeNetworkExposure: true,
+    });
+  });
+
+  it("forwards destination-set changes and acknowledgement only to repository validation", async () => {
+    const { registry, history, workspaces } = services();
+    await dispatchClientCommand(command({
+      type: "workspace.update",
+      requestId: "set",
+      workspaceId: workspace.id,
+      networkPolicySetId: "github",
+      acknowledgeNetworkExposure: true,
+    }), registry, history, workspaces);
+    expect(workspaces.update).toHaveBeenCalledWith(workspace.id, {
+      networkPolicySetId: "github",
       acknowledgeNetworkExposure: true,
     });
   });

@@ -19,6 +19,7 @@ import {
   type WorkspaceFileSystem,
 } from "../../src/server/workspace-repository.js";
 import { AppError, ERROR_CODES } from "../../src/shared/errors.js";
+import { loadManagedNetworkConfig } from "../../src/server/network/config.js";
 
 const temporaryDirectories: string[] = [];
 const databases: ChatWcaDatabase[] = [];
@@ -78,8 +79,10 @@ describe("WorkspaceRepository CRUD", () => {
       sessionDirectory: null,
       securityProfile: "unrestricted",
       networkPolicy: "isolated",
+      networkPolicySetId: "default",
       effectiveSecurityProfile: "unrestricted",
       effectiveNetworkPolicy: null,
+      effectiveNetworkPolicySetId: null,
       networkPolicyIssue: null,
       createdAt: 10,
       updatedAt: 10,
@@ -139,8 +142,10 @@ describe("WorkspaceRepository CRUD", () => {
         sessionDirectory: null,
         securityProfile: "unrestricted",
         networkPolicy: "isolated",
+        networkPolicySetId: "default",
         effectiveSecurityProfile: "unrestricted",
         effectiveNetworkPolicy: null,
+        effectiveNetworkPolicySetId: null,
         networkPolicyIssue: null,
         createdAt: 123,
         updatedAt: 123,
@@ -199,6 +204,195 @@ describe("WorkspaceRepository CRUD", () => {
       expect.objectContaining({ code: ERROR_CODES.INVALID_COMMAND }),
     );
     expect(repository.get(created.id).updatedAt).toBe(10);
+  });
+});
+
+describe("workspace destination policy sets", () => {
+  function managedConfig() {
+    return loadManagedNetworkConfig({
+      CHATWCA_MANAGED_EGRESS_MODE: "optional",
+      CHATWCA_NETWORK_ALLOWED_DOMAINS: '["registry.example","**.github.com"]',
+      CHATWCA_NETWORK_ALLOWED_PORTS: "[443]",
+      CHATWCA_NETWORK_POLICY_SETS: JSON.stringify([
+        { id: "default", label: "Registry", allowedDomains: ["registry.example"], allowedPorts: [443] },
+        { id: "github", label: "GitHub", allowedDomains: ["**.github.com"], allowedPorts: [443] },
+      ]),
+    }, "optional", { processCwd: "/tmp/chatwca-config" });
+  }
+
+  function managedRepository(
+    opened: ChatWcaDatabase,
+    root: string,
+    policySets = managedConfig().policySets,
+  ) {
+    return new WorkspaceRepository(opened.connection, {
+      uuid: () => "workspace-managed",
+      clock: () => 10,
+      policy: {
+        mode: "optional",
+        workspaceRoots: [root],
+        dataDirectory: "/var/lib/chatwca",
+        piAgentDirectory: "/var/lib/pi",
+        readOnlyMounts: [],
+        managedEgressMode: "optional",
+        networkPolicySets: policySets,
+      },
+    });
+  }
+
+  it("defaults to default, persists configured selections, and returns the immutable compiled set", async () => {
+    const root = temporaryDirectory();
+    const workspacePath = directory(root, "project");
+    const opened = database();
+    const repository = managedRepository(opened, root);
+    const created = repository.create({
+      name: "Managed",
+      path: workspacePath,
+      securityProfile: "workspace-sandboxed",
+      networkPolicy: "managed-egress",
+      networkPolicySetId: "github",
+    });
+    expect(created).toMatchObject({
+      networkPolicySetId: "github",
+      effectiveNetworkPolicySetId: "github",
+      networkPolicyIssue: null,
+      usable: true,
+    });
+    expect(opened.connection.prepare(
+      "SELECT network_policy_set_id FROM workspaces WHERE id = ?",
+    ).get(created.id)).toEqual({ network_policy_set_id: "github" });
+    const runtime = await repository.requireUsable(created.id);
+    expect(runtime.networkPolicySetId).toBe("github");
+    // Enforce the selected policy bytes rather than relying on mutable browser
+    // state or a global destination policy.
+    expect(runtime.networkPolicySet).toMatchObject({
+      id: "github",
+      allowedDomainPatterns: ["**.github.com"],
+      allowedPorts: [443],
+    });
+    expect(Object.isFrozen(runtime.networkPolicySet)).toBe(true);
+  });
+
+  it("retains a removed set, fails closed only when managed egress is effective, and permits recovery", async () => {
+    const root = temporaryDirectory();
+    const workspacePath = directory(root, "project");
+    const opened = database();
+    const configured = managedConfig();
+    const initial = managedRepository(opened, root, configured.policySets);
+    initial.create({
+      name: "Managed",
+      path: workspacePath,
+      securityProfile: "workspace-sandboxed",
+      networkPolicy: "managed-egress",
+      networkPolicySetId: "github",
+    });
+    const defaultOnly = new Map([
+      ["default", configured.policySets.get("default")!],
+    ]);
+    const removed = managedRepository(opened, root, defaultOnly);
+    expect(removed.get("workspace-managed")).toMatchObject({
+      networkPolicySetId: "github",
+      effectiveNetworkPolicySetId: null,
+      networkPolicyIssue: "managed_egress_policy_set_unavailable",
+      usable: false,
+    });
+    await expect(removed.requireUsable("workspace-managed")).rejects.toMatchObject({
+      code: ERROR_CODES.NETWORK_POLICY_INVALID,
+    });
+    expect(removed.update("workspace-managed", {
+      networkPolicy: "isolated",
+    })).toMatchObject({
+      networkPolicySetId: "github",
+      effectiveNetworkPolicySetId: null,
+      networkPolicyIssue: null,
+      usable: true,
+    });
+    expect(removed.update("workspace-managed", {
+      networkPolicySetId: "default",
+    })).toMatchObject({ networkPolicySetId: "default" });
+  });
+
+  it("validates configured IDs and requires acknowledgements exactly for exposure transitions", () => {
+    const root = temporaryDirectory();
+    const workspacePath = directory(root, "project");
+    const opened = database();
+    const repository = managedRepository(opened, root);
+    const created = repository.create({
+      name: "Managed",
+      path: workspacePath,
+      securityProfile: "workspace-sandboxed",
+      networkPolicy: "managed-egress",
+    });
+    expect(created.networkPolicySetId).toBe("default");
+    expect(() => repository.update(created.id, { networkPolicySetId: "github" }))
+      .toThrow(expect.objectContaining({ code: ERROR_CODES.INVALID_COMMAND }));
+    expect(repository.update(created.id, {
+      networkPolicySetId: "github",
+      acknowledgeNetworkExposure: true,
+    })).toMatchObject({ networkPolicySetId: "github" });
+    expect(() => repository.update(created.id, {
+      name: "Smuggled",
+      acknowledgeNetworkExposure: true,
+    })).toThrow(expect.objectContaining({ code: ERROR_CODES.INVALID_COMMAND }));
+    expect(() => repository.update(created.id, {
+      networkPolicySetId: "missing",
+      acknowledgeNetworkExposure: true,
+    })).toThrow(expect.objectContaining({ code: ERROR_CODES.INVALID_COMMAND }));
+    expect(() => repository.create({
+      name: "Invalid",
+      path: directory(root, "invalid"),
+      networkPolicySetId: "Bad ID",
+    })).toThrow(expect.objectContaining({ code: ERROR_CODES.INVALID_COMMAND }));
+  });
+
+  it("requires acknowledgement when a stored managed policy becomes effective through a profile change", () => {
+    const root = temporaryDirectory();
+    const workspacePath = directory(root, "project");
+    const opened = database();
+    const repository = managedRepository(opened, root);
+    const created = repository.create({
+      name: "Future managed",
+      path: workspacePath,
+      securityProfile: "unrestricted",
+      networkPolicy: "managed-egress",
+      networkPolicySetId: "github",
+    });
+    expect(created).toMatchObject({
+      effectiveNetworkPolicy: null,
+      effectiveNetworkPolicySetId: null,
+      networkPolicyIssue: null,
+    });
+    expect(() => repository.update(created.id, {
+      securityProfile: "workspace-sandboxed",
+    })).toThrow(expect.objectContaining({ code: ERROR_CODES.INVALID_COMMAND }));
+    expect(repository.update(created.id, {
+      securityProfile: "workspace-sandboxed",
+      acknowledgeNetworkExposure: true,
+    })).toMatchObject({ effectiveNetworkPolicySetId: "github" });
+  });
+
+  it("allows an isolated workspace to narrow its future set without a network acknowledgement", () => {
+    const root = temporaryDirectory();
+    const workspacePath = directory(root, "project");
+    const opened = database();
+    const repository = managedRepository(opened, root);
+    const created = repository.create({
+      name: "Isolated",
+      path: workspacePath,
+      securityProfile: "workspace-sandboxed",
+    });
+    expect(repository.update(created.id, { networkPolicySetId: "github" }))
+      .toMatchObject({ networkPolicy: "isolated", networkPolicySetId: "github" });
+    expect(() => repository.update(created.id, {
+      networkPolicy: "managed-egress",
+    })).toThrow(expect.objectContaining({ code: ERROR_CODES.INVALID_COMMAND }));
+    expect(repository.update(created.id, {
+      networkPolicy: "managed-egress",
+      acknowledgeNetworkExposure: true,
+    })).toMatchObject({
+      effectiveNetworkPolicy: "managed-egress",
+      effectiveNetworkPolicySetId: "github",
+    });
   });
 });
 

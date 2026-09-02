@@ -4,7 +4,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 
 export const DATABASE_FILENAME = "chatwca.sqlite";
-export const DATABASE_SCHEMA_VERSION = 4;
+export const DATABASE_SCHEMA_VERSION = 5;
 export const DATABASE_BUSY_TIMEOUT_MS = 5_000;
 
 const INITIAL_SCHEMA = `
@@ -18,6 +18,13 @@ const INITIAL_SCHEMA = `
       CHECK (security_profile IN ('unrestricted', 'workspace-sandboxed')),
     network_policy TEXT NOT NULL DEFAULT 'isolated'
       CHECK (network_policy IN ('isolated', 'managed-egress')),
+    network_policy_set_id TEXT NOT NULL DEFAULT 'default'
+      CHECK (
+        length(network_policy_set_id) BETWEEN 1 AND 64 AND
+        network_policy_set_id NOT GLOB '*[^a-z0-9_-]*' AND
+        substr(network_policy_set_id, 1, 1) GLOB '[a-z0-9]' AND
+        substr(network_policy_set_id, -1, 1) GLOB '[a-z0-9]'
+      ),
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
   );
@@ -106,6 +113,22 @@ function migrateVersionThree(connection: Database.Database): void {
   })();
 }
 
+function migrateVersionFour(connection: Database.Database): void {
+  connection.transaction(() => {
+    connection.exec(`
+      ALTER TABLE workspaces
+      ADD COLUMN network_policy_set_id TEXT NOT NULL DEFAULT 'default'
+        CHECK (
+          length(network_policy_set_id) BETWEEN 1 AND 64 AND
+          network_policy_set_id NOT GLOB '*[^a-z0-9_-]*' AND
+          substr(network_policy_set_id, 1, 1) GLOB '[a-z0-9]' AND
+          substr(network_policy_set_id, -1, 1) GLOB '[a-z0-9]'
+        );
+    `);
+    connection.pragma("user_version = 5");
+  })();
+}
+
 /**
  * Create/open and initialize ChatWCA's SQLite database.
  *
@@ -134,11 +157,16 @@ export function openDatabase(
       migrateVersionOne(connection);
       migrateVersionTwo(connection);
       migrateVersionThree(connection);
+      migrateVersionFour(connection);
     } else if (version === 2) {
       migrateVersionTwo(connection);
       migrateVersionThree(connection);
+      migrateVersionFour(connection);
     } else if (version === 3) {
       migrateVersionThree(connection);
+      migrateVersionFour(connection);
+    } else if (version === 4) {
+      migrateVersionFour(connection);
     } else if (version !== DATABASE_SCHEMA_VERSION) {
       throw new UnsupportedDatabaseVersionError(version);
     }

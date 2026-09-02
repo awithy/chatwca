@@ -152,6 +152,12 @@ describe("production startup wiring", () => {
       CHATWCA_WORKSPACE_ROOTS: "[]",
       CHATWCA_MANAGED_EGRESS_MODE: "optional",
       CHATWCA_NETWORK_ALLOWED_DOMAINS: '["EXAMPLE.com."]',
+      CHATWCA_NETWORK_POLICY_SETS: JSON.stringify([{
+        id: "default",
+        label: "Example destinations",
+        allowedDomains: ["example.com"],
+        allowedPorts: [443],
+      }]),
       CHATWCA_SHUTDOWN_GRACE_MS: "25",
     }, root);
     const calls: string[] = [];
@@ -201,6 +207,12 @@ describe("production startup wiring", () => {
       managedEgress: {
         mode: "optional",
         selectablePolicies: ["isolated", "managed-egress"],
+        policySets: [{
+          id: "default",
+          label: "Example destinations",
+          allowedDomainPatterns: ["example.com"],
+          allowedPorts: [443],
+        }],
         allowedDomainPatterns: ["example.com"],
         functionalProbeSucceeded: true,
       },

@@ -70,7 +70,7 @@ const DEFAULT_MESSAGES: Readonly<Record<ErrorCode, string>> = {
   invalid_workspace_path: "The workspace path must be an existing accessible directory.",
   duplicate_workspace_path: "That workspace path is already registered.",
   workspace_unavailable: "The workspace directory is unavailable.",
-  workspace_busy: "Close the workspace's live conversations before changing its path, security profile, network policy, or removing it.",
+  workspace_busy: "Close the workspace's live conversations before changing its path, security profile, network policy, destination policy, or removing it.",
   sandbox_disabled: "Workspace sandboxing is disabled by the server.",
   sandbox_configuration_error: "The server sandbox configuration is invalid.",
   sandbox_unavailable: "Workspace sandboxing is unavailable.",

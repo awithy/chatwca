@@ -96,6 +96,9 @@ describe("workspace security policy", () => {
           sessionDirectory: null,
           securityProfile: effective,
           networkPolicy: effective === "workspace-sandboxed" ? "isolated" : null,
+          networkPolicySetId: "default",
+          effectiveNetworkPolicySetId: null,
+          networkPolicySet: null,
         });
       } else {
         await expect(repository.requireUsable("workspace-1")).rejects.toMatchObject({

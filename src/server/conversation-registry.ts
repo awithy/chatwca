@@ -14,7 +14,11 @@ import {
   DEFAULT_MAX_LIVE_CONVERSATIONS,
   DEFAULT_MAX_TOTAL_IMAGE_BYTES,
 } from "./config.js";
-import { MAX_CONVERSATION_TITLE_LENGTH } from "../shared/protocol.js";
+import {
+  MAX_CONVERSATION_TITLE_LENGTH,
+  NETWORK_POLICY_SET_ID_MAX_LENGTH,
+  NETWORK_POLICY_SET_ID_PATTERN,
+} from "../shared/protocol.js";
 import type {
   ConversationEvent,
   ConversationState,
@@ -52,6 +56,7 @@ import type {
 } from "./pi-runtime.js";
 import type { NetworkBlockedNotification } from "./network/audit.js";
 import type { RuntimeWorkspacePolicy } from "./workspace-repository.js";
+import { DEFAULT_NETWORK_POLICY_SET_ID } from "./network/config.js";
 
 const UNTITLED_CONVERSATION = "Untitled conversation";
 
@@ -94,6 +99,8 @@ export interface ConversationRecord {
   readonly sessionDirectory: string | null;
   readonly securityProfile: WorkspaceSecurityProfile;
   readonly networkPolicy: SandboxNetworkPolicy | null;
+  readonly networkPolicySetId: string;
+  readonly effectiveNetworkPolicySetId: string | null;
   /** Locks terminal runtime failures against later Pi idle events. */
   runtimeFailureTerminal: boolean;
   sessionFile: string;
@@ -474,6 +481,8 @@ export class ConversationRegistry {
       queue: queueOf(record.session),
       securityProfile: record.securityProfile,
       networkPolicy: record.networkPolicy,
+      networkPolicySetId: record.networkPolicySetId,
+      effectiveNetworkPolicySetId: record.effectiveNetworkPolicySetId,
     };
   }
 
@@ -1087,6 +1096,8 @@ export class ConversationRegistry {
       sessionDirectory: workspace.sessionDirectory,
       securityProfile: workspace.securityProfile,
       networkPolicy: workspace.networkPolicy,
+      networkPolicySetId: workspace.networkPolicySetId,
+      effectiveNetworkPolicySetId: workspace.effectiveNetworkPolicySetId,
       runtimeFailureTerminal: false,
       sessionFile,
       cwd: workspace.cwd,
@@ -1166,6 +1177,10 @@ export class ConversationRegistry {
   #normalizePolicy(policy: ConversationWorkspace): ConversationWorkspace {
     const networkPolicy = policy.networkPolicy ??
       (policy.securityProfile === "workspace-sandboxed" ? "isolated" : null);
+    const networkPolicySetId = policy.networkPolicySetId ?? DEFAULT_NETWORK_POLICY_SET_ID;
+    const effectiveNetworkPolicySetId = networkPolicy === "managed-egress"
+      ? policy.effectiveNetworkPolicySetId ?? networkPolicySetId
+      : null;
     if (
       typeof policy.workspaceId !== "string" ||
       policy.workspaceId.length === 0 ||
@@ -1177,6 +1192,9 @@ export class ConversationRegistry {
         ? networkPolicy !== null
         : networkPolicy !== "isolated" &&
           networkPolicy !== "managed-egress") ||
+      (networkPolicySetId.length > NETWORK_POLICY_SET_ID_MAX_LENGTH ||
+        !new RegExp(NETWORK_POLICY_SET_ID_PATTERN, "u").test(networkPolicySetId)) ||
+      (effectiveNetworkPolicySetId !== null && effectiveNetworkPolicySetId !== networkPolicySetId) ||
       (policy.sessionDirectory !== null &&
         (typeof policy.sessionDirectory !== "string" ||
           !path.isAbsolute(policy.sessionDirectory)))
@@ -1191,6 +1209,11 @@ export class ConversationRegistry {
         : path.resolve(policy.sessionDirectory),
       securityProfile: policy.securityProfile,
       networkPolicy,
+      networkPolicySetId,
+      effectiveNetworkPolicySetId,
+      networkPolicySet: networkPolicy === "managed-egress"
+        ? policy.networkPolicySet ?? null
+        : null,
     });
   }
 
@@ -1203,7 +1226,9 @@ export class ConversationRegistry {
       record.workspacePath !== workspace.cwd ||
       record.sessionDirectory !== workspace.sessionDirectory ||
       record.securityProfile !== workspace.securityProfile ||
-      record.networkPolicy !== workspace.networkPolicy
+      record.networkPolicy !== workspace.networkPolicy ||
+      record.networkPolicySetId !== workspace.networkPolicySetId ||
+      record.effectiveNetworkPolicySetId !== workspace.effectiveNetworkPolicySetId
     ) {
       throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
     }
@@ -1418,6 +1443,9 @@ export class ConversationRegistry {
       sessionDirectory: record.sessionDirectory,
       securityProfile: record.securityProfile,
       networkPolicy: record.networkPolicy,
+      networkPolicySetId: record.networkPolicySetId,
+      effectiveNetworkPolicySetId: record.effectiveNetworkPolicySetId,
+      networkPolicySet: null,
     });
     const sessionFile = path.resolve(current.sessionFile);
     const idOwner = this.#byId.get(current.sessionId);

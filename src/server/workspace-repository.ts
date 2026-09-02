@@ -15,17 +15,25 @@ import {
   ERROR_CODES,
   toAppError,
 } from "../shared/errors.js";
-import type {
-  ManagedEgressMode,
-  SandboxMode,
-  SandboxNetworkPolicy,
-  Workspace,
-  WorkspaceNetworkPolicyIssue,
-  WorkspacePolicyIssue,
-  WorkspaceSecurityProfile,
-  WorkspaceSessionStorage,
-  WorkspaceSummary,
+import {
+  NETWORK_POLICY_SET_ID_MAX_LENGTH,
+  NETWORK_POLICY_SET_ID_PATTERN,
+  type ManagedEgressMode,
+  type NetworkPolicySetId,
+  type SandboxMode,
+  type SandboxNetworkPolicy,
+  type Workspace,
+  type WorkspaceNetworkPolicyIssue,
+  type WorkspacePolicyIssue,
+  type WorkspaceSecurityProfile,
+  type WorkspaceSessionStorage,
+  type WorkspaceSummary,
 } from "../shared/protocol.js";
+import {
+  DEFAULT_NETWORK_POLICY_SET_ID,
+  type CompiledNetworkPolicySet,
+} from "./network/config.js";
+import { compileDestinationPolicy } from "./network/policy.js";
 
 interface WorkspaceRow {
   readonly id: string;
@@ -34,6 +42,7 @@ interface WorkspaceRow {
   readonly session_storage: WorkspaceSessionStorage;
   readonly security_profile: WorkspaceSecurityProfile;
   readonly network_policy: SandboxNetworkPolicy;
+  readonly network_policy_set_id: NetworkPolicySetId;
   readonly created_at: number;
   readonly updated_at: number;
 }
@@ -72,7 +81,21 @@ export interface WorkspacePolicyInputs {
   readonly managedEgressMode?: ManagedEgressMode;
   readonly networkHelperPath?: string;
   readonly networkHelperDirectory?: string;
+  /** Administrator-compiled destination sets, copied at repository construction. */
+  readonly networkPolicySets?: ReadonlyMap<string, CompiledNetworkPolicySet>;
 }
+
+const LEGACY_DEFAULT_POLICY_SET: CompiledNetworkPolicySet = Object.freeze({
+  id: DEFAULT_NETWORK_POLICY_SET_ID,
+  label: "Default",
+  allowedDomainPatterns: Object.freeze([]),
+  allowedPorts: Object.freeze([]),
+  destinationPolicy: compileDestinationPolicy({
+    allowedDomainPatterns: [],
+    deniedDomainPatterns: [],
+    allowedPorts: [],
+  }),
+});
 
 const DEFAULT_POLICY: WorkspacePolicyInputs = Object.freeze({
   mode: "disabled",
@@ -100,6 +123,10 @@ export interface RuntimeWorkspacePolicy {
   readonly sessionDirectory: string | null;
   readonly securityProfile: WorkspaceSecurityProfile;
   readonly networkPolicy: SandboxNetworkPolicy | null;
+  /** Stored workspace selection, retained even while networking is isolated. */
+  readonly networkPolicySetId: NetworkPolicySetId;
+  readonly effectiveNetworkPolicySetId: NetworkPolicySetId | null;
+  readonly networkPolicySet: CompiledNetworkPolicySet | null;
 }
 
 export interface CreateWorkspaceInput {
@@ -108,6 +135,7 @@ export interface CreateWorkspaceInput {
   readonly sessionStorage?: WorkspaceSessionStorage;
   readonly securityProfile?: WorkspaceSecurityProfile;
   readonly networkPolicy?: SandboxNetworkPolicy;
+  readonly networkPolicySetId?: NetworkPolicySetId;
 }
 
 export interface UpdateWorkspaceInput {
@@ -115,6 +143,7 @@ export interface UpdateWorkspaceInput {
   readonly path?: string;
   readonly securityProfile?: WorkspaceSecurityProfile;
   readonly networkPolicy?: SandboxNetworkPolicy;
+  readonly networkPolicySetId?: NetworkPolicySetId;
   readonly acknowledgeSecurityDowngrade?: true;
   readonly acknowledgeNetworkExposure?: true;
 }
@@ -142,6 +171,9 @@ function workspaceFromRow(row: WorkspaceRow): Workspace {
   if (row.network_policy !== "isolated" && row.network_policy !== "managed-egress") {
     throw new AppError(ERROR_CODES.DATABASE_ERROR);
   }
+  if (!isStructurallyValidPolicySetId(row.network_policy_set_id)) {
+    throw new AppError(ERROR_CODES.DATABASE_ERROR);
+  }
   return {
     id: row.id,
     name: row.name,
@@ -150,9 +182,16 @@ function workspaceFromRow(row: WorkspaceRow): Workspace {
     sessionDirectory: workspaceSessionDirectory(row.path, row.session_storage),
     securityProfile: row.security_profile,
     networkPolicy: row.network_policy,
+    networkPolicySetId: row.network_policy_set_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function isStructurallyValidPolicySetId(input: unknown): input is NetworkPolicySetId {
+  return typeof input === "string" &&
+    input.length <= NETWORK_POLICY_SET_ID_MAX_LENGTH &&
+    new RegExp(NETWORK_POLICY_SET_ID_PATTERN, "u").test(input);
 }
 
 function compareWorkspaces(left: Workspace, right: Workspace): number {
@@ -192,13 +231,14 @@ export class WorkspaceRepository {
   readonly #fileSystem: WorkspaceFileSystem;
   readonly #policy: Readonly<WorkspacePolicyInputs>;
   readonly #sandboxAdmission: Pick<SandboxWorkspaceAdmission, "admit">;
+  readonly #networkPolicySets: ReadonlyMap<string, CompiledNetworkPolicySet>;
   readonly #listStatement: Database.Statement<[], WorkspaceRow>;
   readonly #getStatement: Database.Statement<[string], WorkspaceRow>;
   readonly #insertStatement: Database.Statement<
-    [string, string, string, WorkspaceSessionStorage, WorkspaceSecurityProfile, SandboxNetworkPolicy, number, number]
+    [string, string, string, WorkspaceSessionStorage, WorkspaceSecurityProfile, SandboxNetworkPolicy, NetworkPolicySetId, number, number]
   >;
   readonly #updateStatement: Database.Statement<
-    [string, string, WorkspaceSecurityProfile, SandboxNetworkPolicy, number, string]
+    [string, string, WorkspaceSecurityProfile, SandboxNetworkPolicy, NetworkPolicySetId, number, string]
   >;
   readonly #deleteStatement: Database.Statement<[string]>;
 
@@ -217,24 +257,27 @@ export class WorkspaceRepository {
       readOnlyMounts: Object.freeze([...suppliedPolicy.readOnlyMounts]),
       managedEgressMode: suppliedPolicy.managedEgressMode ?? "disabled",
     });
+    this.#networkPolicySets = new Map(
+      suppliedPolicy.networkPolicySets ?? [[DEFAULT_NETWORK_POLICY_SET_ID, LEGACY_DEFAULT_POLICY_SET]],
+    );
     this.#sandboxAdmission = options.sandboxAdmission ?? new SandboxWorkspaceAdmission();
 
     try {
       this.#listStatement = connection.prepare<[], WorkspaceRow>(
-        "SELECT id, name, path, session_storage, security_profile, network_policy, created_at, updated_at FROM workspaces",
+        "SELECT id, name, path, session_storage, security_profile, network_policy, network_policy_set_id, created_at, updated_at FROM workspaces",
       );
       this.#getStatement = connection.prepare<[string], WorkspaceRow>(
-        "SELECT id, name, path, session_storage, security_profile, network_policy, created_at, updated_at FROM workspaces WHERE id = ?",
+        "SELECT id, name, path, session_storage, security_profile, network_policy, network_policy_set_id, created_at, updated_at FROM workspaces WHERE id = ?",
       );
       this.#insertStatement = connection.prepare<
-        [string, string, string, WorkspaceSessionStorage, WorkspaceSecurityProfile, SandboxNetworkPolicy, number, number]
+        [string, string, string, WorkspaceSessionStorage, WorkspaceSecurityProfile, SandboxNetworkPolicy, NetworkPolicySetId, number, number]
       >(
-        "INSERT INTO workspaces (id, name, path, session_storage, security_profile, network_policy, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO workspaces (id, name, path, session_storage, security_profile, network_policy, network_policy_set_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       );
       this.#updateStatement = connection.prepare<
-        [string, string, WorkspaceSecurityProfile, SandboxNetworkPolicy, number, string]
+        [string, string, WorkspaceSecurityProfile, SandboxNetworkPolicy, NetworkPolicySetId, number, string]
       >(
-        "UPDATE workspaces SET name = ?, path = ?, security_profile = ?, network_policy = ?, updated_at = ? WHERE id = ?",
+        "UPDATE workspaces SET name = ?, path = ?, security_profile = ?, network_policy = ?, network_policy_set_id = ?, updated_at = ? WHERE id = ?",
       );
       this.#deleteStatement = connection.prepare<[string]>(
         "DELETE FROM workspaces WHERE id = ?",
@@ -275,6 +318,9 @@ export class WorkspaceRepository {
       if (evaluation.networkPolicyIssue === "managed_egress_disabled") {
         throw new AppError(ERROR_CODES.MANAGED_EGRESS_DISABLED);
       }
+      if (evaluation.networkPolicyIssue === "managed_egress_policy_set_unavailable") {
+        throw new AppError(ERROR_CODES.NETWORK_POLICY_INVALID);
+      }
       throw new AppError(ERROR_CODES.SANDBOX_WORKSPACE_REJECTED);
     }
 
@@ -291,6 +337,11 @@ export class WorkspaceRepository {
       sessionDirectory: workspace.sessionDirectory,
       securityProfile: evaluation.effectiveSecurityProfile,
       networkPolicy: evaluation.effectiveNetworkPolicy,
+      networkPolicySetId: workspace.networkPolicySetId,
+      effectiveNetworkPolicySetId: evaluation.effectiveNetworkPolicySetId,
+      networkPolicySet: evaluation.effectiveNetworkPolicySetId === null
+        ? null
+        : this.#networkPolicySets.get(evaluation.effectiveNetworkPolicySetId) ?? null,
     });
   }
 
@@ -308,6 +359,12 @@ export class WorkspaceRepository {
     const networkPolicy = this.#validNetworkPolicy(
       input.networkPolicy ?? "isolated",
     );
+    const networkPolicySetId = this.#validNetworkPolicySetId(
+      input.networkPolicySetId ?? DEFAULT_NETWORK_POLICY_SET_ID,
+    );
+    if (!this.#networkPolicySets.has(networkPolicySetId)) {
+      throw new AppError(ERROR_CODES.INVALID_COMMAND);
+    }
     if (
       securityProfile === "workspace-sandboxed" &&
       networkPolicy === "managed-egress" &&
@@ -342,6 +399,7 @@ export class WorkspaceRepository {
           sessionStorage,
           securityProfile,
           networkPolicy,
+          networkPolicySetId,
           now,
           now,
         );
@@ -364,6 +422,7 @@ export class WorkspaceRepository {
       sessionDirectory,
       securityProfile,
       networkPolicy,
+      networkPolicySetId,
       createdAt: now,
       updatedAt: now,
     });
@@ -378,7 +437,8 @@ export class WorkspaceRepository {
       changes.name === undefined &&
       changes.path === undefined &&
       changes.securityProfile === undefined &&
-      changes.networkPolicy === undefined
+      changes.networkPolicy === undefined &&
+      changes.networkPolicySetId === undefined
     ) {
       throw new AppError(ERROR_CODES.INVALID_COMMAND);
     }
@@ -413,8 +473,24 @@ export class WorkspaceRepository {
     const networkPolicy = changes.networkPolicy === undefined
       ? current.networkPolicy
       : this.#validNetworkPolicy(changes.networkPolicy);
-    const addsNetworkExposure =
+    const networkPolicySetId = changes.networkPolicySetId === undefined
+      ? current.networkPolicySetId
+      : this.#validNetworkPolicySetId(changes.networkPolicySetId);
+    if (changes.networkPolicySetId !== undefined && !this.#networkPolicySets.has(networkPolicySetId)) {
+      throw new AppError(ERROR_CODES.INVALID_COMMAND);
+    }
+    const enablesManagedEgress =
+      (current.securityProfile !== "workspace-sandboxed" || current.networkPolicy !== "managed-egress") &&
+      securityProfile === "workspace-sandboxed" && networkPolicy === "managed-egress";
+    // Preserve the original conservative acknowledgement rule even when the
+    // workspace is currently unrestricted; a later profile change must not
+    // activate an unacknowledged stored managed-network request.
+    const selectsManagedNetwork =
       current.networkPolicy === "isolated" && networkPolicy === "managed-egress";
+    const changesManagedSet =
+      current.networkPolicySetId !== networkPolicySetId &&
+      (current.networkPolicy === "managed-egress" || networkPolicy === "managed-egress");
+    const addsNetworkExposure = enablesManagedEgress || selectsManagedNetwork || changesManagedSet;
     if (changes.acknowledgeNetworkExposure === true && !addsNetworkExposure) {
       throw new AppError(ERROR_CODES.INVALID_COMMAND);
     }
@@ -455,7 +531,8 @@ export class WorkspaceRepository {
     if (
       changes.path !== undefined ||
       changes.securityProfile !== undefined ||
-      changes.networkPolicy !== undefined
+      changes.networkPolicy !== undefined ||
+      changes.networkPolicySetId !== undefined
     ) {
       this.#assertPathPolicy(canonicalPath, securityProfile, networkPolicy);
     }
@@ -468,6 +545,7 @@ export class WorkspaceRepository {
           canonicalPath,
           securityProfile,
           networkPolicy,
+          networkPolicySetId,
           now,
           workspaceId,
         );
@@ -492,6 +570,7 @@ export class WorkspaceRepository {
       sessionDirectory,
       securityProfile,
       networkPolicy,
+      networkPolicySetId,
       updatedAt: now,
     });
   }
@@ -545,6 +624,13 @@ export class WorkspaceRepository {
     return input;
   }
 
+  #validNetworkPolicySetId(input: unknown): NetworkPolicySetId {
+    if (!isStructurallyValidPolicySetId(input)) {
+      throw new AppError(ERROR_CODES.INVALID_COMMAND);
+    }
+    return input;
+  }
+
   #assertCreateProfileAllowed(profile: WorkspaceSecurityProfile): void {
     if (this.#policy.mode === "disabled" && profile === "workspace-sandboxed") {
       throw new AppError(ERROR_CODES.SANDBOX_DISABLED);
@@ -567,6 +653,7 @@ export class WorkspaceRepository {
       sessionDirectory: null,
       securityProfile: storedProfile,
       networkPolicy,
+      networkPolicySetId: DEFAULT_NETWORK_POLICY_SET_ID,
       createdAt: 0,
       updatedAt: 0,
     };
@@ -683,6 +770,7 @@ export class WorkspaceRepository {
   ): Pick<WorkspaceSummary,
     | "effectiveSecurityProfile"
     | "effectiveNetworkPolicy"
+    | "effectiveNetworkPolicySetId"
     | "networkPolicyIssue"
     | "usable"
     | "policyIssue"
@@ -712,6 +800,12 @@ export class WorkspaceRepository {
       this.#policy.managedEgressMode !== "optional"
     ) {
       networkPolicyIssue = "managed_egress_disabled";
+    } else if (
+      !ignoreDisabledRequest &&
+      effectiveNetworkPolicy === "managed-egress" &&
+      !this.#networkPolicySets.has(workspace.networkPolicySetId)
+    ) {
+      networkPolicyIssue = "managed_egress_policy_set_unavailable";
     }
 
     if (
@@ -730,15 +824,21 @@ export class WorkspaceRepository {
       }
     }
 
+    const usable =
+      effectiveSecurityProfile !== null &&
+      policyIssue === null &&
+      networkPolicyIssue === null &&
+      this.#isAvailable(workspace);
     return {
       effectiveSecurityProfile,
       effectiveNetworkPolicy,
+      effectiveNetworkPolicySetId:
+        usable && effectiveSecurityProfile === "workspace-sandboxed" &&
+          effectiveNetworkPolicy === "managed-egress"
+          ? workspace.networkPolicySetId
+          : null,
       networkPolicyIssue,
-      usable:
-        effectiveSecurityProfile !== null &&
-        policyIssue === null &&
-        networkPolicyIssue === null &&
-        this.#isAvailable(workspace),
+      usable,
       policyIssue,
     };
   }

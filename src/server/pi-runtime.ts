@@ -33,7 +33,10 @@ import type {
 } from "./sandbox/bwrap.js";
 import type { SandboxConfig } from "./sandbox/config.js";
 import type { SandboxNetworkPolicy } from "../shared/protocol.js";
-import type { ManagedNetworkConfig } from "./network/config.js";
+import {
+  DEFAULT_NETWORK_POLICY_SET_ID,
+  type ManagedNetworkConfig,
+} from "./network/config.js";
 import type { NetworkBlockedNotification, NetworkDiagnosticSink } from "./network/audit.js";
 import { ManagedNetworkRuntime } from "./network/managed-runtime.js";
 import type { ValidatedNetworkHelper } from "./network/helper.js";
@@ -676,6 +679,10 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
     ) {
       throw new AppError(ERROR_CODES.WORKSPACE_UNAVAILABLE);
     }
+    const networkPolicySetId = policy.networkPolicySetId ?? DEFAULT_NETWORK_POLICY_SET_ID;
+    const effectiveNetworkPolicySetId = networkPolicy === "managed-egress"
+      ? policy.effectiveNetworkPolicySetId ?? networkPolicySetId
+      : null;
     return Object.freeze({
       workspaceId: policy.workspaceId,
       cwd,
@@ -684,6 +691,11 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
         : path.resolve(policy.sessionDirectory),
       securityProfile: policy.securityProfile,
       networkPolicy,
+      networkPolicySetId,
+      effectiveNetworkPolicySetId,
+      networkPolicySet: networkPolicy === "managed-egress"
+        ? policy.networkPolicySet ?? null
+        : null,
     });
   }
 

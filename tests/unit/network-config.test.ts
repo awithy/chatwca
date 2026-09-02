@@ -178,6 +178,90 @@ describe("managed-network configuration", () => {
     }
   });
 
+  it("synthesizes an immutable default set from the complete legacy ceiling", () => {
+    const config = optional({
+      CHATWCA_NETWORK_ALLOWED_DOMAINS: '["example.com","**.packages.example"]',
+      CHATWCA_NETWORK_DENIED_DOMAINS: '["blocked.example.com"]',
+      CHATWCA_NETWORK_ALLOWED_PORTS: "[443,8443]",
+    });
+    expect(config.orderedPolicySets.map((set) => ({
+      id: set.id,
+      label: set.label,
+      domains: set.allowedDomainPatterns,
+      ports: set.allowedPorts,
+    }))).toEqual([{
+      id: "default",
+      label: "Default",
+      domains: ["example.com", "**.packages.example"],
+      ports: [443, 8443],
+    }]);
+    expect(config.policySets.get("default")?.destinationPolicy.deniedPatterns)
+      .toEqual(["blocked.example.com"]);
+    expect((config.policySets as Map<string, unknown>).set).toBeUndefined();
+  });
+
+  it("normalizes, orders, and compiles closed named policy sets", () => {
+    const config = optional({
+      CHATWCA_NETWORK_ALLOWED_DOMAINS: '["EXAMPLE.com.","**.github.com"]',
+      CHATWCA_NETWORK_ALLOWED_PORTS: "[443,8443]",
+      CHATWCA_NETWORK_POLICY_SETS: JSON.stringify([
+        { id: "default", label: "Packages", allowedDomains: [" example.COM "], allowedPorts: [443] },
+        { id: "github-ci", label: "GitHub CI", allowedDomains: ["**.GITHUB.com."], allowedPorts: [443, 8443] },
+      ]),
+    });
+    expect(config.orderedPolicySets.map(({ id, label, allowedDomainPatterns, allowedPorts }) => ({
+      id, label, allowedDomainPatterns, allowedPorts,
+    }))).toEqual([
+      { id: "default", label: "Packages", allowedDomainPatterns: ["example.com"], allowedPorts: [443] },
+      { id: "github-ci", label: "GitHub CI", allowedDomainPatterns: ["**.github.com"], allowedPorts: [443, 8443] },
+    ]);
+    expect(decideDestination(config.policySets.get("github-ci")!.destinationPolicy, {
+      host: "api.github.com", port: 443,
+    }).allowed).toBe(true);
+    expect(decideDestination(config.policySets.get("default")!.destinationPolicy, {
+      host: "api.github.com", port: 443,
+    }).allowed).toBe(false);
+  });
+
+  it.each([
+    ["empty", []],
+    ["non-object", ["default"]],
+    ["missing default", [{ id: "other", label: "Other", allowedDomains: ["example.com"], allowedPorts: [443] }]],
+    ["duplicate id", [
+      { id: "default", label: "One", allowedDomains: ["example.com"], allowedPorts: [443] },
+      { id: "default", label: "Two", allowedDomains: ["example.com"], allowedPorts: [443] },
+    ]],
+    ["unknown key", [{ id: "default", label: "Default", allowedDomains: ["example.com"], allowedPorts: [443], extra: true }]],
+    ["bad id", [{ id: "Bad ID", label: "Default", allowedDomains: ["example.com"], allowedPorts: [443] }]],
+    ["bad label", [{ id: "default", label: " ", allowedDomains: ["example.com"], allowedPorts: [443] }]],
+    ["empty domains", [{ id: "default", label: "Default", allowedDomains: [], allowedPorts: [443] }]],
+    ["empty ports", [{ id: "default", label: "Default", allowedDomains: ["example.com"], allowedPorts: [] }]],
+    ["duplicate normalized domain", [{ id: "default", label: "Default", allowedDomains: ["EXAMPLE.com", "example.com."], allowedPorts: [443] }]],
+    ["duplicate port", [{ id: "default", label: "Default", allowedDomains: ["example.com"], allowedPorts: [443, 443] }]],
+  ])("rejects malformed named policy sets: %s", (_description, sets) => {
+    expect(() => optional({ CHATWCA_NETWORK_POLICY_SETS: JSON.stringify(sets) }))
+      .toThrow(ConfigurationError);
+  });
+
+  it("enforces exact ceiling membership without wildcard containment inference", () => {
+    const base = {
+      CHATWCA_NETWORK_ALLOWED_DOMAINS: '["**.example.com"]',
+      CHATWCA_NETWORK_ALLOWED_PORTS: "[443]",
+    };
+    expect(() => optional({
+      ...base,
+      CHATWCA_NETWORK_POLICY_SETS: JSON.stringify([{
+        id: "default", label: "Default", allowedDomains: ["api.example.com"], allowedPorts: [443],
+      }]),
+    })).toThrow(/exceeds the global ceiling/);
+    expect(() => optional({
+      ...base,
+      CHATWCA_NETWORK_POLICY_SETS: JSON.stringify([{
+        id: "default", label: "Default", allowedDomains: ["**.example.com"], allowedPorts: [8443],
+      }]),
+    })).toThrow(/exceeds the global ceiling/);
+  });
+
   it("constructs a client-safe public projection only", () => {
     const projection = publicManagedEgressConfig(optional({
       CHATWCA_NETWORK_HELPER_PATH: "/private/helper",
@@ -186,6 +270,12 @@ describe("managed-network configuration", () => {
     expect(projection).toMatchObject({
       mode: "optional",
       selectablePolicies: ["isolated", "managed-egress"],
+      policySets: [{
+        id: "default",
+        label: "Default",
+        allowedDomainPatterns: ["example.com"],
+        allowedPorts: [80, 443],
+      }],
       allowedDomainPatterns: ["example.com"],
       deniedDomainPatterns: [],
       allowedPorts: [80, 443],

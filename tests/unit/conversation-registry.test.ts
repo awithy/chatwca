@@ -220,6 +220,34 @@ function ownership(cwd: string, id = cwd) {
 }
 
 describe("ConversationRegistry", () => {
+  it("projects stored and effective destination-set identity from trusted workspace policy", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessionFile = path.join(root, "sessions", "managed.jsonl");
+    await Promise.all([mkdir(cwd), mkdir(path.dirname(sessionFile))]);
+    const runtime = new FakeRuntime(identity("managed", sessionFile, cwd), {
+      securityProfile: "workspace-sandboxed",
+      networkPolicy: "managed-egress",
+    });
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(runtime);
+    const registry = new ConversationRegistry({ runtimeFactory: factory });
+    await registry.create({
+      workspaceId: "workspace-managed",
+      cwd,
+      sessionDirectory: null,
+      securityProfile: "workspace-sandboxed",
+      networkPolicy: "managed-egress",
+      networkPolicySetId: "github",
+      effectiveNetworkPolicySetId: "github",
+      networkPolicySet: null,
+    });
+    await expect(registry.getState("managed")).resolves.toMatchObject({
+      networkPolicySetId: "github",
+      effectiveNetworkPolicySetId: "github",
+    });
+  });
+
   it("persists trimmed conversation titles and rejects blank titles", async () => {
     const root = await temporaryRoot();
     const cwd = path.join(root, "workspace");

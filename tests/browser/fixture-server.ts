@@ -46,6 +46,8 @@ const WORKSPACE: WorkspaceSummary = {
   networkPolicy: "isolated",
   effectiveSecurityProfile: "unrestricted",
   effectiveNetworkPolicy: null,
+  networkPolicySetId: "default",
+  effectiveNetworkPolicySetId: null,
   networkPolicyIssue: null,
   createdAt: 1,
   updatedAt: 1,
@@ -95,6 +97,8 @@ function emptyState(
   workspace: Pick<WorkspaceSummary, "id" | "path"> & {
     readonly securityProfile?: ConversationState["securityProfile"];
     readonly effectiveNetworkPolicy?: ConversationState["networkPolicy"];
+    readonly networkPolicySetId?: ConversationState["networkPolicySetId"];
+    readonly effectiveNetworkPolicySetId?: ConversationState["effectiveNetworkPolicySetId"];
   } = WORKSPACE,
 ): ConversationState {
   const now = nextTime();
@@ -115,6 +119,10 @@ function emptyState(
     queue: { steering: [], followUp: [] },
     securityProfile: workspace.securityProfile ?? "unrestricted",
     networkPolicy: workspace.effectiveNetworkPolicy ?? null,
+    networkPolicySetId: "networkPolicySetId" in workspace
+      ? workspace.networkPolicySetId
+      : "default",
+    effectiveNetworkPolicySetId: workspace.effectiveNetworkPolicySetId ?? null,
   };
 }
 
@@ -599,6 +607,9 @@ const workspaces: ProtocolWorkspaceRepository = {
       sessionDirectory: workspace.sessionDirectory,
       securityProfile: workspace.effectiveSecurityProfile,
       networkPolicy: workspace.effectiveNetworkPolicy,
+      networkPolicySetId: workspace.networkPolicySetId,
+      effectiveNetworkPolicySetId: workspace.effectiveNetworkPolicySetId,
+      networkPolicySet: null,
     };
   },
   create: (input) => {
@@ -614,10 +625,16 @@ const workspaces: ProtocolWorkspaceRepository = {
           : null,
       securityProfile: input.securityProfile,
       networkPolicy: input.networkPolicy ?? "isolated",
+      networkPolicySetId: input.networkPolicySetId ?? "default",
       effectiveSecurityProfile: input.securityProfile,
       effectiveNetworkPolicy: input.securityProfile === "workspace-sandboxed"
         ? input.networkPolicy ?? "isolated"
         : null,
+      effectiveNetworkPolicySetId:
+        input.securityProfile === "workspace-sandboxed" &&
+          (input.networkPolicy ?? "isolated") === "managed-egress"
+          ? input.networkPolicySetId ?? "default"
+          : null,
       networkPolicyIssue: null,
       createdAt: nextTime(),
       updatedAt: nextTime(),

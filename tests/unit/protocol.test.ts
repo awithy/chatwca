@@ -154,6 +154,8 @@ const conversationState = {
   queue: { steering: [], followUp: [] },
   securityProfile: "unrestricted",
   networkPolicy: null,
+  networkPolicySetId: "default",
+  effectiveNetworkPolicySetId: null,
 } as const;
 
 describe("ClientCommandSchema", () => {
@@ -224,6 +226,7 @@ describe("ClientCommandSchema", () => {
       { name: "Renamed", acknowledgeSecurityDowngrade: true },
       { securityProfile: "workspace-sandboxed", acknowledgeSecurityDowngrade: true },
       { networkPolicy: "managed-egress", acknowledgeNetworkExposure: true },
+      { networkPolicySetId: "github", acknowledgeNetworkExposure: true },
     ]) {
       expect(Value.Check(ClientCommandSchema, {
         type: "workspace.update",
@@ -239,6 +242,18 @@ describe("ClientCommandSchema", () => {
       name: "Renamed",
       sessionStorage: "workspace",
     })).toBe(false);
+    for (const forbiddenRules of [
+      { allowedDomains: ["browser.example"] },
+      { allowedPorts: [443] },
+    ]) {
+      expect(Value.Check(ClientCommandSchema, {
+        type: "workspace.update",
+        requestId,
+        workspaceId: "workspace-1",
+        networkPolicySetId: "default",
+        ...forbiddenRules,
+      })).toBe(false);
+    }
   });
 
   it("leaves non-empty update enforcement to the repository", () => {
@@ -322,6 +337,12 @@ describe("public configuration schema", () => {
       managedEgress: {
         mode: "optional",
         selectablePolicies: ["isolated", "managed-egress"],
+        policySets: [{
+          id: "default",
+          label: "Default",
+          allowedDomainPatterns: ["example.com"],
+          allowedPorts: [443],
+        }],
         allowedDomainPatterns: ["example.com"],
         deniedDomainPatterns: ["deny.example"],
         allowedPorts: [443],
@@ -337,6 +358,13 @@ describe("public configuration schema", () => {
       ...config,
       managedEgress: { ...config.managedEgress, helperPath: "/private/helper" },
     })).toBe(false);
+    expect(Value.Check(PublicConfigSchema, {
+      ...config,
+      managedEgress: {
+        ...config.managedEgress,
+        policySets: [{ ...config.managedEgress.policySets[0], allowedDomains: ["browser-edit"] }],
+      },
+    })).toBe(false);
   });
 });
 
@@ -349,6 +377,7 @@ describe("workspace schemas", () => {
     sessionDirectory: null,
     securityProfile: "unrestricted",
     networkPolicy: "isolated",
+    networkPolicySetId: "default",
     createdAt: 10,
     updatedAt: 20,
   } as const;
@@ -361,6 +390,7 @@ describe("workspace schemas", () => {
         available: true,
         effectiveSecurityProfile: "unrestricted",
         effectiveNetworkPolicy: null,
+        effectiveNetworkPolicySetId: null,
         networkPolicyIssue: null,
         usable: true,
         policyIssue: null,
@@ -372,6 +402,7 @@ describe("workspace schemas", () => {
         available: true,
         effectiveSecurityProfile: "unrestricted",
         effectiveNetworkPolicy: null,
+        effectiveNetworkPolicySetId: null,
         networkPolicyIssue: null,
         usable: true,
         policyIssue: null,
@@ -389,6 +420,7 @@ describe("workspace schemas", () => {
         available: true,
         effectiveSecurityProfile: "unrestricted",
         effectiveNetworkPolicy: null,
+        effectiveNetworkPolicySetId: null,
         networkPolicyIssue: null,
         usable: true,
         policyIssue: null,
@@ -467,8 +499,10 @@ describe("ServerMessageSchema", () => {
             sessionDirectory: "/workspace/.chatwca/sessions",
             securityProfile: "workspace-sandboxed",
             networkPolicy: "isolated",
+            networkPolicySetId: "default",
             effectiveSecurityProfile: "workspace-sandboxed",
             effectiveNetworkPolicy: "isolated",
+            effectiveNetworkPolicySetId: null,
             networkPolicyIssue: null,
             createdAt: 1,
             updatedAt: 2,

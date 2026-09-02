@@ -1,6 +1,4 @@
-import { isIP } from "node:net";
 import path from "node:path";
-import { domainToASCII } from "node:url";
 
 import type {
   ManagedEgressMode,
@@ -8,6 +6,12 @@ import type {
   SandboxNetworkPolicy,
 } from "../../shared/protocol.js";
 import { ConfigurationError } from "../sandbox/config.js";
+import {
+  DestinationPolicyError,
+  compileDestinationPolicy,
+  normalizeDestinationPattern,
+  type CompiledDestinationPolicy,
+} from "./policy.js";
 
 export const DEFAULT_MANAGED_EGRESS_MODE: ManagedEgressMode = "disabled";
 export const DEFAULT_NETWORK_ALLOWED_PORTS = Object.freeze([80, 443] as const);
@@ -34,7 +38,9 @@ export interface ManagedNetworkConfig {
   readonly allowedDomainPatterns: readonly string[];
   readonly deniedDomainPatterns: readonly string[];
   readonly allowedPorts: readonly number[];
-  /** Pre-built membership set retained only by the server. */
+  /** Immutable compiled decision policy retained only by the server. */
+  readonly destinationPolicy: CompiledDestinationPolicy;
+  /** Pre-built immutable membership set retained only by the server. */
   readonly allowedPortSet: ReadonlySet<number>;
   readonly maxConnections: number;
   readonly connectTimeoutMs: number;
@@ -89,73 +95,16 @@ function positiveSafeInteger(
   return value;
 }
 
-function normalizeIpv6(value: string): string {
-  const normalized = new URL(`http://[${value}]/`).hostname;
-  return normalized.slice(1, -1).toLowerCase();
-}
-
 /** Normalize and validate the deliberately narrow administrator pattern syntax. */
 export function normalizeConfiguredDomainPattern(input: string): string {
-  const trimmed = input.trim();
-  if (trimmed.length === 0) {
-    throw new ConfigurationError("domain pattern entries must not be empty");
-  }
-
-  let prefix = "";
-  let host = trimmed;
-  if (host.startsWith("**.")) {
-    prefix = "**.";
-    host = host.slice(3);
-  } else if (host.startsWith("*.")) {
-    prefix = "*.";
-    host = host.slice(2);
-  }
-  if (host.includes("*")) {
-    throw new ConfigurationError(`invalid domain pattern ${JSON.stringify(input)}`);
-  }
-  if (host.endsWith(".")) host = host.slice(0, -1);
-  if (host.length === 0 || host.endsWith(".")) {
-    throw new ConfigurationError(`invalid domain pattern ${JSON.stringify(input)}`);
-  }
-
-  if (host.includes("%")) {
-    throw new ConfigurationError(`invalid domain pattern ${JSON.stringify(input)}`);
-  }
-
-  const addressFamily = isIP(host);
-  if (addressFamily !== 0) {
-    if (prefix !== "") {
-      throw new ConfigurationError("IP literals cannot use wildcard patterns");
+  try {
+    return normalizeDestinationPattern(input);
+  } catch (error) {
+    if (error instanceof DestinationPolicyError) {
+      throw new ConfigurationError(`invalid domain pattern ${JSON.stringify(input)}`);
     }
-    return addressFamily === 6 ? normalizeIpv6(host) : host;
+    throw error;
   }
-
-  // Colons, brackets, percent-scopes, numeric ambiguity, and URL syntax are
-  // rejected before IDNA conversion so they cannot acquire surprising forms.
-  if (
-    host.includes(":") ||
-    host.includes("/") ||
-    host.includes("?") ||
-    host.includes("#") ||
-    host.includes("@") ||
-    /^\d+(?:\.\d+){0,3}$/.test(host)
-  ) {
-    throw new ConfigurationError(`invalid domain pattern ${JSON.stringify(input)}`);
-  }
-
-  const ascii = domainToASCII(host).toLowerCase();
-  if (ascii.length === 0 || ascii.length > 253) {
-    throw new ConfigurationError(`invalid domain pattern ${JSON.stringify(input)}`);
-  }
-  const labels = ascii.split(".");
-  if (labels.some((label) =>
-    label.length === 0 ||
-    label.length > 63 ||
-    !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)
-  )) {
-    throw new ConfigurationError(`invalid domain pattern ${JSON.stringify(input)}`);
-  }
-  return `${prefix}${ascii}`;
 }
 
 function parseDomainPatterns(
@@ -255,6 +204,11 @@ export function loadManagedNetworkConfig(
     path.resolve(options.processCwd ?? process.cwd()),
     options.processArch ?? process.arch,
   );
+  const destinationPolicy = compileDestinationPolicy({
+    allowedDomainPatterns,
+    deniedDomainPatterns,
+    allowedPorts,
+  });
 
   return Object.freeze({
     mode,
@@ -263,7 +217,8 @@ export function loadManagedNetworkConfig(
     allowedDomainPatterns,
     deniedDomainPatterns,
     allowedPorts,
-    allowedPortSet: new Set(allowedPorts),
+    destinationPolicy,
+    allowedPortSet: destinationPolicy.allowedPorts,
     maxConnections: positiveSafeInteger(
       environment,
       "CHATWCA_NETWORK_MAX_CONNECTIONS",

@@ -13,6 +13,7 @@ import {
   publicManagedEgressConfig,
 } from "../../src/server/network/config.js";
 import { ConfigurationError } from "../../src/server/config.js";
+import { decideDestination } from "../../src/server/network/policy.js";
 
 const cwd = "/tmp/chatwca-network-config";
 
@@ -44,6 +45,7 @@ describe("managed-network configuration", () => {
       maxConnectionBytes: DEFAULT_NETWORK_MAX_CONNECTION_BYTES,
     });
     expect(config.allowedPortSet.has(443)).toBe(true);
+    expect((config.allowedPortSet as Set<number>).add).toBeUndefined();
   });
 
   it("rejects unknown managed-egress modes", () => {
@@ -120,6 +122,21 @@ describe("managed-network configuration", () => {
     expect(() => optional({
       CHATWCA_NETWORK_ALLOWED_DOMAINS: JSON.stringify([pattern]),
     })).toThrow(/invalid domain pattern/);
+  });
+
+  it("compiles the normalized startup policy with deny precedence", () => {
+    const config = optional({
+      CHATWCA_NETWORK_ALLOWED_DOMAINS: '["**.example.com"]',
+      CHATWCA_NETWORK_DENIED_DOMAINS: '["private.example.com"]',
+    });
+    expect(decideDestination(config.destinationPolicy, {
+      host: "www.example.com",
+      port: 443,
+    })).toMatchObject({ allowed: true, reason: "allowlist" });
+    expect(decideDestination(config.destinationPolicy, {
+      host: "PRIVATE.example.com.",
+      port: 443,
+    })).toMatchObject({ allowed: false, reason: "explicit_deny" });
   });
 
   it("rejects normalized duplicates within each list while permitting deny overlap", () => {

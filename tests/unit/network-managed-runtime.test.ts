@@ -216,6 +216,53 @@ describe("ManagedNetworkRuntime", () => {
     }
   });
 
+  it("applies mandatory global deny and non-public checks through both selected-set proxies", async () => {
+    const dataDir = await root();
+    const configured = loadManagedNetworkConfig({
+      CHATWCA_MANAGED_EGRESS_MODE: "optional",
+      CHATWCA_NETWORK_ALLOWED_DOMAINS: '["allowed.example","blocked.example","127.0.0.1"]',
+      CHATWCA_NETWORK_DENIED_DOMAINS: '["blocked.example"]',
+      CHATWCA_NETWORK_ALLOWED_PORTS: "[80,443]",
+      CHATWCA_NETWORK_POLICY_SETS: JSON.stringify([{
+        id: "default",
+        label: "Default",
+        allowedDomains: ["allowed.example", "blocked.example", "127.0.0.1"],
+        allowedPorts: [80, 443],
+      }]),
+      CHATWCA_NETWORK_HELPER_PATH: "/unused/chatwca-network-helper",
+    }, "optional");
+    const diagnostics: Array<{ reason?: string; policySetId?: string }> = [];
+    const runtime = await ManagedNetworkRuntime.startForTesting({
+      dataDir,
+      workspaceId: "workspace-mandatory-denials",
+      conversationId: "conversation-mandatory-denials",
+      ...selected(configured),
+      diagnosticSink: (event) => diagnostics.push(event),
+    }, unusedConnector());
+
+    try {
+      const deniedHttp = await exchange(runtime.httpSocketPath,
+        "CONNECT blocked.example:443 HTTP/1.1\r\nHost: blocked.example:443\r\n\r\n");
+      const localHttp = await exchange(runtime.httpSocketPath,
+        "CONNECT 127.0.0.1:443 HTTP/1.1\r\nHost: 127.0.0.1:443\r\n\r\n");
+      const deniedSocks = await socksConnectResponse(runtime.socksSocketPath, "blocked.example");
+      const localSocks = await socksConnectResponse(runtime.socksSocketPath, "127.0.0.1");
+
+      expect(deniedHttp).toContain("blocked-by-denylist");
+      expect(localHttp).toContain("blocked-local-address");
+      expect(deniedSocks.subarray(0, 4)).toEqual(Buffer.from([5, 0, 5, 2]));
+      expect(localSocks.subarray(0, 4)).toEqual(Buffer.from([5, 0, 5, 2]));
+      expect(diagnostics.map(({ reason, policySetId }) => ({ reason, policySetId }))).toEqual([
+        { reason: "explicit_deny", policySetId: "default" },
+        { reason: "local_address", policySetId: "default" },
+        { reason: "explicit_deny", policySetId: "default" },
+        { reason: "local_address", policySetId: "default" },
+      ]);
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it("fails closed on a missing or mismatched selected compiled set before listening", async () => {
     const dataDir = await root();
     const configured = config();

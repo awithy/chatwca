@@ -200,6 +200,31 @@ describe("managed-network configuration", () => {
     expect((config.policySets as Map<string, unknown>).set).toBeUndefined();
   });
 
+  it("keeps the synthesized default decision-for-decision compatible with the legacy global policy", () => {
+    const config = optional({
+      CHATWCA_NETWORK_ALLOWED_DOMAINS: '["**.example.com","127.0.0.1"]',
+      CHATWCA_NETWORK_DENIED_DOMAINS: '["blocked.example.com"]',
+      CHATWCA_NETWORK_ALLOWED_PORTS: "[443,8443]",
+    });
+    const synthesized = config.policySets.get("default")!.destinationPolicy;
+    const decisions = [
+      { host: "example.com", port: 443 },
+      { host: "api.example.com", port: 8443 },
+      { host: "blocked.example.com", port: 443 },
+      { host: "other.example", port: 443 },
+      { host: "example.com", port: 80 },
+      { host: "127.0.0.1", port: 443 },
+    ];
+
+    expect(synthesized.allowedPatterns).toEqual(config.destinationPolicy.allowedPatterns);
+    expect(synthesized.deniedPatterns).toEqual(config.destinationPolicy.deniedPatterns);
+    expect([...synthesized.allowedPorts]).toEqual([...config.destinationPolicy.allowedPorts]);
+    for (const destination of decisions) {
+      expect(decideDestination(synthesized, destination))
+        .toEqual(decideDestination(config.destinationPolicy, destination));
+    }
+  });
+
   it("normalizes, orders, and compiles closed named policy sets", () => {
     const config = optional({
       CHATWCA_NETWORK_ALLOWED_DOMAINS: '["EXAMPLE.com.","**.github.com"]',
@@ -260,6 +285,28 @@ describe("managed-network configuration", () => {
         id: "default", label: "Default", allowedDomains: ["**.example.com"], allowedPorts: [8443],
       }]),
     })).toThrow(/exceeds the global ceiling/);
+  });
+
+  it("retains mandatory global deny and non-public checks inside an explicitly selected set", () => {
+    const config = optional({
+      CHATWCA_NETWORK_ALLOWED_DOMAINS: '["allowed.example","blocked.example","127.0.0.1"]',
+      CHATWCA_NETWORK_DENIED_DOMAINS: '["blocked.example"]',
+      CHATWCA_NETWORK_ALLOWED_PORTS: "[443]",
+      CHATWCA_NETWORK_POLICY_SETS: JSON.stringify([{
+        id: "default",
+        label: "Default",
+        allowedDomains: ["allowed.example", "blocked.example", "127.0.0.1"],
+        allowedPorts: [443],
+      }]),
+    });
+    const selected = config.policySets.get("default")!.destinationPolicy;
+
+    expect(decideDestination(selected, { host: "allowed.example", port: 443 }))
+      .toMatchObject({ allowed: true, reason: "allowlist" });
+    expect(decideDestination(selected, { host: "blocked.example", port: 443 }))
+      .toMatchObject({ allowed: false, reason: "explicit_deny" });
+    expect(decideDestination(selected, { host: "127.0.0.1", port: 443 }))
+      .toMatchObject({ allowed: false, reason: "local_address" });
   });
 
   it("constructs a client-safe public projection only", () => {

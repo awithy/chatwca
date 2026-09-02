@@ -155,8 +155,8 @@ describe("openDatabase", () => {
     ).get()).toEqual({ security_profile: "unrestricted" });
     expect(migrated.connection.pragma("user_version", { simple: true })).toBe(5);
     expect(migrated.connection.prepare(
-      "SELECT network_policy FROM workspaces WHERE id = 'version-2'",
-    ).get()).toEqual({ network_policy: "isolated" });
+      "SELECT network_policy, network_policy_set_id FROM workspaces WHERE id = 'version-2'",
+    ).get()).toEqual({ network_policy: "isolated", network_policy_set_id: "default" });
     migrated.close();
   });
 
@@ -190,8 +190,11 @@ describe("openDatabase", () => {
     ]);
     expect(migrated.connection.pragma("user_version", { simple: true })).toBe(5);
     expect(migrated.connection.prepare(
-      "SELECT DISTINCT network_policy_set_id FROM workspaces",
-    ).all()).toEqual([{ network_policy_set_id: "default" }]);
+      "SELECT id, network_policy_set_id, created_at, updated_at FROM workspaces ORDER BY id",
+    ).all()).toEqual([
+      { id: "version-3a", network_policy_set_id: "default", created_at: 1, updated_at: 2 },
+      { id: "version-3b", network_policy_set_id: "default", created_at: 3, updated_at: 4 },
+    ]);
     migrated.close();
   });
 

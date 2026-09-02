@@ -11,15 +11,21 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { openDatabase, type ChatWcaDatabase } from "../../src/server/database.js";
+import {
+  DATABASE_FILENAME,
+  openDatabase,
+  type ChatWcaDatabase,
+} from "../../src/server/database.js";
 import {
   WorkspaceRepository,
   type WorkspaceFileSystem,
 } from "../../src/server/workspace-repository.js";
 import { AppError, ERROR_CODES } from "../../src/shared/errors.js";
 import { loadManagedNetworkConfig } from "../../src/server/network/config.js";
+import { decideDestination } from "../../src/server/network/policy.js";
 
 const temporaryDirectories: string[] = [];
 const databases: ChatWcaDatabase[] = [];
@@ -239,6 +245,52 @@ describe("workspace destination policy sets", () => {
       },
     });
   }
+
+  it("migrates a legacy managed workspace onto the synthesized decision-compatible default", async () => {
+    const root = temporaryDirectory();
+    const workspacePath = directory(root, "legacy-project");
+    const dataDir = temporaryDirectory();
+    const legacy = new Database(path.join(dataDir, DATABASE_FILENAME));
+    legacy.exec(`
+      CREATE TABLE workspaces (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL UNIQUE,
+        session_storage TEXT NOT NULL DEFAULT 'pi-default',
+        security_profile TEXT NOT NULL DEFAULT 'unrestricted',
+        network_policy TEXT NOT NULL DEFAULT 'isolated',
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      INSERT INTO workspaces VALUES
+        ('legacy-managed', 'Legacy managed', '${workspacePath.replaceAll("'", "''")}',
+         'pi-default', 'workspace-sandboxed', 'managed-egress', 11, 12);
+      PRAGMA user_version = 4;
+    `);
+    legacy.close();
+
+    const opened = database(dataDir, DATABASE_FILENAME);
+    const legacyConfig = loadManagedNetworkConfig({
+      CHATWCA_MANAGED_EGRESS_MODE: "optional",
+      CHATWCA_NETWORK_ALLOWED_DOMAINS: '["legacy.example"]',
+      CHATWCA_NETWORK_ALLOWED_PORTS: "[443]",
+      // Deliberately omit CHATWCA_NETWORK_POLICY_SETS.
+    }, "optional", { processCwd: "/tmp/chatwca-config" });
+    const repository = managedRepository(opened, root, legacyConfig.policySets);
+    const migrated = repository.get("legacy-managed");
+
+    expect(migrated).toMatchObject({
+      networkPolicy: "managed-egress",
+      networkPolicySetId: "default",
+      effectiveNetworkPolicySetId: "default",
+      createdAt: 11,
+      updatedAt: 12,
+      usable: true,
+    });
+    const runtime = await repository.requireUsable("legacy-managed");
+    expect(runtime.networkPolicySet).toBe(legacyConfig.policySets.get("default"));
+    expect(decideDestination(runtime.networkPolicySet!.destinationPolicy, {
+      host: "legacy.example",
+      port: 443,
+    })).toMatchObject({ allowed: true, reason: "allowlist" });
+  });
 
   it("defaults to default, persists configured selections, and returns the immutable compiled set", async () => {
     const root = temporaryDirectory();

@@ -1,6 +1,6 @@
 # Managed Network Sandbox Design
 
-**Status:** Proposed
+**Status:** Implemented, including the schema-v5 named policy-set and responsive workspace-modal amendment
 
 **Platform:** Linux
 
@@ -19,7 +19,7 @@ The existing Bubblewrap profile remains the hard boundary. A managed-egress work
 The initial implementation will:
 
 - keep isolated networking as the default;
-- require an administrator-configured domain and port allowlist;
+- require an administrator-configured global domain/port ceiling and an immutable named destination-policy set per managed workspace;
 - deny local, private, link-local, metadata, multicast, and reserved addresses;
 - support HTTP, HTTPS `CONNECT`, WebSocket-over-HTTP(S), and SOCKS5 TCP;
 - leave HTTPS end-to-end encrypted and perform no TLS interception;
@@ -54,7 +54,7 @@ The required invariant is:
 - Make only conversation-owned proxy endpoints reachable from the guest.
 - Support common HTTP-aware development tools and package managers.
 - Support SOCKS5 TCP for clients that honor `ALL_PROXY`.
-- Enforce domain and port policy in the parent process.
+- Enforce a selected administrator-defined named policy set beneath the global domain/port ceiling in the parent process.
 - Prevent access to host loopback, LANs, cloud metadata services, and other non-public addresses.
 - Resolve DNS in the parent and pin the validated address used by the outbound connection.
 - Re-evaluate every HTTP request, HTTPS tunnel, and SOCKS connection.
@@ -75,7 +75,7 @@ The initial release will not provide:
 - request-body inspection or data-loss prevention;
 - a guarantee that an allowed destination cannot receive workspace content;
 - interactive one-time or session network approvals;
-- user-editable domain rules in the browser;
+- user-editable domain rules or policy-set definitions in the browser;
 - SOCKS5 UDP, arbitrary UDP, ICMP, inbound connections, or port forwarding;
 - Unix-domain socket proxying;
 - Git-over-SSH compatibility wrappers;
@@ -212,7 +212,7 @@ The administrator controls whether managed egress is available:
 
 There is no `required` mode. Forcing every sandbox to have network access is not a security ceiling and would make the safer isolated policy unavailable.
 
-The first release uses one administrator-owned domain and port policy for all managed-egress workspaces. Browser clients may select managed egress only when the server permits it; they cannot add or widen destination rules.
+The global administrator-owned domain and port lists are a process-wide security ceiling. Administrators may define named destination-policy sets as exact normalized subsets of that ceiling, and each managed workspace stores one set ID. Browser clients may select only those public IDs; they cannot add or widen destination rules. If no set variable is configured, the server synthesizes `default` from the complete global policy for compatibility with the original single-policy release. A missing selected set remains stored and policy-blocks the workspace rather than silently substituting another set.
 
 ## 8. Configuration
 
@@ -224,7 +224,8 @@ New server configuration:
 | `CHATWCA_NETWORK_HELPER_PATH` | packaged helper path | Canonical native Linux helper executable |
 | `CHATWCA_NETWORK_ALLOWED_DOMAINS` | `[]` | JSON array of exact or scoped wildcard domain patterns |
 | `CHATWCA_NETWORK_DENIED_DOMAINS` | `[]` | JSON array of explicit deny patterns; deny wins |
-| `CHATWCA_NETWORK_ALLOWED_PORTS` | `[80,443]` | JSON array of allowed TCP ports |
+| `CHATWCA_NETWORK_ALLOWED_PORTS` | `[80,443]` | JSON array forming the global allowed TCP-port ceiling |
+| `CHATWCA_NETWORK_POLICY_SETS` | unset | Closed JSON array of named exact-subset policies; unset synthesizes `default` from the complete global ceiling |
 | `CHATWCA_NETWORK_MAX_CONNECTIONS` | `32` | Concurrent proxy connections per conversation |
 | `CHATWCA_NETWORK_CONNECT_TIMEOUT_MS` | `10000` | DNS and connection setup deadline |
 | `CHATWCA_NETWORK_IDLE_TIMEOUT_MS` | `300000` | Bidirectional connection idle deadline |
@@ -240,7 +241,13 @@ When managed egress is optional:
 
 No parent proxy, cloud, provider, SSH-agent, or credential variable is inherited from `process.env`.
 
-### 8.1 Domain pattern syntax
+### 8.1 Named destination-policy sets
+
+An explicit `CHATWCA_NETWORK_POLICY_SETS` value is a non-empty closed JSON array of `{id,label,allowedDomains,allowedPorts}` objects and contains exactly one `default`. IDs are bounded lowercase ASCII slugs; labels are bounded display text. IDs, normalized domains, and ports are unique within their applicable scope, and each set has non-empty domain and port lists. Every set entry must be an exact normalized member of its corresponding global ceiling: wildcard containment is not inferred. The selected set can only remove authority; global denials, non-public-address rejection, protocol restrictions, DNS pinning, and resource limits still apply.
+
+When the variable is absent, startup synthesizes the stable `default` set from all global allowed domains and ports, preserving the original single-global-policy behavior. Configuration is immutable after startup. Each live runtime captures the selected compiled object and ID; a restart affects only runtimes created under the new process configuration.
+
+### 8.2 Domain pattern syntax
 
 Supported patterns are deliberately narrow:
 
@@ -267,17 +274,17 @@ An IP literal is not matched by a domain wildcard. Public IP literals require an
 
 ### 9.1 Database migration
 
-The workspace schema advances to version 4:
+The original managed-egress migration advanced the workspace schema to version 4 by adding `network_policy`, defaulting every existing row to `isolated`. The named-set amendment advances it to version 5:
 
 ```sql
 ALTER TABLE workspaces
-ADD COLUMN network_policy TEXT NOT NULL DEFAULT 'isolated'
-  CHECK (network_policy IN ('isolated', 'managed-egress'));
+ADD COLUMN network_policy_set_id TEXT NOT NULL DEFAULT 'default'
+  CHECK (/* bounded lowercase ASCII slug */);
 
-PRAGMA user_version = 4;
+PRAGMA user_version = 5;
 ```
 
-All existing workspaces migrate to `isolated`. The migration does not change sessions or create network resources.
+Every v1–v4 workspace migrates stepwise and transactionally to selected set `default`; v1–v3 rows also retain the established isolated-network migration. Migration does not change sessions or create helper/proxy resources.
 
 The stored network policy is relevant only when the effective security profile is `workspace-sandboxed`. An unrestricted runtime retains unrestricted host networking under the existing trust model.
 
@@ -289,7 +296,12 @@ Workspace wire objects add:
 interface WorkspaceNetworkProjection {
   networkPolicy: SandboxNetworkPolicy;
   effectiveNetworkPolicy: SandboxNetworkPolicy | null;
-  networkPolicyIssue: "managed_egress_disabled" | null;
+  networkPolicySetId: string;
+  effectiveNetworkPolicySetId: string | null;
+  networkPolicyIssue:
+    | "managed_egress_disabled"
+    | "managed_egress_policy_set_unavailable"
+    | null;
 }
 ```
 
@@ -299,32 +311,15 @@ Workspace `usable` becomes false when it requests managed egress but the server 
 
 ### 9.3 Commands
 
-`workspace.create` accepts `networkPolicy`, defaulting to `isolated` for protocol compatibility.
+`workspace.create` accepts optional `networkPolicy` and `networkPolicySetId`, defaulting to `isolated` and `default` for wire compatibility. `workspace.update` accepts optional network type/set fields and `acknowledgeNetworkExposure: true`. Enabling effective managed egress or changing the set of a managed workspace requires that acknowledgement; a smuggled acknowledgement is rejected. This is a safety acknowledgement, not an authorization boundary.
 
-`workspace.update` accepts:
+A network-policy, policy-set, security-profile, or workspace-path change is rejected with `workspace_busy` while a live runtime belongs to the workspace. Renaming remains allowed. Closed command schemas reject destination domains, ports, and raw rule documents.
 
-```ts
-{
-  networkPolicy?: SandboxNetworkPolicy;
-  acknowledgeNetworkExposure?: true;
-}
-```
-
-Changing from `isolated` to `managed-egress` requires `acknowledgeNetworkExposure: true`. This is a safety acknowledgement, not an authorization boundary.
-
-A network-policy or workspace-path change is rejected with `workspace_busy` while a live runtime belongs to the workspace. Renaming remains allowed.
-
-Fork and rewind never accept a network policy from the browser. They freshly resolve the destination workspace and capture its effective policy.
+Fork and rewind never accept a network policy or set from the browser. They freshly resolve the destination workspace and capture its effective compiled set.
 
 ### 9.4 Conversation state
 
-`ConversationState` adds:
-
-```ts
-networkPolicy: SandboxNetworkPolicy | null;
-```
-
-The value is immutable for the live runtime and comes from trusted workspace policy, not current browser form state.
+`ConversationState` adds `networkPolicy`, stored `networkPolicySetId`, and nullable `effectiveNetworkPolicySetId`. These values are immutable for the live runtime and come from trusted workspace policy, not current browser form state.
 
 ## 10. Parent-owned proxy runtime
 
@@ -332,7 +327,7 @@ The value is immutable for the live runtime and comes from trusted workspace pol
 
 A `ManagedNetworkRuntime` is created before its sandbox worker. It owns:
 
-- immutable compiled domain and port rules;
+- immutable selected policy-set ID and compiled domain/port rules beneath mandatory global denials;
 - one private HTTP Unix socket;
 - one private SOCKS5 Unix socket;
 - active outbound connections;
@@ -671,6 +666,7 @@ interface NetworkPolicyAuditEvent {
   timestamp: number;
   workspaceId: string;
   conversationId: string;
+  policySetId: string;
   protocol: "http" | "https-connect" | "socks5-tcp";
   host: string;
   port: number;
@@ -704,17 +700,17 @@ Persistent tamper-resistant security audit storage is deferred; initial events u
 
 ## 17. Browser behavior
 
-Workspace creation and editing show a **Sandbox network** control only when the effective security profile can be workspace-sandboxed:
+Workspace creation and editing use a portal-backed, keyboard-contained responsive modal and show a **Sandbox network** control only when the effective security profile can be workspace-sandboxed:
 
 - **Isolated** — no tool network access;
 - **Managed egress** — tools may contact administrator-configured destinations through a filtered proxy.
 
-The managed option is hidden or disabled when the server mode is `disabled`. Enabling it requires confirmation with the disclosure warning.
+The managed option is hidden or disabled when the server mode is `disabled`. Enabling it requires confirmation with the disclosure warning. Managed egress also shows an administrator-defined **Destination policy** selector and read-only normalized grants. An unavailable stored set remains visible until the operator explicitly replaces it or selects Isolated. A live workspace locks path, security, network type, and set together while keeping name editing available. The modal traps focus, closes on Escape only while idle, restores exact trigger focus, and uses an inset full-height layout at narrow widths.
 
 Workspace Info shows:
 
-- stored and effective network policy;
-- whether managed egress is available;
+- stored and effective network policy and destination-policy set;
+- whether managed egress and the stored set are available;
 - allowed domain patterns and ports;
 - local/private destination denial;
 - HTTP/HTTPS and SOCKS5 TCP support;
@@ -757,7 +753,7 @@ Limits are per conversation where practical. The feature does not claim protecti
 ```text
 src/server/
 ├── network/
-│   ├── config.ts               # managed-egress configuration and public projection
+│   ├── config.ts               # global ceiling, named sets, and public projection
 │   ├── policy.ts               # domain patterns, ports, and decision ordering
 │   ├── addresses.ts            # public/non-public IP classification
 │   ├── resolver.ts             # bounded resolution and address pinning
@@ -792,7 +788,7 @@ The native helper has no network-policy logic and no third-party runtime service
 ### 20.1 Unit tests
 
 - schema version 3-to-4 migration defaults every workspace to isolated;
-- workspace policy CRUD, acknowledgement, server ceiling, and live-runtime rejection;
+- workspace policy/set CRUD, exact acknowledgement semantics, unavailable-set fail closure, global ceiling, and live-runtime rejection;
 - JSON configuration parsing and normalized duplicate rejection;
 - exact, subdomain-only, and apex-plus-subdomain pattern semantics;
 - explicit deny precedence;
@@ -807,7 +803,9 @@ The native helper has no network-policy logic and no third-party runtime service
 - helper artifact and launch-descriptor validation;
 - Bubblewrap arguments retain `--unshare-net` in managed mode;
 - isolated workers receive no proxy variables; and
-- browser audit payloads omit URLs, headers, content, addresses, and diagnostics.
+- browser commands cannot define destinations and audit payloads omit URLs, headers, content, addresses, and diagnostics;
+- absent set configuration synthesizes a decision-equivalent `default`; and
+- schema-v5 migration gives every prior row `default` without changing identity/timestamps.
 
 ### 20.2 Native helper tests
 
@@ -854,11 +852,13 @@ Dedicated tests run under the provided systemd unit. A sandbox-capable CI job mu
 
 ### 20.4 Browser tests
 
-- existing workspaces migrate and display Network isolated;
+- existing workspaces migrate, select `default`, and display Network isolated;
+- absent set configuration preserves legacy single-global-policy behavior;
 - managed egress is unavailable when server mode disables it;
 - enabling managed egress requires confirmation;
-- policy cannot change while a live runtime exists;
-- Workspace Info displays effective domains, ports, and warnings;
+- network type/set cannot change while a live runtime exists;
+- add/edit modal focus containment/restoration and narrow layouts remain operable;
+- Workspace Info displays stored/effective set, domains, ports, and warnings;
 - conversation headers show immutable effective network state;
 - blocked destinations produce a concise network notice;
 - fork and rewind preserve freshly resolved policy; and
@@ -875,21 +875,24 @@ Dedicated tests run under the provided systemd unit. A sandbox-capable CI job mu
 7. **Runtime lifecycle** — create/open, abort replacement, fork/rewind, close, LRU eviction, and shutdown.
 8. **Browser behavior** — controls, confirmations, badges, policy information, warnings, and blocked notices.
 9. **Hardening** — malformed traffic, DNS races, request smuggling, resource pressure, systemd, and concurrent-profile tests.
+10. **Named policy sets** — schema v5, exact-subset configuration, immutable runtime selection, concurrent set isolation, and migration compatibility.
+11. **Workspace modal** — portal-backed accessible add/edit flow, set disclosures, locked live controls, and responsive browser coverage.
 
-Interactive destination approvals, upstream proxy support, named administrator policy profiles, Git SSH wrappers, and TLS method filtering are separate follow-up designs.
+Interactive destination approvals, upstream proxy support, browser-authored policy rules, Git SSH wrappers, and TLS method filtering remain separate follow-up designs.
 
 ## 22. Acceptance criteria
 
 The feature is complete when:
 
-- every existing workspace migrates to isolated networking;
+- every pre-network-policy workspace migrates to isolated networking and every v1–v4 workspace selects `default`;
 - managed egress is disabled by default and requires explicit administrator enablement;
-- browser commands cannot add or widen destination rules;
+- absent policy-set configuration preserves the single-global-policy behavior through a synthesized `default`;
+- browser commands cannot create or widen destination rules;
 - a managed worker remains in a distinct network namespace with no external interface, route, or DNS;
 - unsetting proxy variables does not permit direct network access;
 - only the two designated guest-loopback proxy endpoints are reachable;
 - parent HTTP and SOCKS5 proxies are private and conversation-owned;
-- all destinations pass domain, port, DNS, and non-public-address policy before connection;
+- every named set is an exact normalized subset of the global ceiling and all destinations still pass global deny, domain, port, DNS, and non-public-address policy before connection;
 - outbound connections use a validated pinned IP;
 - HTTPS remains end-to-end encrypted without a ChatWCA CA;
 - SOCKS5 UDP, Unix socket proxying, inbound traffic, and direct local networking remain blocked;
@@ -897,5 +900,9 @@ The feature is complete when:
 - setup, policy, DNS, helper, bridge, and proxy failures never select unrestricted networking;
 - abort, close, eviction, crash, and shutdown remove workers, bridges, proxy connections, and socket files;
 - isolated, managed, and unrestricted conversations can run concurrently without sharing proxy policy or routes;
-- browser state displays the immutable effective policy and disclosure warning; and
-- logs and browser events contain destination decisions but no URL paths, queries, headers, bodies, credentials, TLS data, or private diagnostics.
+- concurrent managed workspaces with different sets cannot use one another's additional grants;
+- removing a configured set preserves the stored selection and policy-blocks affected workspaces;
+- live conversations retain immutable selected-set identity and compiled policy bytes;
+- browser state displays the immutable effective policy/set and disclosure warning;
+- workspace add/edit remains keyboard-accessible and usable at supported narrow viewport sizes; and
+- logs and browser events contain destination decisions and selected set IDs but no URL paths, queries, headers, bodies, credentials, TLS data, or private diagnostics.

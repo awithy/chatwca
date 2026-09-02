@@ -1,6 +1,6 @@
 # Bubblewrap Workspace Sandboxing Design
 
-**Status:** Implemented; per-workspace managed-egress policy-set and workspace-modal amendments proposed
+**Status:** Implemented, including per-workspace managed-egress policy sets and the responsive workspace modal
 
 **Platform:** Linux
 

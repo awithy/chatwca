@@ -245,7 +245,20 @@ describe("ClientCommandSchema", () => {
     for (const forbiddenRules of [
       { allowedDomains: ["browser.example"] },
       { allowedPorts: [443] },
+      { deniedDomains: ["competitor.example"] },
+      { policySet: { id: "browser", allowedDomains: ["browser.example"], allowedPorts: [443] } },
     ]) {
+      expect(Value.Check(ClientCommandSchema, {
+        type: "workspace.create",
+        requestId,
+        name: "No browser-authored policy",
+        path: "/workspace-browser-policy",
+        sessionStorage: "pi-default",
+        securityProfile: "workspace-sandboxed",
+        networkPolicy: "managed-egress",
+        networkPolicySetId: "default",
+        ...forbiddenRules,
+      })).toBe(false);
       expect(Value.Check(ClientCommandSchema, {
         type: "workspace.update",
         requestId,

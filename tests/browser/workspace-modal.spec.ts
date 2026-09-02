@@ -71,7 +71,7 @@ test("workspace modal traps focus, closes with Escape, restores exact triggers, 
 });
 
 test("validation is associated and focused, pending submission cannot be cancelled, and narrow actions remain visible", async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 700 });
+  await page.setViewportSize({ width: 320, height: 568 });
   await waitForConnected(page);
   await page.getByRole("button", { name: "Open workspaces and conversations" }).click();
   await page.getByRole("button", { name: "Add", exact: true }).click();
@@ -86,7 +86,8 @@ test("validation is associated and focused, pending submission cannot be cancell
   const box = await dialog.boundingBox();
   expect(box?.x).toBeGreaterThanOrEqual(0);
   expect(box?.y).toBeGreaterThanOrEqual(0);
-  expect(box?.height).toBeLessThanOrEqual(700);
+  expect(box?.width).toBeLessThanOrEqual(320);
+  expect(box?.height).toBeLessThanOrEqual(568);
   await expect(dialog.getByRole("heading", { name: "Add workspace" })).toBeVisible();
   await expect(dialog.getByRole("button", { name: "Cancel" })).toBeVisible();
   await expect(dialog.getByRole("button", { name: "Add workspace" })).toBeVisible();

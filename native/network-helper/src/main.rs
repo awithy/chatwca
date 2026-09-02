@@ -718,46 +718,66 @@ mod tests {
 
     #[test]
     fn parent_death_signal_kills_child() {
-        let mut pipe_fds = [-1; 2];
+        let mut event_fds = [-1; 2];
+        let mut ready_fds = [-1; 2];
         assert_eq!(
-            unsafe { libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC) },
+            unsafe { libc::pipe2(event_fds.as_mut_ptr(), libc::O_CLOEXEC) },
+            0
+        );
+        assert_eq!(
+            unsafe { libc::pipe2(ready_fds.as_mut_ptr(), libc::O_CLOEXEC) },
             0
         );
         let child = unsafe { libc::fork() };
         assert!(child >= 0);
         if child == 0 {
-            unsafe { libc::close(pipe_fds[0]) };
+            unsafe { libc::close(event_fds[0]) };
             let grandchild = unsafe { libc::fork() };
             if grandchild == 0 {
+                unsafe { libc::close(ready_fds[0]) };
                 capabilities::set_parent_death_signal().unwrap();
                 unsafe {
-                    libc::write(pipe_fds[1], b"R".as_ptr().cast(), 1);
+                    // Notify the test parent, then release our direct parent.
+                    // The direct parent must not exit before PR_SET_PDEATHSIG is
+                    // installed or this test races with reparenting to init.
+                    libc::write(event_fds[1], b"R".as_ptr().cast(), 1);
+                    libc::write(ready_fds[1], b"R".as_ptr().cast(), 1);
                     libc::pause();
                     libc::_exit(2);
                 }
             }
-            unsafe {
-                libc::_exit(0);
-            }
+            assert!(grandchild > 0);
+            unsafe { libc::close(ready_fds[1]) };
+            let mut ready = 0u8;
+            assert_eq!(
+                unsafe { libc::read(ready_fds[0], (&mut ready as *mut u8).cast(), 1) },
+                1
+            );
+            unsafe { libc::_exit(0) };
         }
-        unsafe { libc::close(pipe_fds[1]) };
+        unsafe {
+            libc::close(event_fds[1]);
+            libc::close(ready_fds[0]);
+            libc::close(ready_fds[1]);
+        }
         let mut byte = 0u8;
         assert_eq!(
-            unsafe { libc::read(pipe_fds[0], (&mut byte as *mut u8).cast(), 1) },
+            unsafe { libc::read(event_fds[0], (&mut byte as *mut u8).cast(), 1) },
             1
         );
         let mut status = 0;
         unsafe { libc::waitpid(child, &mut status, 0) };
         assert_eq!(byte, b'R');
         let mut poll = libc::pollfd {
-            fd: pipe_fds[0],
+            fd: event_fds[0],
             events: libc::POLLIN | libc::POLLHUP,
             revents: 0,
         };
         assert!(unsafe { libc::poll(&mut poll, 1, 2_000) } > 0);
         assert_eq!(
-            unsafe { libc::read(pipe_fds[0], (&mut byte as *mut u8).cast(), 1) },
+            unsafe { libc::read(event_fds[0], (&mut byte as *mut u8).cast(), 1) },
             0
         );
+        unsafe { libc::close(event_fds[0]) };
     }
 }

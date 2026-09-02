@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
 
 import {
+  MANAGED_EGRESS_SANDBOX_SYSTEM_PROMPT,
   SANDBOX_SYSTEM_PROMPT,
   SandboxResourceLoader,
   createStrictSettingsManager,
@@ -49,6 +50,21 @@ describe("SandboxResourceLoader", () => {
     });
     expect(loader.getSystemPrompt()).toBe(SANDBOX_SYSTEM_PROMPT);
     expect(loader.getSystemPrompt()).not.toContain(root);
+  });
+
+  it("selects an explanatory managed-egress prompt without weakening enforcement", async () => {
+    const { cwd } = await workspace();
+    const isolated = await SandboxResourceLoader.create(cwd, "isolated");
+    const managed = await SandboxResourceLoader.create(cwd, "managed-egress");
+
+    expect(isolated.getSystemPrompt()).toBe(SANDBOX_SYSTEM_PROMPT);
+    expect(managed.getSystemPrompt()).toBe(MANAGED_EGRESS_SANDBOX_SYSTEM_PROMPT);
+    expect(managed.getSystemPrompt()).toContain("destination-filtered proxy");
+    expect(managed.getSystemPrompt()).toContain("LANs");
+    expect(managed.getSystemPrompt()).toContain("metadata services");
+    expect(managed.getSystemPrompt()).toContain("UDP");
+    expect(managed.getSystemPrompt()).toContain("workspace content");
+    expect(managed.getSystemPrompt()).toContain("Do not work around blocked access");
   });
 
   it("rejects a noncanonical workspace and ignores symlink context files", async () => {

@@ -8,6 +8,8 @@ import {
   type ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
 
+import type { SandboxNetworkPolicy } from "../../shared/protocol.js";
+
 const CONTEXT_FILE_NAMES = Object.freeze([
   "AGENTS.override.md",
   "AGENTS.md",
@@ -16,7 +18,7 @@ const CONTEXT_FILE_NAMES = Object.freeze([
   "CLAUDE.MD",
 ] as const);
 
-export const SANDBOX_SYSTEM_PROMPT = `You are an expert coding assistant operating in a workspace sandbox.
+const SANDBOX_PROMPT_HEADER = `You are an expert coding assistant operating in a workspace sandbox.
 
 Available tools:
 - read: Read file contents
@@ -33,14 +35,32 @@ Guidelines:
 - Use write only for new files or complete rewrites.
 - Use edit for precise changes; every edits[].oldText must be unique in the original file and edits must not overlap.
 - Use one edit call for multiple disjoint changes to the same file.
-- Tools operate from /workspace in a network-isolated workspace sandbox.
+- Tools operate from /workspace in a workspace sandbox.
 - Host absolute paths and files outside the synthetic guest filesystem are unavailable.
-- /workspace/.chatwca is ephemeral and must not be used for persistent state.
-- Package downloads, external services, DNS, IPv4, IPv6, and loopback services are unavailable.
-- Temporary command, home, and /tmp state disappears after abort, close, or eviction.
+- /workspace/.chatwca is ephemeral and must not be used for persistent state.`;
+
+const SANDBOX_PROMPT_FOOTER = `- Temporary command, home, and /tmp state disappears after abort, close, or eviction.
 - The workspace, including .git, is writable; make only changes requested by the user.
 - /usr and any administrator-provided runtime mounts are read-only.
 - Be concise and show guest file paths clearly.`;
+
+export const ISOLATED_SANDBOX_SYSTEM_PROMPT = `${SANDBOX_PROMPT_HEADER.replace(
+  "- Tools operate from /workspace in a workspace sandbox.",
+  "- Tools operate from /workspace in a network-isolated workspace sandbox.",
+)}
+- Package downloads, external services, DNS, IPv4, IPv6, and loopback services are unavailable.
+${SANDBOX_PROMPT_FOOTER}`;
+
+export const MANAGED_EGRESS_SANDBOX_SYSTEM_PROMPT = `${SANDBOX_PROMPT_HEADER}
+- Network access is available only through a destination-filtered proxy for administrator-configured domains and TCP ports.
+- Local and host services, LANs, metadata services, UDP, inbound connections, and unconfigured destinations are unavailable.
+- Allowed destinations may receive any workspace content readable by tools.
+- Do not work around blocked access with tunnels, alternate endpoints, or proxy bypasses.
+- Removing or changing proxy environment variables does not provide direct network access.
+${SANDBOX_PROMPT_FOOTER}`;
+
+/** Backward-compatible name for the default isolated profile. */
+export const SANDBOX_SYSTEM_PROMPT = ISOLATED_SANDBOX_SYSTEM_PROMPT;
 
 type PiSettings = ReturnType<SettingsManager["getGlobalSettings"]>;
 
@@ -131,12 +151,18 @@ export class SandboxResourceLoader implements ResourceLoader {
   };
   #agentsFiles: readonly { readonly path: string; readonly content: string }[] = Object.freeze([]);
 
-  private constructor(canonicalWorkspace: string) {
+  private constructor(
+    canonicalWorkspace: string,
+    private readonly networkPolicy: SandboxNetworkPolicy,
+  ) {
     this.#canonicalWorkspace = canonicalWorkspace;
   }
 
-  static async create(canonicalWorkspace: string): Promise<SandboxResourceLoader> {
-    const loader = new SandboxResourceLoader(canonicalWorkspace);
+  static async create(
+    canonicalWorkspace: string,
+    networkPolicy: SandboxNetworkPolicy = "isolated",
+  ): Promise<SandboxResourceLoader> {
+    const loader = new SandboxResourceLoader(canonicalWorkspace, networkPolicy);
     await loader.reload();
     return loader;
   }
@@ -146,7 +172,11 @@ export class SandboxResourceLoader implements ResourceLoader {
   getPrompts() { return { prompts: [], diagnostics: [] }; }
   getThemes() { return { themes: [], diagnostics: [] }; }
   getAgentsFiles() { return { agentsFiles: [...this.#agentsFiles] }; }
-  getSystemPrompt(): string { return SANDBOX_SYSTEM_PROMPT; }
+  getSystemPrompt(): string {
+    return this.networkPolicy === "managed-egress"
+      ? MANAGED_EGRESS_SANDBOX_SYSTEM_PROMPT
+      : ISOLATED_SANDBOX_SYSTEM_PROMPT;
+  }
   getSystemPromptSource(): undefined { return undefined; }
   getAppendSystemPrompt(): string[] { return []; }
   getAppendSystemPromptSources(): [] { return []; }

@@ -25,6 +25,7 @@ import type {
   PiRuntimeFactoryPort,
   PiRuntimeFatalFailureListener,
   PiRuntimeIdentity,
+  PiRuntimeNetworkBlockedListener,
   PiRuntimeReplacementListener,
 } from "../../src/server/pi-runtime.js";
 
@@ -50,6 +51,7 @@ interface FakeSessionOptions {
   readonly branch?: readonly unknown[];
   readonly sdkModel?: NonNullable<AgentSession["model"]>;
   readonly securityProfile?: "unrestricted" | "workspace-sandboxed";
+  readonly networkPolicy?: "isolated" | "managed-egress" | null;
 }
 
 function fakeSession(
@@ -96,12 +98,14 @@ class FakeRuntime implements PiConversationRuntimePort {
   session: AgentSession;
   readonly model: PiModelCapability | undefined = undefined;
   readonly securityProfile: "unrestricted" | "workspace-sandboxed";
+  readonly networkPolicy: "isolated" | "managed-egress" | null;
   readonly supportsImages = false;
   disposed = false;
   teardownComplete = false;
   readonly events = new Set<AgentSessionEventListener>();
   readonly replacements = new Set<PiRuntimeReplacementListener>();
   readonly fatalFailures = new Set<PiRuntimeFatalFailureListener>();
+  readonly blockedEvents = new Set<PiRuntimeNetworkBlockedListener>();
   readonly promptSpy = vi.fn(
     async (_text: string, options?: PromptOptions) => {
       options?.preflightResult?.(true);
@@ -118,6 +122,7 @@ class FakeRuntime implements PiConversationRuntimePort {
     this.events.clear();
     this.replacements.clear();
     this.fatalFailures.clear();
+    this.blockedEvents.clear();
     this.teardownComplete = true;
   });
 
@@ -127,6 +132,8 @@ class FakeRuntime implements PiConversationRuntimePort {
   ) {
     this.identity = identity;
     this.securityProfile = sessionOptions.securityProfile ?? "unrestricted";
+    this.networkPolicy = sessionOptions.networkPolicy ??
+      (this.securityProfile === "workspace-sandboxed" ? "isolated" : null);
     this.session = fakeSession(identity, sessionOptions);
   }
 
@@ -143,6 +150,11 @@ class FakeRuntime implements PiConversationRuntimePort {
   onFatalFailure(listener: PiRuntimeFatalFailureListener): () => void {
     this.fatalFailures.add(listener);
     return () => this.fatalFailures.delete(listener);
+  }
+
+  onNetworkBlocked(listener: PiRuntimeNetworkBlockedListener): () => void {
+    this.blockedEvents.add(listener);
+    return () => this.blockedEvents.delete(listener);
   }
 
   prompt(text: string, options?: PromptOptions): Promise<void> {
@@ -167,6 +179,10 @@ class FakeRuntime implements PiConversationRuntimePort {
 
   emitFatal(error = new AppError(ERROR_CODES.SANDBOX_WORKER_FAILED)): void {
     for (const listener of this.fatalFailures) listener(error);
+  }
+
+  emitBlocked(event: Parameters<PiRuntimeNetworkBlockedListener>[0]): void {
+    for (const listener of this.blockedEvents) listener(event);
   }
 
   replace(identity: PiRuntimeIdentity): void {
@@ -667,9 +683,90 @@ describe("ConversationRegistry", () => {
     expect(record.status).toBe("error");
     expect(record.runtimeFailureTerminal).toBe(true);
     expect(onListenerError).toHaveBeenCalledWith(failure);
+    await vi.waitFor(() => expect(runtime.disposeSpy).toHaveBeenCalledOnce());
     await expect(registry.prompt(record.id, "must not run", [])).rejects.toMatchObject({
       code: ERROR_CODES.CONVERSATION_BUSY,
     });
+  });
+
+  it("emits revisioned blocked events from only the immutable managed runtime", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessionFile = path.join(root, "sessions", "managed.jsonl");
+    await Promise.all([mkdir(cwd), mkdir(path.dirname(sessionFile))]);
+    const runtime = new FakeRuntime(identity("managed", sessionFile, cwd), {
+      securityProfile: "workspace-sandboxed",
+      networkPolicy: "managed-egress",
+    });
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(runtime);
+    const registry = new ConversationRegistry({ runtimeFactory: factory });
+    const events: ConversationRegistryEvent[] = [];
+    registry.subscribe((event) => events.push(event));
+    const managedPolicy = {
+      workspaceId: "managed-workspace",
+      cwd,
+      sessionDirectory: null,
+      securityProfile: "workspace-sandboxed" as const,
+      networkPolicy: "managed-egress" as const,
+    };
+
+    const record = await registry.create(managedPolicy);
+    runtime.emitBlocked({
+      host: "registry.example",
+      port: 443,
+      protocol: "https-connect",
+      reason: "not_allowed",
+      occurrenceCount: 3,
+    });
+
+    expect(record.revision).toBe(1);
+    expect(events.at(-1)).toMatchObject({
+      type: "conversation.event",
+      event: {
+        type: "network.blocked",
+        workspaceId: "managed-workspace",
+        conversationId: "managed",
+        revision: 1,
+        payload: {
+          host: "registry.example",
+          port: 443,
+          protocol: "https-connect",
+          reason: "not_allowed",
+          occurrenceCount: 3,
+        },
+      },
+    });
+    await expect(registry.getState(record.id)).resolves.toMatchObject({
+      securityProfile: "workspace-sandboxed",
+      networkPolicy: "managed-egress",
+    });
+    await registry.close(record.id);
+    expect(runtime.blockedEvents.size).toBe(0);
+  });
+
+  it("rejects and disposes a runtime with a weaker network policy", async () => {
+    const root = await temporaryRoot();
+    const cwd = path.join(root, "workspace");
+    const sessionFile = path.join(root, "sessions", "weaker.jsonl");
+    await Promise.all([mkdir(cwd), mkdir(path.dirname(sessionFile))]);
+    const runtime = new FakeRuntime(identity("weaker", sessionFile, cwd), {
+      securityProfile: "workspace-sandboxed",
+      networkPolicy: "isolated",
+    });
+    const factory = new FakeFactory();
+    factory.createPersistent.mockResolvedValue(runtime);
+    const registry = new ConversationRegistry({ runtimeFactory: factory });
+
+    await expect(registry.create({
+      workspaceId: "managed-workspace",
+      cwd,
+      sessionDirectory: null,
+      securityProfile: "workspace-sandboxed",
+      networkPolicy: "managed-egress",
+    })).rejects.toMatchObject({ code: ERROR_CODES.SESSION_UNAVAILABLE });
+    expect(runtime.disposeSpy).toHaveBeenCalledOnce();
+    expect(registry.size).toBe(0);
   });
 
   it("canonicalizes aliases and shares one in-flight open", async () => {

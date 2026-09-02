@@ -143,7 +143,16 @@ function httpLocalDenial(port: number): Promise<object> {
     socket.on("data", (chunk: Buffer) => {
       data = Buffer.concat([data, chunk]).subarray(0, 4096);
       const text = data.toString("latin1");
-      if (text.includes("\r\n\r\n")) finish({ connected: true, denied: /^HTTP\/1\.1 403 /i.test(text) && /\r\nx-chatwca-proxy-error: blocked-local-address\r\n/i.test(text), error: null });
+      if (text.includes("\r\n\r\n")) finish({
+        connected: true,
+        // The administrator policy may reject the synthetic loopback target
+        // before address classification. Any closed stable policy denial proves
+        // that this worker reached its parent-owned HTTP proxy; generic errors
+        // and successful responses do not satisfy the handshake.
+        denied: /^HTTP\/1\.1 403 /i.test(text) &&
+          /\r\nx-chatwca-proxy-error: (?:blocked-by-allowlist|blocked-by-denylist|blocked-local-address|blocked-port|policy-unavailable)\r\n/i.test(text),
+        error: null,
+      });
     });
     socket.once("error", (error: NodeJS.ErrnoException) => finish({ connected: false, denied: false, error: error.code ?? "error" }));
     socket.once("end", () => finish({ connected: true, denied: false, error: "truncated" }));

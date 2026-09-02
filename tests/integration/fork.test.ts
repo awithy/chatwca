@@ -41,6 +41,7 @@ import {
   type PiRuntimeFactoryPort,
   type PiRuntimeFatalFailureListener,
   type PiRuntimeIdentity,
+  type PiRuntimeNetworkBlockedListener,
   type PiRuntimeReplacementListener,
 } from "../../src/server/pi-runtime.js";
 import { SessionHistory } from "../../src/server/session-history.js";
@@ -146,6 +147,10 @@ class TrackingRuntime implements PiConversationRuntimePort {
     return this.inner.securityProfile;
   }
 
+  get networkPolicy() {
+    return this.inner.networkPolicy;
+  }
+
   get identity(): PiRuntimeIdentity {
     return this.inner.identity;
   }
@@ -192,6 +197,10 @@ class TrackingRuntime implements PiConversationRuntimePort {
 
   onFatalFailure(listener: PiRuntimeFatalFailureListener): () => void {
     return this.inner.onFatalFailure(listener);
+  }
+
+  onNetworkBlocked(listener: PiRuntimeNetworkBlockedListener): () => void {
+    return this.inner.onNetworkBlocked(listener);
   }
 
   prompt(text: string, options?: PromptOptions): Promise<void> {

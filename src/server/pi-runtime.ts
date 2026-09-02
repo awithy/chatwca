@@ -32,6 +32,11 @@ import type {
   ValidatedSandboxHost,
 } from "./sandbox/bwrap.js";
 import type { SandboxConfig } from "./sandbox/config.js";
+import type { SandboxNetworkPolicy } from "../shared/protocol.js";
+import type { ManagedNetworkConfig } from "./network/config.js";
+import type { NetworkBlockedNotification, NetworkDiagnosticSink } from "./network/audit.js";
+import { ManagedNetworkRuntime } from "./network/managed-runtime.js";
+import type { ValidatedNetworkHelper } from "./network/helper.js";
 import {
   SandboxResourceLoader,
   createStrictSettingsManager,
@@ -74,6 +79,19 @@ export type PiRuntimeReplacementListener = (
 ) => void;
 
 export type PiRuntimeFatalFailureListener = (error: AppError) => void;
+export type PiRuntimeNetworkBlockedListener = (
+  event: Readonly<NetworkBlockedNotification>,
+) => void;
+
+/** Parent-owned proxy boundary retained for the full conversation lifetime. */
+export interface ManagedNetworkRuntimePort {
+  readonly httpSocketPath: string;
+  readonly socksSocketPath: string;
+  subscribeBlocked(listener: PiRuntimeNetworkBlockedListener): () => void;
+  onFatal(listener: PiRuntimeFatalFailureListener): () => void;
+  close(): Promise<void>;
+  forceClose(): void;
+}
 
 /** Options that may vary with each CWD-bound service reconstruction. */
 export type PiServiceOptions = Omit<
@@ -101,17 +119,19 @@ export interface SandboxWorkspaceFileReaderPort {
 export interface PiConversationRuntimePort {
   readonly session: AgentSession;
   readonly securityProfile: RuntimeWorkspacePolicy["securityProfile"];
+  readonly networkPolicy: SandboxNetworkPolicy | null;
   readonly identity: PiRuntimeIdentity;
   readonly model: PiModelCapability | undefined;
   readonly supportsImages: boolean;
   readonly disposed: boolean;
-  /** True only after Pi and worker teardown promises have both settled. */
+  /** True only after Pi, worker/bridges, and managed-network teardown have settled. */
   readonly teardownComplete: boolean;
   /** Present only when model-directed workspace reads cross a sandbox worker. */
   readonly sandboxFileReader?: SandboxWorkspaceFileReaderPort;
   subscribe(listener: AgentSessionEventListener): () => void;
   onSessionReplaced(listener: PiRuntimeReplacementListener): () => void;
   onFatalFailure(listener: PiRuntimeFatalFailureListener): () => void;
+  onNetworkBlocked(listener: PiRuntimeNetworkBlockedListener): () => void;
   prompt(text: string, options?: PromptOptions): Promise<void>;
   abort(): Promise<void>;
   fork(entryId: string, options?: PiForkOptions): Promise<PiForkResult>;
@@ -129,11 +149,23 @@ export interface PiRuntimeFactoryPort {
   ): Promise<PiConversationRuntimePort>;
 }
 
+export interface PiManagedNetworkOptions {
+  readonly config: Readonly<ManagedNetworkConfig>;
+  readonly helper: Readonly<ValidatedNetworkHelper>;
+  readonly dataDir: string;
+  readonly diagnosticSink?: NetworkDiagnosticSink;
+  /** Deterministic lifecycle boundary used only by tests. */
+  readonly startRuntime?: (
+    options: Parameters<typeof ManagedNetworkRuntime.start>[0],
+  ) => Promise<ManagedNetworkRuntimePort>;
+}
+
 export interface PiSandboxRuntimeOptions {
   readonly config: Readonly<SandboxConfig>;
   readonly host: Readonly<ValidatedSandboxHost>;
   readonly worker: Readonly<SandboxWorkerArtifact>;
   readonly hiddenPaths: readonly string[];
+  readonly managedNetwork?: Readonly<PiManagedNetworkOptions>;
 }
 
 export interface PiRuntimeFactoryOptions {
@@ -221,12 +253,15 @@ async function resolveSessionFile(sessionFile: string): Promise<string> {
 export class PiConversationRuntime implements PiConversationRuntimePort {
   readonly #runtime: AgentSessionRuntime;
   readonly #securityProfile: RuntimeWorkspacePolicy["securityProfile"];
+  readonly #networkPolicy: SandboxNetworkPolicy | null;
   readonly #sandboxController: SandboxController | undefined;
+  readonly #managedNetwork: ManagedNetworkRuntimePort | undefined;
   readonly #eventListeners = new Set<AgentSessionEventListener>();
   readonly #replacementListeners = new Set<PiRuntimeReplacementListener>();
   readonly #fatalListeners = new Set<PiRuntimeFatalFailureListener>();
   #unsubscribeSession: (() => void) | undefined;
   #unsubscribeControllerFatal: (() => void) | undefined;
+  #unsubscribeNetworkFatal: (() => void) | undefined;
   #replacementSource: PiRuntimeIdentity | undefined;
   #fatalFailure: AppError | undefined;
   #disposed = false;
@@ -237,10 +272,25 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
     runtime: AgentSessionRuntime,
     securityProfile: RuntimeWorkspacePolicy["securityProfile"] = "unrestricted",
     sandboxController?: SandboxController,
+    networkPolicy: SandboxNetworkPolicy | null =
+      securityProfile === "workspace-sandboxed" ? "isolated" : null,
+    managedNetwork?: ManagedNetworkRuntimePort,
   ) {
+    if (
+      (securityProfile === "unrestricted" &&
+        (networkPolicy !== null || sandboxController !== undefined || managedNetwork !== undefined)) ||
+      (securityProfile === "workspace-sandboxed" &&
+        (sandboxController === undefined ||
+          (networkPolicy !== "isolated" && networkPolicy !== "managed-egress") ||
+          (networkPolicy === "managed-egress") !== (managedNetwork !== undefined)))
+    ) {
+      throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
+    }
     this.#runtime = runtime;
     this.#securityProfile = securityProfile;
+    this.#networkPolicy = networkPolicy;
     this.#sandboxController = sandboxController;
+    this.#managedNetwork = managedNetwork;
     if (sandboxController !== undefined) {
       Object.defineProperty(this, "sandboxFileReader", {
         value: sandboxController,
@@ -249,6 +299,11 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
       this.#unsubscribeControllerFatal = sandboxController.onFatalFailure(
         (failure) => this.#notifyFatalFailure(failure.error),
       );
+    }
+    if (managedNetwork !== undefined) {
+      this.#unsubscribeNetworkFatal = managedNetwork.onFatal((error) => {
+        sandboxController?.failTerminal(error);
+      });
     }
 
     runtime.setBeforeSessionInvalidate(() => {
@@ -274,6 +329,10 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
 
   get securityProfile(): RuntimeWorkspacePolicy["securityProfile"] {
     return this.#securityProfile;
+  }
+
+  get networkPolicy(): SandboxNetworkPolicy | null {
+    return this.#networkPolicy;
   }
 
   declare readonly sandboxFileReader?: SandboxWorkspaceFileReaderPort;
@@ -322,6 +381,11 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
     this.#fatalListeners.add(listener);
     if (this.#fatalFailure !== undefined) listener(this.#fatalFailure);
     return () => this.#fatalListeners.delete(listener);
+  }
+
+  onNetworkBlocked(listener: PiRuntimeNetworkBlockedListener): () => void {
+    if (this.#disposed) throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
+    return this.#managedNetwork?.subscribeBlocked(listener) ?? (() => undefined);
   }
 
   async prompt(text: string, options?: PromptOptions): Promise<void> {
@@ -400,25 +464,27 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
     this.#fatalListeners.clear();
     this.#unsubscribeControllerFatal?.();
     this.#unsubscribeControllerFatal = undefined;
+    this.#unsubscribeNetworkFatal?.();
+    this.#unsubscribeNetworkFatal = undefined;
     this.#runtime.setBeforeSessionInvalidate(undefined);
     this.#runtime.setRebindSession(undefined);
 
-    // Start both teardown paths before awaiting either one. A stalled SDK
-    // disposal must never keep a Bubblewrap namespace alive past shutdown.
-    let piDisposal: Promise<void>;
-    let workerDisposal: Promise<void>;
-    try {
-      piDisposal = this.#runtime.dispose();
-    } catch (error) {
-      piDisposal = Promise.reject(error);
-    }
-    try {
-      workerDisposal = this.#sandboxController?.close() ?? Promise.resolve();
-    } catch (error) {
-      workerDisposal = Promise.reject(error);
-    }
-    const [piResult, workerResult] = await Promise.allSettled([piDisposal, workerDisposal]);
+    // Start all teardown paths before awaiting any one of them. A stalled Pi,
+    // helper/worker, or proxy path must never retain either of the others past
+    // the process-wide grace deadline.
+    const start = (operation: () => Promise<void>): Promise<void> => {
+      try { return operation(); } catch (error) { return Promise.reject(error); }
+    };
+    const piDisposal = start(() => this.#runtime.dispose());
+    const workerDisposal = start(() => this.#sandboxController?.close() ?? Promise.resolve());
+    const networkDisposal = start(() => this.#managedNetwork?.close() ?? Promise.resolve());
+    const [piResult, workerResult, networkResult] = await Promise.allSettled([
+      piDisposal,
+      workerDisposal,
+      networkDisposal,
+    ]);
     this.#teardownComplete = true;
+    if (networkResult.status === "rejected") throw networkResult.reason;
     if (workerResult.status === "rejected") throw workerResult.reason;
     if (piResult.status === "rejected") throw piResult.reason;
   }
@@ -626,31 +692,68 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
     sessionManager: SessionManager,
   ): Promise<PiConversationRuntime> {
     let sandboxController: SandboxController | undefined;
+    let managedNetwork: ManagedNetworkRuntimePort | undefined;
     let sdkRuntime: AgentSessionRuntime | undefined;
+    let conversationRuntime: PiConversationRuntime | undefined;
+    let proxyFailure: AppError | undefined;
+    let unsubscribeStartupProxyFatal: (() => void) | undefined;
     try {
-      if (policy.networkPolicy === "managed-egress") {
-        // The managed launch path is introduced only after the native helper,
-        // bridge, and proxy startup gates exist. Never run it through the
-        // isolated profile as a silent downgrade.
-        throw new AppError(ERROR_CODES.NETWORK_HELPER_UNAVAILABLE);
+      const sandbox = policy.securityProfile === "workspace-sandboxed"
+        ? this.#sandbox
+        : undefined;
+      if (policy.securityProfile === "workspace-sandboxed" && sandbox === undefined) {
+        throw new AppError(ERROR_CODES.SANDBOX_WORKER_START_FAILED);
       }
-      if (policy.securityProfile === "workspace-sandboxed") {
-        const sandbox = this.#sandbox;
-        if (sandbox === undefined) {
-          throw new AppError(ERROR_CODES.SANDBOX_WORKER_START_FAILED);
+      if (policy.networkPolicy === "managed-egress") {
+        const managed = sandbox?.managedNetwork;
+        if (managed === undefined || managed.config.mode !== "optional") {
+          // A managed policy is never launched through isolated Bubblewrap or
+          // unrestricted tools when its parent-owned runtime is unavailable.
+          throw new AppError(ERROR_CODES.NETWORK_HELPER_UNAVAILABLE);
         }
+        const startRuntime = managed.startRuntime ??
+          ((options) => ManagedNetworkRuntime.start(options));
+        managedNetwork = await startRuntime({
+          dataDir: managed.dataDir,
+          workspaceId: policy.workspaceId,
+          conversationId: sessionManager.getSessionId(),
+          config: managed.config,
+          ...(managed.diagnosticSink === undefined
+            ? {}
+            : { diagnosticSink: managed.diagnosticSink }),
+        });
+        unsubscribeStartupProxyFatal = managedNetwork.onFatal((error) => {
+          proxyFailure ??= error;
+          sandboxController?.failTerminal(error);
+        });
+      }
+      if (sandbox !== undefined) {
+        const hiddenPaths = [...new Set([
+          ...sandbox.hiddenPaths,
+          ...(policy.sessionDirectory === null ? [] : [policy.sessionDirectory]),
+        ])];
         sandboxController = await SandboxController.start({
-          createWorker: (onFatal) => startSandboxWorkerClient({
-            config: sandbox.config,
-            host: sandbox.host,
-            worker: sandbox.worker,
-            workspace: policy.cwd,
-            hiddenPaths: [...new Set([
-              ...sandbox.hiddenPaths,
-              ...(policy.sessionDirectory === null ? [] : [policy.sessionDirectory]),
-            ])],
-            onFatal,
-          }),
+          createWorker: (onFatal) => {
+            if (proxyFailure !== undefined) throw proxyFailure;
+            return startSandboxWorkerClient({
+              config: sandbox.config,
+              host: sandbox.host,
+              worker: sandbox.worker,
+              workspace: policy.cwd,
+              hiddenPaths,
+              onFatal,
+              ...(managedNetwork === undefined
+                ? { networkProfile: { kind: "isolated" as const } }
+                : {
+                    networkProfile: {
+                      kind: "managed-egress" as const,
+                      helper: sandbox.managedNetwork!.helper,
+                      httpSocketPath: managedNetwork.httpSocketPath,
+                      socksSocketPath: managedNetwork.socksSocketPath,
+                    },
+                  }),
+            });
+          },
           commandTimeoutMs: sandbox.config.commandTimeoutMs,
           abortActiveRun: () => sdkRuntime?.session.abort(),
           waitForPiIdle: () => sdkRuntime?.session.agent.waitForIdle(),
@@ -658,6 +761,10 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
           // immediately after SDK construction and replays any raced failure.
           onFatal: () => undefined,
         });
+        if (proxyFailure !== undefined) {
+          sandboxController.failTerminal(proxyFailure);
+          throw proxyFailure;
+        }
       }
 
       const createRuntime = async ({
@@ -669,7 +776,10 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
         let configurableSessionOptions: PiSessionOptions;
         if (policy.securityProfile === "workspace-sandboxed") {
           if (sandboxController === undefined) throw new AppError(ERROR_CODES.SANDBOX_WORKER_FAILED);
-          const resourceLoader = await SandboxResourceLoader.create(policy.cwd);
+          const resourceLoader = await SandboxResourceLoader.create(
+            policy.cwd,
+            policy.networkPolicy ?? "isolated",
+          );
           services = {
             cwd: "/workspace",
             agentDir: this.#agentDir,
@@ -724,13 +834,36 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
         agentDir: this.#agentDir,
         sessionManager,
       });
-      if (sandboxController !== undefined && sandboxController.state !== "healthy") {
-        await sdkRuntime.dispose().catch(() => undefined);
-        throw new AppError(ERROR_CODES.SANDBOX_WORKER_START_FAILED);
+      if (proxyFailure !== undefined ||
+          (sandboxController !== undefined && sandboxController.state !== "healthy")) {
+        throw proxyFailure ?? new AppError(ERROR_CODES.SANDBOX_WORKER_START_FAILED);
       }
-      return new PiConversationRuntime(sdkRuntime, policy.securityProfile, sandboxController);
+      conversationRuntime = new PiConversationRuntime(
+        sdkRuntime,
+        policy.securityProfile,
+        sandboxController,
+        policy.networkPolicy,
+        managedNetwork,
+      );
+      // Keep the startup observer until the fully owning wrapper has installed
+      // its replayable fatal subscription; there is no unobserved proxy gap.
+      unsubscribeStartupProxyFatal?.();
+      unsubscribeStartupProxyFatal = undefined;
+      if (proxyFailure !== undefined || sandboxController?.state === "error") {
+        throw proxyFailure ?? new AppError(ERROR_CODES.SANDBOX_WORKER_START_FAILED);
+      }
+      return conversationRuntime;
     } catch (error) {
-      await sandboxController?.close().catch(() => undefined);
+      unsubscribeStartupProxyFatal?.();
+      const disposals: Promise<unknown>[] = [];
+      if (conversationRuntime !== undefined) {
+        try { disposals.push(conversationRuntime.dispose()); } catch { /* continue teardown */ }
+      } else {
+        try { if (sdkRuntime !== undefined) disposals.push(sdkRuntime.dispose()); } catch { /* continue teardown */ }
+        try { if (sandboxController !== undefined) disposals.push(sandboxController.close()); } catch { /* continue teardown */ }
+        try { if (managedNetwork !== undefined) disposals.push(managedNetwork.close()); } catch { /* continue teardown */ }
+      }
+      await Promise.allSettled(disposals);
       throw error instanceof AppError
         ? error
         : toAppError(error, { source: "pi", operation: "create" });

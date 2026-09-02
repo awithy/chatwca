@@ -21,6 +21,7 @@ import type {
   ImageMimeType,
   LiveConversationStatus,
   ModelInfo,
+  NetworkBlockedPayload,
   QueueState,
   UiImage,
   SandboxNetworkPolicy,
@@ -49,9 +50,15 @@ import type {
   PiRuntimeIdentity,
   PiRuntimeReplacement,
 } from "./pi-runtime.js";
+import type { NetworkBlockedNotification } from "./network/audit.js";
 import type { RuntimeWorkspacePolicy } from "./workspace-repository.js";
 
 const UNTITLED_CONVERSATION = "Untitled conversation";
+
+type RegistryConversationEvent = NormalizedPiEvent | {
+  readonly type: "network.blocked";
+  readonly payload: NetworkBlockedPayload;
+};
 
 export type ConversationRegistrationSource = "create" | "open" | "fork";
 
@@ -279,6 +286,7 @@ export class ConversationRegistry {
     () => void
   >();
   readonly #fatalUnsubscribes = new WeakMap<ConversationRecord, () => void>();
+  readonly #blockedUnsubscribes = new WeakMap<ConversationRecord, () => void>();
   readonly #normalizers = new WeakMap<ConversationRecord, PiEventNormalizer>();
   #capacityReservations = 0;
   #capacityTail = Promise.resolve();
@@ -813,6 +821,7 @@ export class ConversationRegistry {
       this.#assertAcceptingWork();
       if (
         temporary.securityProfile !== forkPolicy.securityProfile ||
+        temporary.networkPolicy !== forkPolicy.networkPolicy ||
         path.resolve(temporary.identity.sessionFile) !==
           reservation.sourceSessionFile ||
         path.resolve(temporary.identity.cwd) !== reservation.sourceCwd
@@ -1053,7 +1062,10 @@ export class ConversationRegistry {
     this.#assertAcceptingWork();
     const identity = runtime.identity;
     this.#assertIdentityInWorkspace(identity, workspace);
-    if (runtime.securityProfile !== workspace.securityProfile) {
+    if (
+      runtime.securityProfile !== workspace.securityProfile ||
+      runtime.networkPolicy !== workspace.networkPolicy
+    ) {
       throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
     }
     const sessionFile = await canonicalFile(identity.sessionFile);
@@ -1123,6 +1135,10 @@ export class ConversationRegistry {
         record,
         runtime.onFatalFailure((error) => this.#handleRuntimeFailure(record, error)),
       );
+      this.#blockedUnsubscribes.set(
+        record,
+        runtime.onNetworkBlocked((event) => this.#handleNetworkBlocked(record, event)),
+      );
     } catch (error) {
       record.unsubscribe();
       this.#normalizers.get(record)?.dispose();
@@ -1131,6 +1147,8 @@ export class ConversationRegistry {
       this.#replacementUnsubscribes.delete(record);
       this.#fatalUnsubscribes.get(record)?.();
       this.#fatalUnsubscribes.delete(record);
+      this.#blockedUnsubscribes.get(record)?.();
+      this.#blockedUnsubscribes.delete(record);
       if (this.#byId.get(record.id) === record) this.#byId.delete(record.id);
       if (this.#bySessionFile.get(record.sessionFile) === record) {
         this.#bySessionFile.delete(record.sessionFile);
@@ -1350,6 +1368,8 @@ export class ConversationRegistry {
       this.#replacementUnsubscribes.delete(record);
       this.#fatalUnsubscribes.get(record)?.();
       this.#fatalUnsubscribes.delete(record);
+      this.#blockedUnsubscribes.get(record)?.();
+      this.#blockedUnsubscribes.delete(record);
 
       try {
         await this.#disposeRuntime(record.runtime);
@@ -1384,6 +1404,13 @@ export class ConversationRegistry {
     record: ConversationRecord,
     replacement: PiRuntimeReplacement,
   ): void {
+    if (
+      record.runtime.securityProfile !== record.securityProfile ||
+      record.runtime.networkPolicy !== record.networkPolicy
+    ) {
+      this.#handleRuntimeFailure(record, new AppError(ERROR_CODES.SESSION_UNAVAILABLE));
+      return;
+    }
     const current = record.runtime.identity;
     this.#assertIdentityInWorkspace(current, {
       workspaceId: record.workspaceId,
@@ -1437,7 +1464,7 @@ export class ConversationRegistry {
 
   #emitConversationEvent(
     record: ConversationRecord,
-    event: NormalizedPiEvent,
+    event: RegistryConversationEvent,
   ): void {
     if (this.#byId.get(record.id) !== record || this.#pendingCloses.has(record)) {
       return;
@@ -1495,15 +1522,41 @@ export class ConversationRegistry {
     void this.#refreshHistory(record.workspaceId);
   }
 
+  #handleNetworkBlocked(
+    record: ConversationRecord,
+    event: Readonly<NetworkBlockedNotification>,
+  ): void {
+    if (record.networkPolicy !== "managed-egress") {
+      this.#handleRuntimeFailure(record, new AppError(ERROR_CODES.SESSION_UNAVAILABLE));
+      return;
+    }
+    this.#emitConversationEvent(record, {
+      type: "network.blocked",
+      payload: {
+        host: event.host,
+        port: event.port,
+        protocol: event.protocol,
+        reason: event.reason,
+        ...(event.occurrenceCount === undefined
+          ? {}
+          : { occurrenceCount: event.occurrenceCount }),
+      },
+    });
+  }
+
   #handleRuntimeFailure(record: ConversationRecord, error: unknown): void {
     this.#onListenerError(error);
     if (this.#byId.get(record.id) !== record) return;
     record.runtimeFailureTerminal = true;
-    if (record.status === "error") return;
-    this.#emitConversationEvent(record, {
-      type: "conversation.status",
-      payload: { status: "error" },
-    });
+    if (record.status !== "error") {
+      this.#emitConversationEvent(record, {
+        type: "conversation.status",
+        payload: { status: "error" },
+      });
+    }
+    // A terminal record remains available for its error snapshot, but none of
+    // its Pi, worker/bridge, or managed proxy resources remain live.
+    void this.#disposeRuntime(record.runtime).catch(this.#onListenerError);
   }
 
   #touch(record: ConversationRecord): void {

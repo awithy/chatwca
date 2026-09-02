@@ -145,6 +145,37 @@ describe("SandboxController fail-closed lifecycle", () => {
     expect(replacement.close).toHaveBeenCalledOnce();
   });
 
+  it("terminally fails during a restart and never creates a post-proxy replacement", async () => {
+    const idle = deferred();
+    const first = worker();
+    const createWorker = vi.fn(async () => first);
+    const onFatal = vi.fn();
+    const controller = await SandboxController.start({
+      createWorker,
+      commandTimeoutMs: 1_000,
+      abortActiveRun: vi.fn(),
+      waitForPiIdle: () => idle.promise,
+      onFatal,
+    });
+
+    const restarting = controller.abort();
+    await vi.waitFor(() => expect(first.invalidate).toHaveBeenCalled());
+    const proxyFailure = new AppError(ERROR_CODES.NETWORK_PROXY_FAILED);
+    controller.failTerminal(proxyFailure);
+    expect(controller.state).toBe("error");
+    await expect(controller.health()).rejects.toMatchObject({
+      code: ERROR_CODES.SANDBOX_WORKER_FAILED,
+    });
+    idle.resolve();
+    await expect(restarting).rejects.toBe(proxyFailure);
+    await vi.waitFor(() => expect(onFatal).toHaveBeenCalledWith({
+      error: proxyFailure,
+      diagnostic: "",
+    }));
+    expect(createWorker).toHaveBeenCalledTimes(1);
+    await controller.close();
+  });
+
   it("starts worker teardown even when Pi disposal fails", async () => {
     const active = worker();
     const controller = await SandboxController.start({
@@ -170,6 +201,108 @@ describe("SandboxController fail-closed lifecycle", () => {
     await expect(runtime.dispose()).rejects.toBe(piFailure);
     expect(active.close).toHaveBeenCalledOnce();
     expect(runtime.disposed).toBe(true);
+    expect(runtime.teardownComplete).toBe(true);
+  });
+
+  it("propagates a parent proxy fatal through Pi without retry or weaker fallback", async () => {
+    const active = worker();
+    const createWorker = vi.fn(async () => active);
+    const abortPi = vi.fn(async () => undefined);
+    const waitForIdle = vi.fn(async () => undefined);
+    const controller = await SandboxController.start({
+      createWorker,
+      commandTimeoutMs: 1_000,
+      abortActiveRun: abortPi,
+      waitForPiIdle: waitForIdle,
+      onFatal: vi.fn(),
+    });
+    let proxyFatal!: (error: AppError) => void;
+    const managed = {
+      httpSocketPath: "/private/one/http.sock",
+      socksSocketPath: "/private/one/socks.sock",
+      subscribeBlocked: vi.fn(() => () => undefined),
+      onFatal: vi.fn((listener: (error: AppError) => void) => {
+        proxyFatal = listener;
+        return () => undefined;
+      }),
+      close: vi.fn(async () => undefined),
+      forceClose: vi.fn(),
+    };
+    const sdkRuntime = {
+      session: { prompt: vi.fn(async () => undefined) },
+      setBeforeSessionInvalidate: vi.fn(),
+      setRebindSession: vi.fn(),
+      dispose: vi.fn(async () => undefined),
+    } as unknown as AgentSessionRuntime;
+    const runtime = new PiConversationRuntime(
+      sdkRuntime,
+      "workspace-sandboxed",
+      controller,
+      "managed-egress",
+      managed,
+    );
+    const fatal = vi.fn();
+    runtime.onFatalFailure(fatal);
+
+    const failure = new AppError(ERROR_CODES.NETWORK_PROXY_FAILED);
+    proxyFatal(failure);
+    expect(controller.state).toBe("error");
+    await expect(runtime.prompt("never accepted after proxy failure")).rejects.toMatchObject({
+      code: ERROR_CODES.SANDBOX_WORKER_FAILED,
+    });
+    await vi.waitFor(() => expect(fatal).toHaveBeenCalledWith(failure));
+    expect(active.invalidate).toHaveBeenCalledOnce();
+    expect(abortPi).toHaveBeenCalledOnce();
+    expect(waitForIdle).toHaveBeenCalledOnce();
+    expect(createWorker).toHaveBeenCalledTimes(1);
+    expect(sdkRuntime.session.prompt).not.toHaveBeenCalled();
+    await runtime.dispose();
+    expect(managed.close).toHaveBeenCalledOnce();
+  });
+
+  it("disposes Pi, worker/bridges, and managed network concurrently", async () => {
+    const piGate = deferred();
+    const workerGate = deferred();
+    const networkGate = deferred();
+    const active = worker({ close: vi.fn(() => workerGate.promise) });
+    const controller = await SandboxController.start({
+      createWorker: async () => active,
+      commandTimeoutMs: 1_000,
+      abortActiveRun: vi.fn(),
+      waitForPiIdle: vi.fn(),
+      onFatal: vi.fn(),
+    });
+    const sdkRuntime = {
+      session: {},
+      setBeforeSessionInvalidate: vi.fn(),
+      setRebindSession: vi.fn(),
+      dispose: vi.fn(() => piGate.promise),
+    } as unknown as AgentSessionRuntime;
+    const managed = {
+      httpSocketPath: "/private/http.sock",
+      socksSocketPath: "/private/socks.sock",
+      subscribeBlocked: vi.fn(() => () => undefined),
+      onFatal: vi.fn(() => () => undefined),
+      close: vi.fn(() => networkGate.promise),
+      forceClose: vi.fn(),
+    };
+    const runtime = new PiConversationRuntime(
+      sdkRuntime,
+      "workspace-sandboxed",
+      controller,
+      "managed-egress",
+      managed,
+    );
+
+    const disposal = runtime.dispose();
+    expect(sdkRuntime.dispose).toHaveBeenCalledOnce();
+    expect(active.close).toHaveBeenCalledOnce();
+    expect(managed.close).toHaveBeenCalledOnce();
+    expect(runtime.teardownComplete).toBe(false);
+    piGate.resolve();
+    workerGate.resolve();
+    networkGate.resolve();
+    await disposal;
     expect(runtime.teardownComplete).toBe(true);
   });
 

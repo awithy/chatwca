@@ -561,6 +561,15 @@ export async function startChatWcaServer(
                 host: sandboxHost,
                 worker: sandboxWorker,
                 hiddenPaths: [dataDirectory, piAgentDirectory],
+                ...(networkHelper === undefined
+                  ? {}
+                  : {
+                      managedNetwork: {
+                        config: loadedConfig.managedNetwork,
+                        helper: networkHelper,
+                        dataDir: path.join(dataDirectory, "network"),
+                      },
+                    }),
               },
             }),
       }))

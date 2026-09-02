@@ -183,11 +183,7 @@ export type ParentFrame = Static<typeof ParentFrameSchema>;
 const NamespaceProbeSchema = strictObject({
   user: Type.String(), mnt: Type.String(), pid: Type.String(), ipc: Type.String(), uts: Type.String(), net: Type.String(),
 });
-const EnvironmentProbeSchema = strictObject({
-  HOME: Type.String(), TMPDIR: Type.String(), PATH: Type.String(), LANG: Type.String(), LC_ALL: Type.String(),
-  TERM: Type.String(), NO_COLOR: Type.String(), CI: Type.String(), USER: Type.String(), LOGNAME: Type.String(),
-  SHELL: Type.String(), PWD: Type.String(),
-});
+const EnvironmentProbeSchema = Type.Record(Type.String(), Type.String());
 const CommandProbeSchema = strictObject({
   status: Type.Union([Type.Integer(), Type.Null()]), signal: Type.Optional(Type.Union([Type.String(), Type.Null()])), stdout: Type.String(),
 });
@@ -198,8 +194,31 @@ const DnsProbeSchema = strictObject({
   resolved: Type.Boolean(), address: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   error: Type.Optional(Type.Union([Type.String(), Type.Null()])),
 });
+const ProtocolDescriptorsSchema = Type.Record(Type.String(), Type.String());
+const CommonNetworkProbe = {
+  ipv4: ConnectProbeSchema, ipv6: ConnectProbeSchema,
+  loopback4: ConnectProbeSchema, loopback6: ConnectProbeSchema,
+  dns: DnsProbeSchema, protocolDescriptors: ProtocolDescriptorsSchema,
+};
+const IsolatedNetworkProbeSchema = strictObject({
+  profile: Type.Literal("isolated"), ...CommonNetworkProbe,
+});
+const ManagedNetworkProbeSchema = strictObject({
+  profile: Type.Literal("managed-egress"),
+  helperVersion: Type.String(),
+  guestPorts: strictObject({ http: Type.Integer({ minimum: 1, maximum: 65_535 }), socks: Type.Integer({ minimum: 1, maximum: 65_535 }) }),
+  ...CommonNetworkProbe,
+  httpEndpoint: ConnectProbeSchema, socksEndpoint: ConnectProbeSchema,
+  httpLocalDenial: strictObject({ connected: Type.Boolean(), denied: Type.Boolean(), error: Type.Union([Type.String(), Type.Null()]) }),
+  socksLocalDenial: strictObject({ connected: Type.Boolean(), denied: Type.Boolean(), error: Type.Union([Type.String(), Type.Null()]) }),
+  directWithoutProxy: strictObject({ blocked: Type.Boolean(), error: Type.Union([Type.String(), Type.Null()]) }),
+  unixSocket: strictObject({ created: Type.Boolean(), error: Type.Union([Type.String(), Type.Null()]) }),
+  unixSocketpair: strictObject({ available: Type.Boolean(), error: Type.Union([Type.String(), Type.Null()]) }),
+});
 export const WorkerProbeSchema = strictObject({
-  namespaces: NamespaceProbeSchema, hostname: Type.String(), capEff: Type.String(), noNewPrivs: Type.String(),
+  namespaces: NamespaceProbeSchema, hostname: Type.String(),
+  capInh: Type.String(), capPrm: Type.String(), capEff: Type.String(), capBnd: Type.String(), capAmb: Type.String(),
+  noNewPrivs: Type.String(), seccomp: Type.String(),
   environment: EnvironmentProbeSchema, rootEntries: Type.Array(Type.String()), devEntries: Type.Array(Type.String()), etcEntries: Type.Array(Type.String()),
   hiddenPaths: Type.Array(Type.Boolean()),
   chatwcaMask: strictObject({ hostSessionHidden: Type.Boolean(), guestWriteVisible: Type.Boolean() }),
@@ -207,7 +226,7 @@ export const WorkerProbeSchema = strictObject({
   mountIdentities: Type.Record(Type.String(), strictObject({ dev: Type.String(), ino: Type.String(), readOnly: Type.Boolean() })),
   artifact: strictObject({ sha256: Sha256Schema, version: Type.String({ minLength: 1, maxLength: 64 }) }),
   commands: strictObject({ node: CommandProbeSchema, bash: CommandProbeSchema, rg: CommandProbeSchema }),
-  network: strictObject({ ipv4: ConnectProbeSchema, ipv6: ConnectProbeSchema, loopback4: ConnectProbeSchema, loopback6: ConnectProbeSchema, dns: DnsProbeSchema }),
+  network: Type.Union([IsolatedNetworkProbeSchema, ManagedNetworkProbeSchema]),
 });
 export const ReadyFrameSchema = strictObject({
   type: Type.Literal("ready"), protocol: Type.Literal(1), nonce: Type.String({ minLength: 16, maxLength: 256, pattern: "^[A-Za-z0-9_-]+$" }),

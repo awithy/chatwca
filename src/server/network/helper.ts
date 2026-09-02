@@ -10,19 +10,20 @@ import {
 import path from "node:path";
 
 import { AppError, ERROR_CODES } from "../../shared/errors.js";
+import { SANDBOX_FDS } from "../sandbox/fds.js";
 
 export const NETWORK_HELPER_NAME = "chatwca-network-helper";
 export const NETWORK_HELPER_BUILD_VERSION = "1.0.0";
 export const NETWORK_HELPER_PROTOCOL_VERSION = 1;
 export const NETWORK_HELPER_MANIFEST_SCHEMA_VERSION = 1;
-export const NETWORK_HELPER_LAUNCH_FD = 3;
-export const NETWORK_HELPER_READY_FD = 4;
-export const NETWORK_HELPER_INNER_CONFIG_FD = 7;
-export const NETWORK_HELPER_WORKER_REQUEST_FD = 8;
-export const NETWORK_HELPER_WORKER_RESPONSE_FD = 9;
-export const NETWORK_HELPER_HTTP_BOOTSTRAP_FD = 10;
-export const NETWORK_HELPER_SOCKS_BOOTSTRAP_FD = 11;
-export const NETWORK_HELPER_SELF_ARTIFACT_FD = 12;
+export const NETWORK_HELPER_LAUNCH_FD = SANDBOX_FDS.helperLaunch;
+export const NETWORK_HELPER_READY_FD = SANDBOX_FDS.helperReady;
+export const NETWORK_HELPER_INNER_CONFIG_FD = SANDBOX_FDS.helperInnerConfig;
+export const NETWORK_HELPER_WORKER_REQUEST_FD = SANDBOX_FDS.workerRequest;
+export const NETWORK_HELPER_WORKER_RESPONSE_FD = SANDBOX_FDS.workerResponse;
+export const NETWORK_HELPER_HTTP_BOOTSTRAP_FD = SANDBOX_FDS.helperHttpBootstrap;
+export const NETWORK_HELPER_SOCKS_BOOTSTRAP_FD = SANDBOX_FDS.helperSocksBootstrap;
+export const NETWORK_HELPER_SELF_ARTIFACT_FD = SANDBOX_FDS.helperSelfArtifact;
 export const NETWORK_HELPER_MAX_LAUNCH_BYTES = 64 * 1024;
 
 export interface NetworkHelperManifest {

@@ -16,11 +16,16 @@ import type { Readable, Writable } from "node:stream";
 import { TextDecoder } from "node:util";
 
 import { AppError, ERROR_CODES } from "../../shared/errors.js";
+import type { ManagedNetworkConfig } from "../network/config.js";
+import type { ValidatedNetworkHelper } from "../network/helper.js";
+import { ManagedNetworkRuntime } from "../network/managed-runtime.js";
+import { compileDestinationPolicy } from "../network/policy.js";
 import {
   buildBwrapLaunchSpecification,
+  buildManagedBwrapLaunchSpecification,
+  managedSandboxEnvironment,
   SANDBOX_EXPECTED_ENVIRONMENT_WITH_PWD,
   SANDBOX_PROTOCOL_VERSION,
-  SANDBOX_STDIO_COUNT,
   SANDBOX_WORKER_VERSION,
   type BwrapLaunchSpecification,
   type SandboxWorkerArtifact,
@@ -39,6 +44,9 @@ const EXPECTED_ETC_ENTRIES = Object.freeze(["group", "hosts", "nsswitch.conf", "
 
 export interface SandboxProbeContext {
   readonly nonce: string;
+  readonly profile: "isolated" | "managed-egress";
+  readonly helperVersion: string | null;
+  readonly guestPath: string;
   readonly artifact: Readonly<SandboxWorkerArtifact>;
   readonly parentNamespaces: Readonly<Record<(typeof NAMESPACES)[number], string>>;
   readonly expectedRootEntries: readonly string[];
@@ -51,6 +59,7 @@ export interface SandboxProbeContext {
 
 export interface SandboxFunctionalProbeResult {
   readonly succeeded: true;
+  readonly managedEgressSucceeded?: boolean;
   readonly bwrapVersion: string;
   readonly nodeVersion: string;
   readonly rgVersion: string;
@@ -105,11 +114,23 @@ export function validateSandboxWorkerReady(
     }
   }
   if (probe.hostname !== "chatwca-sandbox") throw new Error("sandbox hostname differs");
-  if (typeof probe.capEff !== "string" || !/^0+$/.test(probe.capEff)) {
-    throw new Error("effective capabilities are not empty");
+  for (const name of ["capInh", "capPrm", "capEff", "capBnd", "capAmb"] as const) {
+    if (typeof probe[name] !== "string" || !/^0+$/.test(probe[name] as string)) {
+      throw new Error(`${name} capabilities are not empty`);
+    }
   }
   if (probe.noNewPrivs !== "1") throw new Error("NoNewPrivs is not enabled");
-  if (!equalStringRecord(probe.environment, context.expectedEnvironment)) {
+  const network = object(probe.network);
+  if (network.profile !== context.profile) throw new Error("sandbox network profile differs");
+  let expectedEnvironment = context.expectedEnvironment;
+  if (context.profile === "managed-egress") {
+    const ports = object(network.guestPorts);
+    if (!Number.isInteger(ports.http) || !Number.isInteger(ports.socks) || ports.http === ports.socks) {
+      throw new Error("managed guest proxy ports are invalid");
+    }
+    expectedEnvironment = managedSandboxEnvironment(ports.http as number, ports.socks as number, context.guestPath);
+  }
+  if (!equalStringRecord(probe.environment, expectedEnvironment)) {
     throw new Error("sandbox environment differs from the fixed policy");
   }
   if (!equalJson(probe.rootEntries, [...context.expectedRootEntries].sort())) {
@@ -161,11 +182,32 @@ export function validateSandboxWorkerReady(
   if (!/^ripgrep\s+\d+/i.test(String(object(commands.rg).stdout))) {
     throw new Error("sandbox ripgrep failed");
   }
-  const network = object(probe.network);
   for (const name of ["ipv4", "ipv6", "loopback4", "loopback6"] as const) {
     if (object(network[name]).connected !== false) throw new Error(`${name} network probe succeeded`);
   }
   if (object(network.dns).resolved !== false) throw new Error("DNS probe succeeded");
+  const descriptorTargets = object(network.protocolDescriptors);
+  if (typeof descriptorTargets["8"] !== "string" || typeof descriptorTargets["9"] !== "string") {
+    throw new Error("worker control IPC descriptors changed");
+  }
+  if (Object.values(descriptorTargets).some((target) =>
+    typeof target !== "string" || target.includes("chatwca-") || target.endsWith(";unix-type=0005")
+  )) throw new Error("helper bootstrap or artifact descriptor survived");
+  if (context.profile === "managed-egress") {
+    if (probe.seccomp !== "2") throw new Error("managed seccomp is not active");
+    if (network.helperVersion !== context.helperVersion) throw new Error("managed helper version differs");
+    for (const name of ["httpEndpoint", "socksEndpoint"] as const) {
+      if (object(network[name]).connected !== true) throw new Error(`${name} did not answer`);
+    }
+    for (const name of ["httpLocalDenial", "socksLocalDenial"] as const) {
+      const denial = object(network[name]);
+      if (denial.connected !== true || denial.denied !== true) throw new Error(`${name} did not cross the managed bridge`);
+    }
+    if (object(network.directWithoutProxy).blocked !== true) throw new Error("direct network fallback became available without proxy variables");
+    const unixSocket = object(network.unixSocket);
+    if (unixSocket.created !== false || unixSocket.error !== "EPERM") throw new Error("Unix socket creation was not denied");
+    if (object(network.unixSocketpair).available !== true) throw new Error("Unix socketpair is unavailable");
+  }
 }
 
 function encodeFrame(value: unknown): Buffer {
@@ -261,6 +303,9 @@ export async function buildSandboxProbeContext(input: {
   })));
   return Object.freeze({
     nonce: input.nonce,
+    profile: input.specification.profile,
+    helperVersion: input.specification.helperBuildVersion ?? null,
+    guestPath: input.config.guestPath,
     artifact: input.worker,
     parentNamespaces: await namespaceLinks(),
     expectedRootEntries: input.specification.expectedRootEntries,
@@ -279,19 +324,27 @@ export async function runSandboxWorkerProbe(input: {
   readonly worker: Readonly<SandboxWorkerArtifact>;
   readonly workspace: string;
   readonly hiddenPaths: readonly string[];
+  readonly managedProfile?: {
+    readonly helper: import("../network/helper.js").ValidatedNetworkHelper;
+    readonly httpSocketPath: string;
+    readonly socksSocketPath: string;
+  };
 }): Promise<void> {
-  const specification = buildBwrapLaunchSpecification(input);
+  const specification = input.managedProfile === undefined
+    ? buildBwrapLaunchSpecification(input)
+    : buildManagedBwrapLaunchSpecification({ ...input, ...input.managedProfile });
   const nonce = randomBytes(24).toString("hex");
   const context = await buildSandboxProbeContext({
     ...input, nonce, specification,
   });
-  const stdio = Array.from({ length: SANDBOX_STDIO_COUNT }, (_, fd) =>
+  const stdio = Array.from({ length: specification.stdioCount }, (_, fd) =>
     fd === 0 || fd === 1 ? "ignore" : "pipe"
   ) as ("ignore" | "pipe")[];
   const child = spawn(specification.executable, specification.argv, {
     shell: false,
     detached: true,
     stdio,
+    ...(specification.emptyEnvironment ? { env: {} } : {}),
   });
   let diagnostic = "";
   let processError: unknown;
@@ -310,6 +363,16 @@ export async function runSandboxWorkerProbe(input: {
     const request = pipe(child, specification.requestFd) as unknown as Writable;
     const response = pipe(child, specification.responseFd) as unknown as Readable;
     const readyPromise = readOneFrame(response, input.config.startTimeoutMs);
+    const helperReadyPromise = specification.helperReadyFd === undefined
+      ? Promise.resolve()
+      : readOneFrame(pipe(child, specification.helperReadyFd) as unknown as Readable, input.config.startTimeoutMs).then((value) => {
+          const message = object(value);
+          if (message.type !== "ready" || message.protocol !== 1 ||
+              !Number.isSafeInteger(message.helperPid) || !Number.isSafeInteger(message.bwrapPid) ||
+              Object.keys(message).sort().join("\0") !== ["bwrapPid", "helperPid", "protocol", "type"].sort().join("\0")) {
+            throw new Error("managed helper did not report ready");
+          }
+        });
     request.write(encodeFrame({
       type: "hello",
       protocol: SANDBOX_PROTOCOL_VERSION,
@@ -322,7 +385,7 @@ export async function runSandboxWorkerProbe(input: {
       commandTimeoutMs: input.config.commandTimeoutMs,
       maxCommandOutputBytes: input.config.maxCommandOutputBytes,
     }));
-    const ready = await readyPromise;
+    const [ready] = await Promise.all([readyPromise, helperReadyPromise]);
     validateSandboxWorkerReady(ready, context);
     await waitForExit(child, input.config.startTimeoutMs);
     if (processError !== undefined) throw processError;
@@ -363,6 +426,10 @@ export async function runSandboxStartupProbe(input: {
   readonly worker: Readonly<SandboxWorkerArtifact>;
   readonly dataDirectory: string;
   readonly piAgentDirectory: string;
+  readonly managedNetwork?: {
+    readonly config: Readonly<ManagedNetworkConfig>;
+    readonly helper: Readonly<ValidatedNetworkHelper>;
+  };
 }): Promise<Readonly<SandboxFunctionalProbeResult>> {
   const temporaryRoot = await mkdtemp(path.join(tmpdir(), "chatwca-sandbox-probe-"));
   const workspace = path.join(temporaryRoot, "workspace");
@@ -377,8 +444,45 @@ export async function runSandboxStartupProbe(input: {
       input.piAgentDirectory,
     ];
     await runSandboxWorkerProbe({ ...input, workspace, hiddenPaths });
+    if (input.managedNetwork !== undefined) {
+      const destinationPolicy = compileDestinationPolicy({
+        allowedDomainPatterns: ["127.0.0.1"],
+        deniedDomainPatterns: [],
+        allowedPorts: [80],
+      });
+      const probeConfig: ManagedNetworkConfig = Object.freeze({
+        ...input.managedNetwork.config,
+        allowedDomainPatterns: Object.freeze(["127.0.0.1"]),
+        deniedDomainPatterns: Object.freeze([]),
+        allowedPorts: Object.freeze([80]),
+        allowedPortSet: destinationPolicy.allowedPorts,
+        destinationPolicy,
+      });
+      const runtime = await ManagedNetworkRuntime.start({
+        dataDir: input.dataDirectory,
+        workspaceId: "startup-probe",
+        conversationId: `startup-probe-${randomBytes(8).toString("hex")}`,
+        config: probeConfig,
+        diagnosticSink: () => undefined,
+      });
+      try {
+        await runSandboxWorkerProbe({
+          ...input,
+          workspace,
+          hiddenPaths,
+          managedProfile: {
+            helper: input.managedNetwork.helper,
+            httpSocketPath: runtime.httpSocketPath,
+            socksSocketPath: runtime.socksSocketPath,
+          },
+        });
+      } finally {
+        await runtime.close();
+      }
+    }
     return Object.freeze({
       succeeded: true,
+      managedEgressSucceeded: input.managedNetwork !== undefined,
       bwrapVersion: input.host.bwrapVersion,
       nodeVersion: input.host.nodeVersion,
       rgVersion: input.host.rgVersion,

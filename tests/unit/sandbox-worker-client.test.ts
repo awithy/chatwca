@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { PassThrough, Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 
-import type { BwrapLaunchSpecification, SandboxWorkerArtifact } from "../../src/server/sandbox/bwrap.js";
+import { managedSandboxEnvironment, type BwrapLaunchSpecification, type SandboxWorkerArtifact } from "../../src/server/sandbox/bwrap.js";
 import {
   SandboxFrameDecoder,
   encodeSandboxFrame,
@@ -21,16 +21,18 @@ import {
 
 const artifact: SandboxWorkerArtifact = { source: Buffer.from("worker"), sha256: "a".repeat(64), version: "1" };
 const context: SandboxProbeContext = {
-  nonce: "nonce-nonce-nonce-nonce", artifact,
+  nonce: "nonce-nonce-nonce-nonce", profile: "isolated", helperVersion: null,
+  guestPath: "/usr/bin:/bin", artifact,
   parentNamespaces: { user: "pu", mnt: "pm", pid: "pp", ipc: "pi", uts: "pt", net: "pn" },
   expectedRootEntries: ["app", "dev", "etc", "home", "proc", "tmp", "usr", "var", "workspace"],
   expectedEnvironment: { HOME: "/home/sandbox", TMPDIR: "/tmp", PATH: "/usr/bin:/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8", TERM: "dumb", NO_COLOR: "1", CI: "1", USER: "sandbox", LOGNAME: "sandbox", SHELL: "/bin/bash", PWD: "/workspace" },
   workspaceDevice: "1", workspaceInode: "2", hiddenPathCount: 1, mounts: {},
 };
 const specification: BwrapLaunchSpecification = {
-  executable: "/usr/bin/bwrap", argv: [],
+  profile: "isolated", executable: "/usr/bin/bwrap", argv: [],
   dataBindings: [{ fd: 3, destination: "/app/worker.mjs", payload: Buffer.from("worker") }],
-  requestFd: 8, responseFd: 9, expectedRootEntries: context.expectedRootEntries,
+  requestFd: 8, responseFd: 9, stdioCount: 10, emptyEnvironment: false,
+  expectedRootEntries: context.expectedRootEntries,
 };
 
 function ready(nonce = context.nonce): WorkerFrame {
@@ -38,7 +40,9 @@ function ready(nonce = context.nonce): WorkerFrame {
     type: "ready", protocol: 1, nonce,
     probe: {
       namespaces: { user: "cu", mnt: "cm", pid: "cp", ipc: "ci", uts: "ct", net: "cn" },
-      hostname: "chatwca-sandbox", capEff: "0000000000000000", noNewPrivs: "1",
+      hostname: "chatwca-sandbox", capInh: "0000000000000000", capPrm: "0000000000000000",
+      capEff: "0000000000000000", capBnd: "0000000000000000", capAmb: "0000000000000000",
+      noNewPrivs: "1", seccomp: "0",
       environment: context.expectedEnvironment, rootEntries: [...context.expectedRootEntries],
       devEntries: ["core", "fd", "full", "null", "ptmx", "pts", "random", "shm", "stderr", "stdin", "stdout", "tty", "urandom", "zero"],
       etcEntries: ["group", "hosts", "nsswitch.conf", "passwd"], hiddenPaths: [true],
@@ -46,22 +50,23 @@ function ready(nonce = context.nonce): WorkerFrame {
       workspace: { dev: "1", ino: "2", marker: "marker" }, mountIdentities: {},
       artifact: { sha256: artifact.sha256, version: "1" },
       commands: { node: { status: 0, stdout: "v22.19.0" }, bash: { status: 0, stdout: "bubblewrap-bash" }, rg: { status: 0, stdout: "ripgrep 14.0.0" } },
-      network: { ipv4: { connected: false }, ipv6: { connected: false }, loopback4: { connected: false }, loopback6: { connected: false }, dns: { resolved: false } },
+      network: { profile: "isolated", ipv4: { connected: false }, ipv6: { connected: false }, loopback4: { connected: false }, loopback6: { connected: false }, dns: { resolved: false }, protocolDescriptors: { "8": "pipe:[1]", "9": "pipe:[2]" } },
     },
   };
 }
 
 class FakeChild extends EventEmitter {
   readonly pid = undefined;
-  readonly stdio = Array.from({ length: 10 }, () => new PassThrough());
+  readonly stdio: PassThrough[];
   exitCode: number | null = null;
   signalCode: NodeJS.Signals | null = null;
   readonly received: ParentFrame[] = [];
   readonly decoder = new SandboxFrameDecoder(isParentFrame);
   onFrame?: (frame: ParentFrame) => void;
 
-  constructor(autoReady = true) {
+  constructor(autoReady = true, stdioCount = 10) {
     super();
+    this.stdio = Array.from({ length: stdioCount }, () => new PassThrough());
     (this.stdio[8] as PassThrough).on("data", (chunk: Buffer) => {
       for (const value of this.decoder.push(chunk)) {
         const frame = value as ParentFrame; this.received.push(frame);
@@ -96,6 +101,49 @@ async function eventually(assertion: () => void): Promise<void> {
 }
 
 describe("SandboxWorkerClient hostile transport", () => {
+  it("gates unchanged worker IPC on the managed outer-helper ready frame", async () => {
+    const child = new FakeChild(false, 18);
+    const managedContext: SandboxProbeContext = {
+      ...context, profile: "managed-egress", helperVersion: "1.0.0",
+      expectedEnvironment: managedSandboxEnvironment(31_001, 31_002),
+    };
+    child.onFrame = (frame) => {
+      if (frame.type !== "hello") return;
+      const response = ready(frame.nonce) as any;
+      Object.assign(response.probe, {
+        seccomp: "2",
+        environment: managedContext.expectedEnvironment,
+        network: {
+          profile: "managed-egress", helperVersion: "1.0.0", guestPorts: { http: 31_001, socks: 31_002 },
+          ipv4: { connected: false }, ipv6: { connected: false }, loopback4: { connected: false }, loopback6: { connected: false },
+          dns: { resolved: false }, protocolDescriptors: { "8": "pipe:[1]", "9": "pipe:[2]" },
+          httpEndpoint: { connected: true }, socksEndpoint: { connected: true },
+          httpLocalDenial: { connected: true, denied: true, error: null }, socksLocalDenial: { connected: true, denied: true, error: null },
+          directWithoutProxy: { blocked: true, error: null },
+          unixSocket: { created: false, error: "EPERM" }, unixSocketpair: { available: true, error: null },
+        },
+      });
+      child.send(response);
+    };
+    const managedSpecification: BwrapLaunchSpecification = {
+      ...specification, profile: "managed-egress", executable: "/helper", argv: ["--outer"],
+      dataBindings: [{ fd: 3, payload: Buffer.from("launch") }, { fd: 13, destination: "/app/worker.mjs", payload: Buffer.from("worker") }],
+      helperReadyFd: 4, helperBuildVersion: "1.0.0", stdioCount: 18, emptyEnvironment: true,
+    };
+    const starting = SandboxWorkerClient.start({
+      specification: managedSpecification, probeContext: managedContext,
+      hiddenPaths: ["/hidden"], startTimeoutMs: 100, onFatal: vi.fn(), spawn: () => child,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    expect(child.received).toEqual([]);
+    const helperPayload = Buffer.from(JSON.stringify({ type: "ready", protocol: 1, helperPid: 10, bwrapPid: 11 }));
+    const helperFrame = Buffer.alloc(4 + helperPayload.length); helperFrame.writeUInt32BE(helperPayload.length); helperPayload.copy(helperFrame, 4);
+    child.stdio[4]!.write(helperFrame);
+    const client = await starting;
+    expect(child.received[0]).toMatchObject({ type: "hello", protocol: 1 });
+    await client.close();
+  });
+
   it("correlates typed calls, chunks reads, and preserves streamed output ordering", async () => {
     const child = new FakeChild();
     child.onFrame = (frame) => {

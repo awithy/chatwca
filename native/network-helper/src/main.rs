@@ -4,11 +4,12 @@ mod namespace;
 mod protocol;
 mod seccomp;
 
-use protocol::{InnerDescriptor, LaunchDescriptor, OuterMessage};
+use protocol::{ArtifactDescriptor, InnerDescriptor, LaunchDescriptor, OuterMessage};
+use sha2::{Digest, Sha256};
 use std::env;
 use std::ffi::CString;
 use std::fs::{self, File};
-use std::io::{self, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::process::CommandExt;
@@ -69,9 +70,13 @@ fn descriptor_is_open(fd: RawFd) -> io::Result<libc::stat> {
 
 fn validate_parent_descriptors(value: &LaunchDescriptor) -> io::Result<()> {
     let mut identities = std::collections::HashSet::new();
-    for fd in [protocol::READY_FD]
-        .into_iter()
-        .chain(value.inherited_fds.iter().copied())
+    for fd in [
+        protocol::READY_FD,
+        protocol::WORKER_REQUEST_FD,
+        protocol::WORKER_RESPONSE_FD,
+    ]
+    .into_iter()
+    .chain(value.artifacts.iter().map(|artifact| artifact.fd))
     {
         let status = descriptor_is_open(fd)?;
         if !identities.insert((status.st_dev, status.st_ino)) {
@@ -173,6 +178,62 @@ fn sealed_descriptor<T: serde::Serialize>(value: &T, name: &str) -> io::Result<O
         return Err(io::Error::last_os_error());
     }
     Ok(unsafe { OwnedFd::from_raw_fd(file.into_raw_fd()) })
+}
+
+fn sealed_artifact(artifact: &ArtifactDescriptor) -> io::Result<OwnedFd> {
+    let name = CString::new("chatwca-managed-artifact").expect("fixed memfd name");
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_memfd_create,
+            name.as_ptr(),
+            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        ) as RawFd
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut output = unsafe { File::from_raw_fd(fd) };
+    let input_fd = unsafe { libc::dup(artifact.fd) };
+    if input_fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut input = unsafe { File::from_raw_fd(input_fd) };
+    let mut remaining = artifact.bytes;
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    while remaining > 0 {
+        let take = remaining.min(buffer.len());
+        let count = input.read(&mut buffer[..take])?;
+        if count == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "artifact is truncated",
+            ));
+        }
+        output.write_all(&buffer[..count])?;
+        hash.update(&buffer[..count]);
+        remaining -= count;
+    }
+    let mut extra = [0u8; 1];
+    if input.read(&mut extra)? != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "artifact is oversized",
+        ));
+    }
+    let actual = format!("{:x}", hash.finalize());
+    if actual != artifact.sha256 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "artifact hash differs",
+        ));
+    }
+    output.seek(SeekFrom::Start(0))?;
+    let seals = libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+    if unsafe { libc::fcntl(output.as_raw_fd(), libc::F_ADD_SEALS, seals) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(output.into_raw_fd()) })
 }
 
 fn random_token() -> io::Result<String> {
@@ -282,10 +343,19 @@ fn run_outer() -> io::Result<()> {
             "helper executable is not regular",
         ));
     }
+    let sealed_artifacts: Vec<(OwnedFd, RawFd)> = descriptor
+        .artifacts
+        .iter()
+        .map(|artifact| sealed_artifact(artifact).map(|fd| (fd, artifact.fd)))
+        .collect::<io::Result<_>>()?;
+    for artifact in &descriptor.artifacts {
+        unsafe { libc::close(artifact.fd) };
+    }
     let inner = InnerDescriptor {
         protocol: protocol::PROTOCOL_VERSION,
         build_version: protocol::BUILD_VERSION.into(),
         token: random_token()?,
+        guest_path: descriptor.guest_path.clone(),
         parent_namespaces: namespace::identities()?,
     };
     let inner_artifact = sealed_descriptor(&inner, "chatwca-inner-config")?;
@@ -304,8 +374,8 @@ fn run_outer() -> io::Result<()> {
     if ready.cast::<libc::c_void>() == libc::MAP_FAILED {
         return Err(io::Error::last_os_error());
     }
-    let http_token = format!("H{}", inner.token).into_bytes();
-    let socks_token = format!("S{}", inner.token).into_bytes();
+    let http_token = format!("H{}", &inner.token[1..]).into_bytes();
+    let socks_token = format!("S{}", &inner.token[1..]).into_bytes();
     let http_pid = match fork_bridge(
         http_bridge.as_raw_fd(),
         http_inner.as_raw_fd(),
@@ -338,6 +408,10 @@ fn run_outer() -> io::Result<()> {
     let parked_self = park(self_artifact.as_raw_fd())?;
     let parked_http = park(http_inner.as_raw_fd())?;
     let parked_socks = park(socks_inner.as_raw_fd())?;
+    let parked_artifacts: Vec<(OwnedFd, RawFd)> = sealed_artifacts
+        .iter()
+        .map(|(artifact, target)| park(artifact.as_raw_fd()).map(|parked| (parked, *target)))
+        .collect::<io::Result<_>>()?;
     drop((inner_artifact, self_artifact, http_inner, socks_inner));
     let mut command = Command::new(&descriptor.bwrap_path);
     command.args(&descriptor.bwrap_args).args([
@@ -350,24 +424,42 @@ fn run_outer() -> io::Result<()> {
         "--inner",
     ]);
     command.env_clear();
-    let inherited = descriptor.inherited_fds.clone();
-    let parked_assignments = [
+    let mut parked_assignments = vec![
         (parked_inner.as_raw_fd(), protocol::INNER_CONFIG_FD),
         (parked_http.as_raw_fd(), protocol::HTTP_BOOTSTRAP_FD),
         (parked_socks.as_raw_fd(), protocol::SOCKS_BOOTSTRAP_FD),
         (parked_self.as_raw_fd(), protocol::SELF_ARTIFACT_FD),
     ];
+    parked_assignments.extend(
+        parked_artifacts
+            .iter()
+            .map(|(source, target)| (source.as_raw_fd(), *target)),
+    );
+    let inherited = [protocol::WORKER_REQUEST_FD, protocol::WORKER_RESPONSE_FD];
+    let kept: Vec<RawFd> = inherited
+        .into_iter()
+        .chain(parked_assignments.iter().map(|(_, target)| *target))
+        .collect();
     unsafe {
         command.pre_exec(move || {
-            for (source, target) in parked_assignments {
-                if libc::dup2(source, target) != target {
+            for (source, target) in &parked_assignments {
+                if libc::dup2(*source, *target) != *target {
                     return Err(io::Error::last_os_error());
                 }
             }
-            for fd in &inherited {
+            for fd in &kept {
                 let flags = libc::fcntl(*fd, libc::F_GETFD);
                 if flags < 0 || libc::fcntl(*fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) != 0 {
                     return Err(io::Error::last_os_error());
+                }
+            }
+            let maximum = libc::sysconf(libc::_SC_OPEN_MAX).clamp(1024, 65_536) as RawFd;
+            for fd in 3..maximum {
+                if !kept.contains(&fd) {
+                    let flags = libc::fcntl(fd, libc::F_GETFD);
+                    if flags >= 0 {
+                        libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+                    }
                 }
             }
             Ok(())
@@ -382,7 +474,14 @@ fn run_outer() -> io::Result<()> {
             return Err(error);
         }
     };
-    drop((parked_inner, parked_http, parked_socks, parked_self));
+    drop((
+        parked_inner,
+        parked_http,
+        parked_socks,
+        parked_self,
+        parked_artifacts,
+        sealed_artifacts,
+    ));
     let setup = wait_bridges(&mut child, ready);
     unsafe { libc::munmap(ready.cast(), 2) };
     if let Err(error) = setup {
@@ -438,13 +537,17 @@ fn close_unrelated_inner() {
     }
 }
 
-fn proxy_environment(http_port: u16, socks_port: u16) -> Vec<(&'static str, String)> {
+fn proxy_environment(
+    http_port: u16,
+    socks_port: u16,
+    guest_path: &str,
+) -> Vec<(&'static str, String)> {
     let http = format!("http://127.0.0.1:{http_port}");
     let socks = format!("socks5h://127.0.0.1:{socks_port}");
     let mut values = vec![
         ("HOME", "/home/sandbox".into()),
         ("TMPDIR", "/tmp".into()),
-        ("PATH", "/usr/bin:/bin".into()),
+        ("PATH", guest_path.into()),
         ("LANG", "C.UTF-8".into()),
         ("LC_ALL", "C.UTF-8".into()),
         ("TERM", "dumb".into()),
@@ -469,6 +572,10 @@ fn proxy_environment(http_port: u16, socks_port: u16) -> Vec<(&'static str, Stri
         ("NODE_USE_ENV_PROXY", "1".into()),
         ("ELECTRON_GET_USE_PROXY", "true".into()),
         ("CHATWCA_MANAGED_EGRESS", "1".into()),
+        (
+            "CHATWCA_NETWORK_HELPER_VERSION_INTERNAL",
+            protocol::BUILD_VERSION.into(),
+        ),
     ];
     for name in [
         "npm_config_proxy",
@@ -496,7 +603,8 @@ fn proxy_environment(http_port: u16, socks_port: u16) -> Vec<(&'static str, Stri
 }
 
 fn run_inner() -> io::Result<()> {
-    capabilities::set_parent_death_signal()?;
+    // Bubblewrap's PID namespace makes the inner helper PID 1; namespace and
+    // process-group teardown are owned by Bubblewrap and the outer helper.
     let inner: InnerDescriptor =
         protocol::read_frame(protocol::INNER_CONFIG_FD, protocol::MAX_CONTROL_BYTES)?;
     let inner = protocol::validate_inner(inner)?;
@@ -519,12 +627,12 @@ fn run_inner() -> io::Result<()> {
     let socks_port = socks_listener.local_addr()?.port();
     bridge::send_listener(
         protocol::HTTP_BOOTSTRAP_FD,
-        format!("H{}", inner.token).as_bytes(),
+        format!("H{}", &inner.token[1..]).as_bytes(),
         http_listener.as_raw_fd(),
     )?;
     bridge::send_listener(
         protocol::SOCKS_BOOTSTRAP_FD,
-        format!("S{}", inner.token).as_bytes(),
+        format!("S{}", &inner.token[1..]).as_bytes(),
         socks_listener.as_raw_fd(),
     )?;
     require_ack(protocol::HTTP_BOOTSTRAP_FD)?;
@@ -536,7 +644,7 @@ fn run_inner() -> io::Result<()> {
     let error = Command::new("/usr/bin/node")
         .arg("/app/worker.mjs")
         .env_clear()
-        .envs(proxy_environment(http_port, socks_port))
+        .envs(proxy_environment(http_port, socks_port, &inner.guest_path))
         .current_dir("/workspace")
         .exec();
     Err(error)
@@ -555,6 +663,57 @@ mod tests {
         ] {
             assert!(dispatch(&args).is_err());
         }
+    }
+
+    #[test]
+    fn managed_artifact_is_hash_verified_and_immutably_sealed() {
+        let mut source = [-1; 2];
+        assert_eq!(
+            unsafe { libc::pipe2(source.as_mut_ptr(), libc::O_CLOEXEC) },
+            0
+        );
+        let payload = b"immutable worker artifact";
+        assert_eq!(
+            unsafe { libc::write(source[1], payload.as_ptr().cast(), payload.len()) },
+            payload.len() as isize
+        );
+        unsafe { libc::close(source[1]) };
+        let descriptor = ArtifactDescriptor {
+            fd: source[0],
+            destination: "/app/worker.mjs".into(),
+            sha256: format!("{:x}", Sha256::digest(payload)),
+            bytes: payload.len(),
+            mode: "0444".into(),
+        };
+        let artifact = sealed_artifact(&descriptor).unwrap();
+        let seals = unsafe { libc::fcntl(artifact.as_raw_fd(), libc::F_GET_SEALS) };
+        assert_eq!(
+            seals,
+            libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE
+        );
+        assert_eq!(
+            unsafe { libc::write(artifact.as_raw_fd(), b"x".as_ptr().cast(), 1) },
+            -1
+        );
+        unsafe { libc::close(source[0]) };
+
+        let mut bad_source = [-1; 2];
+        assert_eq!(
+            unsafe { libc::pipe2(bad_source.as_mut_ptr(), libc::O_CLOEXEC) },
+            0
+        );
+        assert_eq!(
+            unsafe { libc::write(bad_source[1], payload.as_ptr().cast(), payload.len()) },
+            payload.len() as isize
+        );
+        unsafe { libc::close(bad_source[1]) };
+        let bad = ArtifactDescriptor {
+            fd: bad_source[0],
+            sha256: "0".repeat(64),
+            ..descriptor
+        };
+        assert!(sealed_artifact(&bad).is_err());
+        unsafe { libc::close(bad_source[0]) };
     }
 
     #[test]

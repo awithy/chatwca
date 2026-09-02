@@ -18,6 +18,16 @@ pub const SOCKS_BOOTSTRAP_FD: RawFd = 11;
 pub const SELF_ARTIFACT_FD: RawFd = 12;
 pub const NAMESPACES: [&str; 6] = ["user", "mnt", "pid", "ipc", "uts", "net"];
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ArtifactDescriptor {
+    pub fd: RawFd,
+    pub destination: String,
+    pub sha256: String,
+    pub bytes: usize,
+    pub mode: String,
+}
+
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct LaunchDescriptor {
@@ -27,7 +37,8 @@ pub struct LaunchDescriptor {
     pub bwrap_args: Vec<String>,
     pub http_socket: String,
     pub socks_socket: String,
-    pub inherited_fds: Vec<RawFd>,
+    pub guest_path: String,
+    pub artifacts: Vec<ArtifactDescriptor>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
@@ -36,6 +47,7 @@ pub struct InnerDescriptor {
     pub protocol: u32,
     pub build_version: String,
     pub token: String,
+    pub guest_path: String,
     pub parent_namespaces: NamespaceIdentities,
 }
 
@@ -73,7 +85,11 @@ pub struct VersionMessage<'a> {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum OuterMessage {
     Ready {
         protocol: u32,
@@ -237,23 +253,89 @@ pub fn validate_launch(value: LaunchDescriptor) -> io::Result<LaunchDescriptor> 
     if value.bwrap_args.iter().any(|entry| {
         ["--share-net", "--inner", "--outer", "/app/network-helper"].contains(&entry.as_str())
     }) || count_pair(&value.bwrap_args, "--cap-drop", "ALL") != 1
+        || value
+            .bwrap_args
+            .iter()
+            .filter(|entry| *entry == "--cap-drop")
+            .count()
+            != 1
         || count_pair(&value.bwrap_args, "--cap-add", "CAP_NET_ADMIN") != 1
         || count_pair(&value.bwrap_args, "--cap-add", "CAP_SETPCAP") != 1
+        || value
+            .bwrap_args
+            .iter()
+            .filter(|entry| *entry == "--cap-add")
+            .count()
+            != 2
+        || !value
+            .bwrap_args
+            .ends_with(&["--chdir".into(), "/workspace".into()])
     {
         return Err(invalid("Bubblewrap capability profile is invalid"));
     }
-    let mut seen = HashSet::new();
-    if !value.inherited_fds.contains(&WORKER_REQUEST_FD)
-        || !value.inherited_fds.contains(&WORKER_RESPONSE_FD)
-        || value.inherited_fds.len() > 32
-        || value.inherited_fds.iter().any(|fd| {
-            *fd < WORKER_REQUEST_FD
-                || *fd > 63
-                || [HTTP_BOOTSTRAP_FD, SOCKS_BOOTSTRAP_FD, SELF_ARTIFACT_FD].contains(fd)
-                || !seen.insert(*fd)
-        })
+    if value.guest_path.is_empty()
+        || value.guest_path.len() > 4096
+        || value.guest_path.contains('\0')
+        || value
+            .guest_path
+            .split(':')
+            .any(|entry| !Path::new(entry).is_absolute())
     {
-        return Err(invalid("inherited descriptor assignment is invalid"));
+        return Err(invalid("guest path is invalid"));
+    }
+    let expected = [
+        (13, "/app/worker.mjs"),
+        (14, "/etc/passwd"),
+        (15, "/etc/group"),
+        (16, "/etc/hosts"),
+        (17, "/etc/nsswitch.conf"),
+    ];
+    if value.artifacts.len() != expected.len()
+        || value
+            .bwrap_args
+            .iter()
+            .filter(|entry| *entry == "--ro-bind-data")
+            .count()
+            != expected.len()
+        || value
+            .bwrap_args
+            .iter()
+            .filter(|entry| *entry == "--perms")
+            .count()
+            != expected.len()
+    {
+        return Err(invalid("artifact set is invalid"));
+    }
+    let mut seen = HashSet::new();
+    for artifact in &value.artifacts {
+        if !expected.contains(&(artifact.fd, artifact.destination.as_str()))
+            || !seen.insert(artifact.fd)
+            || artifact.mode != "0444"
+            || artifact.bytes == 0
+            || artifact.bytes > 32 * 1024 * 1024
+            || artifact.sha256.len() != 64
+            || !artifact
+                .sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            || value
+                .bwrap_args
+                .windows(5)
+                .filter(|items| {
+                    items[0] == "--perms"
+                        && items[1] == artifact.mode
+                        && items[2] == "--ro-bind-data"
+                        && items[3] == artifact.fd.to_string()
+                        && items[4] == artifact.destination
+                })
+                .count()
+                != 1
+        {
+            return Err(invalid("artifact descriptor is invalid"));
+        }
+    }
+    if expected.iter().any(|(fd, _)| !seen.contains(fd)) {
+        return Err(invalid("artifact descriptor is missing"));
     }
     Ok(value)
 }
@@ -263,6 +345,13 @@ pub fn validate_inner(value: InnerDescriptor) -> io::Result<InnerDescriptor> {
         || value.build_version != BUILD_VERSION
         || value.token.len() != 64
         || !value.token.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || value.guest_path.is_empty()
+        || value.guest_path.len() > 4096
+        || value.guest_path.contains('\0')
+        || value
+            .guest_path
+            .split(':')
+            .any(|entry| !Path::new(entry).is_absolute())
     {
         return Err(invalid("invalid inner descriptor"));
     }
@@ -302,12 +391,54 @@ mod tests {
                 "CAP_NET_ADMIN",
                 "--cap-add",
                 "CAP_SETPCAP",
+                "--perms",
+                "0444",
+                "--ro-bind-data",
+                "13",
+                "/app/worker.mjs",
+                "--perms",
+                "0444",
+                "--ro-bind-data",
+                "14",
+                "/etc/passwd",
+                "--perms",
+                "0444",
+                "--ro-bind-data",
+                "15",
+                "/etc/group",
+                "--perms",
+                "0444",
+                "--ro-bind-data",
+                "16",
+                "/etc/hosts",
+                "--perms",
+                "0444",
+                "--ro-bind-data",
+                "17",
+                "/etc/nsswitch.conf",
+                "--chdir",
+                "/workspace",
             ]
             .map(String::from)
             .to_vec(),
             http_socket: "/tmp/h.sock".into(),
             socks_socket: "/tmp/s.sock".into(),
-            inherited_fds: vec![8, 9, 20],
+            guest_path: "/usr/bin:/bin".into(),
+            artifacts: [
+                (13, "/app/worker.mjs"),
+                (14, "/etc/passwd"),
+                (15, "/etc/group"),
+                (16, "/etc/hosts"),
+                (17, "/etc/nsswitch.conf"),
+            ]
+            .map(|(fd, destination)| ArtifactDescriptor {
+                fd,
+                destination: destination.into(),
+                sha256: "0".repeat(64),
+                bytes: 1,
+                mode: "0444".into(),
+            })
+            .to_vec(),
         }
     }
 
@@ -332,7 +463,7 @@ mod tests {
         value.bwrap_args.retain(|item| item != "--unshare-net");
         assert!(validate_launch(value).is_err());
         let mut value = launch();
-        value.inherited_fds.push(10);
+        value.artifacts[0].fd = HTTP_BOOTSTRAP_FD;
         assert!(validate_launch(value).is_err());
     }
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  managedSandboxEnvironment,
   SANDBOX_EXPECTED_ENVIRONMENT_WITH_PWD,
   type SandboxWorkerArtifact,
 } from "../../src/server/sandbox/bwrap.js";
@@ -14,6 +15,9 @@ const artifact: SandboxWorkerArtifact = {
 };
 const context: SandboxProbeContext = {
   nonce: "nonce-nonce-nonce-nonce",
+  profile: "isolated",
+  helperVersion: null,
+  guestPath: "/usr/bin:/bin",
   artifact,
   parentNamespaces: {
     user: "user-parent", mnt: "mnt-parent", pid: "pid-parent",
@@ -38,8 +42,9 @@ function ready(): Record<string, unknown> {
         ipc: "ipc-child", uts: "uts-child", net: "net-child",
       },
       hostname: "chatwca-sandbox",
-      capEff: "0000000000000000",
-      noNewPrivs: "1",
+      capInh: "0000000000000000", capPrm: "0000000000000000",
+      capEff: "0000000000000000", capBnd: "0000000000000000", capAmb: "0000000000000000",
+      noNewPrivs: "1", seccomp: "0",
       environment: SANDBOX_EXPECTED_ENVIRONMENT_WITH_PWD,
       rootEntries: [...context.expectedRootEntries].sort(),
       devEntries: [
@@ -58,9 +63,10 @@ function ready(): Record<string, unknown> {
         rg: { status: 0, stdout: "ripgrep 14.0.0" },
       },
       network: {
+        profile: "isolated",
         ipv4: { connected: false }, ipv6: { connected: false },
         loopback4: { connected: false }, loopback6: { connected: false },
-        dns: { resolved: false },
+        dns: { resolved: false }, protocolDescriptors: { "8": "pipe:[1]", "9": "pipe:[2]" },
       },
     },
   };
@@ -73,6 +79,32 @@ function probe(value: Record<string, unknown>): Record<string, unknown> {
 describe("sandbox per-worker probe validation", () => {
   it("accepts a nonce/artifact-bound fully isolated handshake", () => {
     expect(() => validateSandboxWorkerReady(ready(), context)).not.toThrow();
+  });
+
+  it("accepts only the exact managed environment, bridge denials, and hardened process state", () => {
+    const managedContext: SandboxProbeContext = {
+      ...context, profile: "managed-egress", helperVersion: "1.0.0",
+    };
+    const value = ready();
+    const body = probe(value);
+    body.capInh = body.capPrm = body.capEff = body.capBnd = body.capAmb = "0000000000000000";
+    body.seccomp = "2";
+    body.environment = managedSandboxEnvironment(31_001, 31_002);
+    body.network = {
+      profile: "managed-egress", helperVersion: "1.0.0", guestPorts: { http: 31_001, socks: 31_002 },
+      ipv4: { connected: false }, ipv6: { connected: false },
+      loopback4: { connected: false }, loopback6: { connected: false }, dns: { resolved: false },
+      protocolDescriptors: { "8": "pipe:[1]", "9": "pipe:[2]" },
+      httpEndpoint: { connected: true }, socksEndpoint: { connected: true },
+      httpLocalDenial: { connected: true, denied: true, error: null },
+      socksLocalDenial: { connected: true, denied: true, error: null },
+      directWithoutProxy: { blocked: true, error: null },
+      unixSocket: { created: false, error: "EPERM" },
+      unixSocketpair: { available: true, error: null },
+    };
+    expect(() => validateSandboxWorkerReady(value, managedContext)).not.toThrow();
+    (body.network as Record<string, any>).ipv4 = { connected: true };
+    expect(() => validateSandboxWorkerReady(value, managedContext)).toThrow(/ipv4/);
   });
 
   it.each([

@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   buildBwrapLaunchSpecification,
+  buildManagedBwrapLaunchSpecification,
   SANDBOX_ENVIRONMENT,
   validateBwrapAndToolchain,
   type BwrapValidationFileSystem,
@@ -12,6 +13,7 @@ import {
   type ValidatedSandboxHost,
 } from "../../src/server/sandbox/bwrap.js";
 import type { SandboxConfig } from "../../src/server/sandbox/config.js";
+import { SANDBOX_FDS } from "../../src/server/sandbox/fds.js";
 import { ERROR_CODES } from "../../src/shared/errors.js";
 
 function config(overrides: Partial<SandboxConfig> = {}): SandboxConfig {
@@ -93,6 +95,40 @@ describe("Bubblewrap argument builder", () => {
     const environment = Object.fromEntries(pairs(built.argv, "--setenv"));
     expect(environment).toEqual(SANDBOX_ENVIRONMENT);
     expect(Object.keys(environment).sort()).toEqual(Object.keys(SANDBOX_ENVIRONMENT).sort());
+  });
+
+  it("builds a distinct managed outer-helper profile with immutable non-overlapping artifacts", () => {
+    const built = buildManagedBwrapLaunchSpecification({
+      config: config(), host, workspace: "/srv/workspaces/project", worker,
+      helper: {
+        path: "/opt/chatwca/chatwca-network-helper", directory: "/opt/chatwca",
+        manifestPath: "/opt/chatwca/network-helper-manifest.json", architecture: "x64",
+        buildVersion: "1.0.0", protocolVersion: 1, sha256: "b".repeat(64),
+      },
+      httpSocketPath: "/run/chatwca/h.sock", socksSocketPath: "/run/chatwca/s.sock",
+    });
+    expect(built).toMatchObject({
+      profile: "managed-egress", executable: "/opt/chatwca/chatwca-network-helper",
+      argv: ["--outer"], requestFd: 8, responseFd: 9, helperReadyFd: 4,
+      stdioCount: 18, emptyEnvironment: true,
+    });
+    const launch = built.dataBindings[0]!;
+    const length = launch.payload.readUInt32BE(0);
+    const descriptor = JSON.parse(launch.payload.subarray(4, length + 4).toString("utf8")) as Record<string, any>;
+    expect(Object.keys(descriptor).sort()).toEqual([
+      "artifacts", "buildVersion", "bwrapArgs", "bwrapPath", "guestPath",
+      "httpSocket", "protocol", "socksSocket",
+    ].sort());
+    expect(descriptor.artifacts.map((artifact: { fd: number }) => artifact.fd)).toEqual(
+      Object.values(SANDBOX_FDS.managedArtifacts),
+    );
+    expect(descriptor.bwrapArgs).toContain("--unshare-net");
+    expect(descriptor.bwrapArgs).toContain("CAP_NET_ADMIN");
+    expect(descriptor.bwrapArgs).toContain("CAP_SETPCAP");
+    expect(descriptor.bwrapArgs).not.toContain("--setenv");
+    expect(descriptor.bwrapArgs).not.toContain("/usr/bin/node");
+    expect(built.dataBindings.map(({ fd }) => fd)).toEqual([3, 13, 14, 15, 16, 17]);
+    expect(new Set([3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]).size).toBe(13);
   });
 
   it("orders canonical extra mounts before the workspace and masks .chatwca afterwards", () => {

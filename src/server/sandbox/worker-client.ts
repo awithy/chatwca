@@ -5,8 +5,9 @@ import type { Readable, Writable } from "node:stream";
 import { AppError, ERROR_CODES } from "../../shared/errors.js";
 import {
   SANDBOX_PROTOCOL_VERSION,
-  buildBwrapLaunchSpecification,
+  buildSandboxLaunchSpecification,
   type BwrapLaunchSpecification,
+  type SandboxNetworkLaunchProfile,
   type SandboxWorkerArtifact,
   type ValidatedSandboxHost,
 } from "./bwrap.js";
@@ -90,6 +91,7 @@ export interface SandboxWorkerLaunchOptions {
   readonly workspace: string;
   readonly hiddenPaths: readonly string[];
   readonly onFatal: (failure: Readonly<SandboxWorkerFatal>) => void;
+  readonly networkProfile?: SandboxNetworkLaunchProfile;
   readonly spawn?: SandboxSpawn;
 }
 
@@ -120,13 +122,14 @@ interface PendingOperation {
 }
 
 function productionSpawn(specification: Readonly<BwrapLaunchSpecification>): ChildLike {
-  const stdio = Array.from({ length: Math.max(specification.responseFd + 1, 10) }, (_, fd) =>
+  const stdio = Array.from({ length: specification.stdioCount }, (_, fd) =>
     fd === 0 || fd === 1 ? "ignore" : "pipe"
   ) as ("ignore" | "pipe")[];
   return spawn(specification.executable, specification.argv, {
     shell: false,
     detached: true,
     stdio,
+    ...(specification.emptyEnvironment ? { env: {} } : {}),
   }) as ChildProcess;
 }
 
@@ -140,9 +143,48 @@ function delay(milliseconds: number): Promise<void> {
 }
 function exited(child: ChildLike): boolean { return child.exitCode !== null || child.signalCode !== null; }
 
+function waitForHelperReady(child: ChildLike, specification: Readonly<BwrapLaunchSpecification>): Promise<void> {
+  if (specification.helperReadyFd === undefined) return Promise.resolve();
+  const stream = streamAt<Readable>(child, specification.helperReadyFd);
+  return new Promise((resolve, reject) => {
+    let buffer = Buffer.alloc(0);
+    let expected: number | undefined;
+    const finish = (error?: unknown) => {
+      stream.off("data", onData); stream.off("end", onEnd); stream.off("error", onError);
+      if (error === undefined) resolve(); else reject(error);
+    };
+    const onEnd = () => finish(new AppError(ERROR_CODES.NETWORK_BRIDGE_START_FAILED));
+    const onError = (cause: unknown) => finish(new AppError(ERROR_CODES.NETWORK_BRIDGE_START_FAILED, { cause }));
+    const onData = (chunk: Buffer) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      if (buffer.byteLength > 4 * 1024 + 4) { finish(new AppError(ERROR_CODES.NETWORK_BRIDGE_START_FAILED)); return; }
+      if (expected === undefined && buffer.byteLength >= 4) {
+        expected = buffer.readUInt32BE(0);
+        if (expected === 0 || expected > 4 * 1024) { finish(new AppError(ERROR_CODES.NETWORK_BRIDGE_START_FAILED)); return; }
+      }
+      if (expected === undefined || buffer.byteLength < expected + 4) return;
+      if (buffer.byteLength !== expected + 4) { finish(new AppError(ERROR_CODES.NETWORK_BRIDGE_START_FAILED)); return; }
+      try {
+        const value = JSON.parse(buffer.subarray(4).toString("utf8")) as Record<string, unknown>;
+        const keys = Object.keys(value).sort().join("\0");
+        if (value.type !== "ready" || value.protocol !== 1 ||
+            !Number.isSafeInteger(value.helperPid) || !Number.isSafeInteger(value.bwrapPid) ||
+            keys !== ["bwrapPid", "helperPid", "protocol", "type"].sort().join("\0")) {
+          throw new Error("invalid helper ready frame");
+        }
+        finish();
+      } catch (cause) { finish(new AppError(ERROR_CODES.NETWORK_BRIDGE_START_FAILED, { cause })); }
+    };
+    stream.on("data", onData); stream.once("end", onEnd); stream.once("error", onError);
+  });
+}
+
 /** Production ownership boundary: builder, per-worker probe context, and client lifecycle. */
 export async function startSandboxWorkerClient(options: SandboxWorkerLaunchOptions): Promise<SandboxWorkerClient> {
-  const specification = buildBwrapLaunchSpecification(options);
+  const specification = buildSandboxLaunchSpecification({
+    ...options,
+    networkProfile: options.networkProfile ?? { kind: "isolated" },
+  });
   const nonce = randomBytes(24).toString("hex");
   const probeContext = await buildSandboxProbeContext({
     config: options.config, worker: options.worker, workspace: options.workspace,
@@ -240,6 +282,8 @@ export class SandboxWorkerClient {
       throw error;
     }
     const nonce = options.probeContext.nonce;
+    const helperReady = waitForHelperReady(child, options.specification);
+    void helperReady.catch(() => undefined);
     const hello = new Promise<void>((resolve, reject) => {
       client.#helloResolve = resolve;
       client.#helloReject = reject;
@@ -256,6 +300,7 @@ export class SandboxWorkerClient {
         for (const binding of options.specification.dataBindings) {
           streamAt<Writable>(child, binding.fd).end(binding.payload);
         }
+        await helperReady;
         await client.#send({
           type: "hello", protocol: SANDBOX_PROTOCOL_VERSION, nonce,
           artifactSha256: options.probeContext.artifact.sha256,
@@ -271,6 +316,7 @@ export class SandboxWorkerClient {
     } catch (cause) {
       client.#fail(cause);
       await client.#terminate();
+      if (cause instanceof AppError && cause.code === ERROR_CODES.NETWORK_BRIDGE_START_FAILED) throw cause;
       throw new AppError(ERROR_CODES.SANDBOX_WORKER_START_FAILED, { cause });
     } finally {
       if (timer !== undefined) clearTimeout(timer);

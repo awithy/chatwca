@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { loadConfig } from "../../src/server/config.js";
 import { validateBwrapAndToolchain } from "../../src/server/sandbox/bwrap.js";
+import { validateNetworkHelper } from "../../src/server/network/helper.js";
 import {
   loadSandboxWorkerArtifact,
   runSandboxStartupProbe,
@@ -33,9 +34,16 @@ describe.skipIf(process.env.CHATWCA_SANDBOX_CAPABLE !== "1")("real Bubblewrap st
       CHATWCA_DATA_DIR: dataDirectory,
       PI_CODING_AGENT_DIR: piAgentDirectory,
       CHATWCA_SANDBOX_RO_MOUNTS: JSON.stringify([readOnlyToolchain]),
+      CHATWCA_MANAGED_EGRESS_MODE: "optional",
+      CHATWCA_NETWORK_ALLOWED_DOMAINS: '["example.com"]',
     });
     const host = validateBwrapAndToolchain(loaded.sandbox);
     const worker = await loadSandboxWorkerArtifact();
+    const helper = validateNetworkHelper({
+      helperPath: loaded.managedNetwork.helperPath,
+      manifestPath: loaded.managedNetwork.helperManifestPath,
+      protectedPaths: [await realpath(dataDirectory), await realpath(piAgentDirectory), readOnlyToolchain],
+    });
 
     await expect(runSandboxStartupProbe({
       config: loaded.sandbox,
@@ -43,8 +51,10 @@ describe.skipIf(process.env.CHATWCA_SANDBOX_CAPABLE !== "1")("real Bubblewrap st
       worker,
       dataDirectory: await realpath(dataDirectory),
       piAgentDirectory: await realpath(piAgentDirectory),
+      managedNetwork: { config: loaded.managedNetwork, helper },
     })).resolves.toMatchObject({
       succeeded: true,
+      managedEgressSucceeded: true,
       bwrapVersion: expect.stringMatching(/^bubblewrap /),
       nodeVersion: expect.stringMatching(/^v/),
       rgVersion: expect.stringMatching(/^ripgrep /),

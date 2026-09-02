@@ -1,4 +1,5 @@
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   accessSync,
   constants as fsConstants,
@@ -8,14 +9,26 @@ import {
 import path from "node:path";
 
 import { AppError, ERROR_CODES } from "../../shared/errors.js";
+import {
+  NETWORK_HELPER_BUILD_VERSION,
+  NETWORK_HELPER_PROTOCOL_VERSION,
+  type ValidatedNetworkHelper,
+} from "../network/helper.js";
 import type { SandboxConfig, SandboxReadOnlyMount } from "./config.js";
+import {
+  ISOLATED_SANDBOX_STDIO_COUNT,
+  MANAGED_SANDBOX_STDIO_COUNT,
+  SANDBOX_FDS,
+  SANDBOX_REQUEST_FD,
+  SANDBOX_RESPONSE_FD,
+} from "./fds.js";
 
+export { SANDBOX_REQUEST_FD, SANDBOX_RESPONSE_FD } from "./fds.js";
 export const SANDBOX_PROTOCOL_VERSION = 1;
 export const SANDBOX_WORKER_VERSION = "1";
 export const BWRAP_MINIMUM_VERSION = Object.freeze([0, 6, 1] as const);
-export const SANDBOX_REQUEST_FD = 8;
-export const SANDBOX_RESPONSE_FD = 9;
-export const SANDBOX_STDIO_COUNT = 10;
+/** Kept for isolated-profile compatibility. */
+export const SANDBOX_STDIO_COUNT = ISOLATED_SANDBOX_STDIO_COUNT;
 
 export const SANDBOX_ENVIRONMENT = Object.freeze({
   HOME: "/home/sandbox",
@@ -36,6 +49,35 @@ export const SANDBOX_EXPECTED_ENVIRONMENT_WITH_PWD = Object.freeze({
   PWD: "/workspace",
 });
 
+export function managedSandboxEnvironment(
+  httpPort: number,
+  socksPort: number,
+  guestPath: string = SANDBOX_ENVIRONMENT.PATH,
+): Readonly<Record<string, string>> {
+  const http = `http://127.0.0.1:${String(httpPort)}`;
+  const socks = `socks5h://127.0.0.1:${String(socksPort)}`;
+  const environment: Record<string, string> = {
+    ...SANDBOX_EXPECTED_ENVIRONMENT_WITH_PWD,
+    PATH: guestPath,
+    HTTP_PROXY: http, HTTPS_PROXY: http, WS_PROXY: http, WSS_PROXY: http,
+    ALL_PROXY: socks, NO_PROXY: "",
+    http_proxy: http, https_proxy: http, ws_proxy: http, wss_proxy: http,
+    all_proxy: socks, no_proxy: "",
+    NODE_USE_ENV_PROXY: "1",
+    ELECTRON_GET_USE_PROXY: "true",
+    CHATWCA_MANAGED_EGRESS: "1",
+  };
+  for (const name of [
+    "npm_config_proxy", "npm_config_http_proxy", "npm_config_https_proxy",
+    "yarn_proxy", "yarn_http_proxy", "yarn_https_proxy", "BUNDLE_HTTP_PROXY",
+    "PIP_PROXY", "DOCKER_HTTP_PROXY", "DOCKER_HTTPS_PROXY",
+  ]) environment[name] = http;
+  for (const name of [
+    "npm_config_noproxy", "yarn_no_proxy", "PIP_NO_PROXY", "DOCKER_NO_PROXY",
+  ]) environment[name] = "";
+  return Object.freeze(environment);
+}
+
 export interface SandboxWorkerArtifact {
   readonly source: Buffer;
   readonly sha256: string;
@@ -44,9 +86,38 @@ export interface SandboxWorkerArtifact {
 
 export interface BwrapDataBinding {
   readonly fd: number;
-  readonly destination: string;
+  /** Undefined only for the outer-helper launch descriptor. */
+  readonly destination?: string;
   readonly payload: Buffer;
 }
+
+export interface ManagedHelperArtifactDescriptor {
+  readonly fd: number;
+  readonly destination: string;
+  readonly sha256: string;
+  readonly bytes: number;
+  readonly mode: "0444";
+}
+
+export interface ManagedHelperLaunchDescriptor {
+  readonly protocol: number;
+  readonly buildVersion: string;
+  readonly bwrapPath: string;
+  readonly bwrapArgs: readonly string[];
+  readonly httpSocket: string;
+  readonly socksSocket: string;
+  readonly guestPath: string;
+  readonly artifacts: readonly ManagedHelperArtifactDescriptor[];
+}
+
+export type SandboxNetworkLaunchProfile =
+  | { readonly kind: "isolated" }
+  | {
+      readonly kind: "managed-egress";
+      readonly helper: Readonly<ValidatedNetworkHelper>;
+      readonly httpSocketPath: string;
+      readonly socksSocketPath: string;
+    };
 
 export interface BwrapCompatibilityLinks {
   readonly bin: boolean;
@@ -65,11 +136,16 @@ export interface ValidatedSandboxHost {
 }
 
 export interface BwrapLaunchSpecification {
+  readonly profile: SandboxNetworkLaunchProfile["kind"];
   readonly executable: string;
   readonly argv: readonly string[];
   readonly dataBindings: readonly BwrapDataBinding[];
   readonly requestFd: number;
   readonly responseFd: number;
+  readonly helperReadyFd?: number;
+  readonly helperBuildVersion?: string;
+  readonly stdioCount: number;
+  readonly emptyEnvironment: boolean;
   readonly expectedRootEntries: readonly string[];
 }
 
@@ -111,12 +187,12 @@ const validationPlatform: BwrapValidationPlatform = {
   }),
 };
 
-const MINIMAL_ETC = Object.freeze([
-  [3, "/app/worker.mjs", undefined],
-  [4, "/etc/passwd", "sandbox:x:0:0:Sandbox:/home/sandbox:/bin/bash\n"],
-  [5, "/etc/group", "sandbox:x:0:\n"],
-  [6, "/etc/hosts", "127.0.0.1 localhost\n::1 localhost\n"],
-  [7, "/etc/nsswitch.conf", "hosts: files dns\n"],
+const MINIMAL_FILES = Object.freeze([
+  ["worker", "/app/worker.mjs", undefined],
+  ["passwd", "/etc/passwd", "sandbox:x:0:0:Sandbox:/home/sandbox:/bin/bash\n"],
+  ["group", "/etc/group", "sandbox:x:0:\n"],
+  ["hosts", "/etc/hosts", "127.0.0.1 localhost\n::1 localhost\n"],
+  ["nsswitch", "/etc/nsswitch.conf", "hosts: files dns\n"],
 ] as const);
 
 const LINK_DEFINITIONS = Object.freeze([
@@ -282,18 +358,39 @@ function mountParentDirectories(mounts: readonly SandboxReadOnlyMount[]): string
   );
 }
 
-/** Pure construction of Bubblewrap argv and immutable inherited-FD payloads. */
-export function buildBwrapLaunchSpecification(input: {
+interface SandboxBuildInput {
   readonly config: Readonly<SandboxConfig>;
   readonly host: Readonly<ValidatedSandboxHost>;
   readonly workspace: string;
   readonly worker: Readonly<SandboxWorkerArtifact>;
-}): Readonly<BwrapLaunchSpecification> {
-  const dataBindings = MINIMAL_ETC.map(([fd, destination, payload]) => Object.freeze({
-    fd,
+}
+
+function artifactBindings(
+  input: SandboxBuildInput,
+  assignments: typeof SANDBOX_FDS.isolatedArtifacts | typeof SANDBOX_FDS.managedArtifacts,
+): readonly (BwrapDataBinding & { readonly destination: string })[] {
+  return MINIMAL_FILES.map(([name, destination, payload]) => Object.freeze({
+    fd: assignments[name],
     destination,
     payload: payload === undefined ? input.worker.source : Buffer.from(payload),
   }));
+}
+
+function expectedRoots(input: SandboxBuildInput): readonly string[] {
+  const roots = new Set([
+    "app", "dev", "etc", "home", "proc", "tmp", "usr", "var", "workspace",
+  ]);
+  for (const [name] of LINK_DEFINITIONS) {
+    if (input.host.compatibilityLinks[name]) roots.add(name);
+  }
+  for (const mount of input.config.readOnlyMounts) {
+    const top = mount.destination.split("/").filter(Boolean)[0];
+    if (top !== undefined) roots.add(top);
+  }
+  return Object.freeze([...roots].sort());
+}
+
+function baseBwrapArguments(input: SandboxBuildInput, managed: boolean): string[] {
   const argv: string[] = [
     "--unshare-user",
     "--unshare-pid",
@@ -302,12 +399,17 @@ export function buildBwrapLaunchSpecification(input: {
     "--unshare-net",
     "--hostname", "chatwca-sandbox",
     "--cap-drop", "ALL",
+  ];
+  // NET_ADMIN raises only guest loopback. SETPCAP exists solely so the inner
+  // helper can empty the bounding set; both are verified exact and dropped
+  // before Node executes.
+  if (managed) argv.push("--cap-add", "CAP_NET_ADMIN", "--cap-add", "CAP_SETPCAP");
+  argv.push(
     "--new-session",
     "--die-with-parent",
     "--clearenv",
     "--ro-bind", "/usr", "/usr",
-  ];
-
+  );
   for (const [name, target, destination] of LINK_DEFINITIONS) {
     if (input.host.compatibilityLinks[name]) argv.push("--symlink", target, destination);
   }
@@ -322,43 +424,106 @@ export function buildBwrapLaunchSpecification(input: {
     "--dir", "/etc",
     "--dir", "/app",
   );
-
-  for (const directory of mountParentDirectories(input.config.readOnlyMounts)) {
-    argv.push("--dir", directory);
-  }
-  for (const mount of input.config.readOnlyMounts) {
-    argv.push("--ro-bind", mount.source, mount.destination);
-  }
+  for (const directory of mountParentDirectories(input.config.readOnlyMounts)) argv.push("--dir", directory);
+  for (const mount of input.config.readOnlyMounts) argv.push("--ro-bind", mount.source, mount.destination);
   argv.push("--bind", input.workspace, "/workspace");
   argv.push("--tmpfs", "/workspace/.chatwca");
-  for (const binding of dataBindings) {
-    argv.push("--ro-bind-data", String(binding.fd), binding.destination);
-  }
-  for (const [name, value] of Object.entries({
-    ...SANDBOX_ENVIRONMENT,
-    PATH: input.config.guestPath,
-  })) {
+  return argv;
+}
+
+/** Pure construction of the unchanged isolated Bubblewrap profile. */
+export function buildBwrapLaunchSpecification(input: SandboxBuildInput): Readonly<BwrapLaunchSpecification> {
+  const dataBindings = artifactBindings(input, SANDBOX_FDS.isolatedArtifacts);
+  const argv = baseBwrapArguments(input, false);
+  for (const binding of dataBindings) argv.push("--ro-bind-data", String(binding.fd), binding.destination);
+  for (const [name, value] of Object.entries({ ...SANDBOX_ENVIRONMENT, PATH: input.config.guestPath })) {
     argv.push("--setenv", name, value);
   }
   argv.push("--chdir", "/workspace", "/usr/bin/node", "/app/worker.mjs");
-
-  const roots = new Set([
-    "app", "dev", "etc", "home", "proc", "tmp", "usr", "var", "workspace",
-  ]);
-  for (const [name] of LINK_DEFINITIONS) {
-    if (input.host.compatibilityLinks[name]) roots.add(name);
-  }
-  for (const mount of input.config.readOnlyMounts) {
-    const top = mount.destination.split("/").filter(Boolean)[0];
-    if (top !== undefined) roots.add(top);
-  }
-
   return Object.freeze({
+    profile: "isolated",
     executable: input.host.bwrapPath,
     argv: Object.freeze(argv),
     dataBindings: Object.freeze(dataBindings),
     requestFd: SANDBOX_REQUEST_FD,
     responseFd: SANDBOX_RESPONSE_FD,
-    expectedRootEntries: Object.freeze([...roots].sort()),
+    stdioCount: ISOLATED_SANDBOX_STDIO_COUNT,
+    emptyEnvironment: false,
+    expectedRootEntries: expectedRoots(input),
   });
+}
+
+function protocolFrame(value: unknown): Buffer {
+  const payload = Buffer.from(JSON.stringify(value), "utf8");
+  if (payload.byteLength === 0 || payload.byteLength > 64 * 1024) throw new Error("helper launch descriptor is oversized");
+  const header = Buffer.allocUnsafe(4);
+  header.writeUInt32BE(payload.byteLength);
+  return Buffer.concat([header, payload]);
+}
+
+/** Construct the separate fail-closed outer-helper managed-egress profile. */
+export function buildManagedBwrapLaunchSpecification(
+  input: SandboxBuildInput & {
+    readonly helper: Readonly<ValidatedNetworkHelper>;
+    readonly httpSocketPath: string;
+    readonly socksSocketPath: string;
+  },
+): Readonly<BwrapLaunchSpecification> {
+  if (input.helper.protocolVersion !== NETWORK_HELPER_PROTOCOL_VERSION ||
+      input.helper.buildVersion !== NETWORK_HELPER_BUILD_VERSION) {
+    throw new AppError(ERROR_CODES.NETWORK_HELPER_UNAVAILABLE);
+  }
+  const artifacts = artifactBindings(input, SANDBOX_FDS.managedArtifacts);
+  const bwrapArgs = baseBwrapArguments(input, true);
+  const artifactDescriptors = artifacts.map((binding) => Object.freeze({
+    fd: binding.fd,
+    destination: binding.destination,
+    sha256: createHash("sha256").update(binding.payload).digest("hex"),
+    bytes: binding.payload.byteLength,
+    mode: "0444" as const,
+  }));
+  for (const artifact of artifactDescriptors) {
+    bwrapArgs.push("--perms", artifact.mode, "--ro-bind-data", String(artifact.fd), artifact.destination);
+  }
+  bwrapArgs.push("--chdir", "/workspace");
+  const descriptor: ManagedHelperLaunchDescriptor = Object.freeze({
+    protocol: NETWORK_HELPER_PROTOCOL_VERSION,
+    buildVersion: NETWORK_HELPER_BUILD_VERSION,
+    bwrapPath: input.host.bwrapPath,
+    bwrapArgs: Object.freeze(bwrapArgs),
+    httpSocket: input.httpSocketPath,
+    socksSocket: input.socksSocketPath,
+    guestPath: input.config.guestPath,
+    artifacts: Object.freeze(artifactDescriptors),
+  });
+  const launchBinding: BwrapDataBinding = Object.freeze({
+    fd: SANDBOX_FDS.helperLaunch,
+    payload: protocolFrame(descriptor),
+  });
+  return Object.freeze({
+    profile: "managed-egress",
+    executable: input.helper.path,
+    argv: Object.freeze(["--outer"]),
+    dataBindings: Object.freeze([launchBinding, ...artifacts]),
+    requestFd: SANDBOX_REQUEST_FD,
+    responseFd: SANDBOX_RESPONSE_FD,
+    helperReadyFd: SANDBOX_FDS.helperReady,
+    helperBuildVersion: input.helper.buildVersion,
+    stdioCount: MANAGED_SANDBOX_STDIO_COUNT,
+    emptyEnvironment: true,
+    expectedRootEntries: expectedRoots(input),
+  });
+}
+
+export function buildSandboxLaunchSpecification(
+  input: SandboxBuildInput & { readonly networkProfile: SandboxNetworkLaunchProfile },
+): Readonly<BwrapLaunchSpecification> {
+  return input.networkProfile.kind === "isolated"
+    ? buildBwrapLaunchSpecification(input)
+    : buildManagedBwrapLaunchSpecification({
+        ...input,
+        helper: input.networkProfile.helper,
+        httpSocketPath: input.networkProfile.httpSocketPath,
+        socksSocketPath: input.networkProfile.socksSocketPath,
+      });
 }

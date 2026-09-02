@@ -7,7 +7,7 @@ import { loadEnvFile } from "node:process";
 import { fileURLToPath } from "node:url";
 import WebSocket, { WebSocketServer } from "ws";
 
-import { redactedErrorDiagnostic, toAppError } from "../shared/errors.js";
+import { AppError, ERROR_CODES, redactedErrorDiagnostic, toAppError } from "../shared/errors.js";
 import {
   ConfigurationError,
   loadConfig,
@@ -407,6 +407,10 @@ export interface ChatWcaStartupOptions {
     readonly worker: Readonly<SandboxWorkerArtifact>;
     readonly dataDirectory: string;
     readonly piAgentDirectory: string;
+    readonly managedNetwork?: {
+      readonly config: Readonly<ServerConfig["managedNetwork"]>;
+      readonly helper: Readonly<ValidatedNetworkHelper>;
+    };
   }) => Promise<Readonly<SandboxFunctionalProbeResult>>;
   readonly createRuntimeFactory?: (
     config: Readonly<ServerConfig>,
@@ -486,10 +490,12 @@ export async function startChatWcaServer(
       config.piCodingAgentDir ?? path.join(homedir(), ".pi", "agent"),
     );
     let functionalProbeSucceeded = false;
+    let managedNetworkFunctionalProbeSucceeded = false;
     let sandboxWorker: Readonly<SandboxWorkerArtifact> | undefined;
     let sandboxHost: Readonly<ValidatedSandboxHost> | undefined;
+    let networkHelper: Readonly<ValidatedNetworkHelper> | undefined;
     if (config.managedNetwork.mode === "optional") {
-      (options.validateNetworkHelper ?? validateNetworkHelper)({
+      networkHelper = (options.validateNetworkHelper ?? validateNetworkHelper)({
         helperPath: config.managedNetwork.helperPath,
         manifestPath: config.managedNetwork.helperManifestPath,
         protectedPaths: [
@@ -510,14 +516,21 @@ export async function startChatWcaServer(
       const host = (options.validateSandboxHost ?? validateBwrapAndToolchain)(config.sandbox);
       sandboxWorker = worker;
       sandboxHost = host;
-      await (options.runSandboxStartupProbe ?? runSandboxStartupProbe)({
+      const probe = await (options.runSandboxStartupProbe ?? runSandboxStartupProbe)({
         config: config.sandbox,
         host,
         worker,
         dataDirectory,
         piAgentDirectory,
+        ...(networkHelper === undefined ? {} : {
+          managedNetwork: { config: config.managedNetwork, helper: networkHelper },
+        }),
       });
+      if (networkHelper !== undefined && probe.managedEgressSucceeded !== true) {
+        throw new AppError(ERROR_CODES.NETWORK_HELPER_UNAVAILABLE);
+      }
       functionalProbeSucceeded = true;
+      managedNetworkFunctionalProbeSucceeded = probe.managedEgressSucceeded === true;
     }
     const workspaces = (
       options.createWorkspaceRepository ??
@@ -590,6 +603,7 @@ export async function startChatWcaServer(
         shutdown: registry,
         closeStorage: () => database?.close(),
         sandboxFunctionalProbeSucceeded: functionalProbeSucceeded,
+        managedNetworkFunctionalProbeSucceeded,
         onInternalError: reportError,
       },
     );

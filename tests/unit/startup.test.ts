@@ -179,7 +179,7 @@ describe("production startup wiring", () => {
       validateSandboxHost: () => { calls.push("validate"); return validatedHost; },
       runSandboxStartupProbe: async () => {
         calls.push("probe");
-        return { succeeded: true, bwrapVersion: "bubblewrap 0.6.1", nodeVersion: "v22.19.0", rgVersion: "ripgrep 14.0.0", workerSha256: workerArtifact.sha256 };
+        return { succeeded: true, managedEgressSucceeded: true, bwrapVersion: "bubblewrap 0.6.1", nodeVersion: "v22.19.0", rgVersion: "ripgrep 14.0.0", workerSha256: workerArtifact.sha256 };
       },
       createWorkspaceRepository: (connection) => {
         calls.push("workspace-repository");
@@ -202,11 +202,47 @@ describe("production startup wiring", () => {
         mode: "optional",
         selectablePolicies: ["isolated", "managed-egress"],
         allowedDomainPatterns: ["example.com"],
-        functionalProbeSucceeded: false,
+        functionalProbeSucceeded: true,
       },
     });
     await server.shutdown();
     expect(database?.closed).toBe(true);
+  });
+
+  it("refuses to listen when the optional managed startup probe is incomplete", async () => {
+    const root = temporaryDirectory();
+    const loadedConfig = loadConfig({
+      CHATWCA_DATA_DIR: path.join(root, "data"),
+      CHATWCA_SANDBOX_MODE: "optional",
+      CHATWCA_WORKSPACE_ROOTS: "[]",
+      CHATWCA_MANAGED_EGRESS_MODE: "optional",
+      CHATWCA_NETWORK_ALLOWED_DOMAINS: '["example.com"]',
+    }, root);
+    let database: ChatWcaDatabase | undefined;
+    const createPi = vi.fn(async () => fakeRuntimeFactory());
+    const bind = vi.fn(bindEphemeral);
+    await expect(startChatWcaServer({
+      loadConfiguration: () => loadedConfig,
+      openDatabase: (dataDir) => { database = openDatabase(dataDir); return database; },
+      loadSandboxWorkerArtifact: async () => workerArtifact,
+      validateNetworkHelper: () => ({
+        path: loadedConfig.managedNetwork.helperPath,
+        directory: loadedConfig.managedNetwork.helperDirectory,
+        manifestPath: loadedConfig.managedNetwork.helperManifestPath,
+        architecture: "x64", buildVersion: "1.0.0", protocolVersion: 1, sha256: "0".repeat(64),
+      }),
+      validateSandboxHost: () => validatedHost,
+      runSandboxStartupProbe: async () => ({
+        succeeded: true, managedEgressSucceeded: false,
+        bwrapVersion: "bubblewrap 0.6.1", nodeVersion: "v22.19.0",
+        rgVersion: "ripgrep 14.0.0", workerSha256: workerArtifact.sha256,
+      }),
+      createRuntimeFactory: createPi,
+      listen: bind,
+    })).rejects.toMatchObject({ code: "network_helper_unavailable" });
+    expect(database?.closed).toBe(true);
+    expect(createPi).not.toHaveBeenCalled();
+    expect(bind).not.toHaveBeenCalled();
   });
 
   it("fails before storage when managed egress conflicts with disabled sandboxing", async () => {

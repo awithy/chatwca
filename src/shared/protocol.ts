@@ -204,6 +204,33 @@ export type WorkspaceSecurityProfile = Static<
   typeof WorkspaceSecurityProfileSchema
 >;
 
+export const MAX_WORKSPACE_MOUNTS = 32;
+export const WORKSPACE_MOUNT_NAME_MAX_LENGTH = 64;
+export const WORKSPACE_MOUNT_SOURCE_MAX_LENGTH = 4_096;
+export const WORKSPACE_MOUNT_NAME_PATTERN = "^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$";
+export const WORKSPACE_MOUNT_GUEST_ROOT = "/mounts";
+
+export const WorkspaceMountAccessSchema = Type.Union([
+  Type.Literal("read-only"),
+  Type.Literal("read-write"),
+]);
+export type WorkspaceMountAccess = Static<typeof WorkspaceMountAccessSchema>;
+
+export const WorkspaceMountSchema = strictObject({
+  name: Type.String({
+    minLength: 1,
+    maxLength: WORKSPACE_MOUNT_NAME_MAX_LENGTH,
+    pattern: WORKSPACE_MOUNT_NAME_PATTERN,
+  }),
+  source: Type.String({ minLength: 1, maxLength: WORKSPACE_MOUNT_SOURCE_MAX_LENGTH }),
+  access: WorkspaceMountAccessSchema,
+});
+export type WorkspaceMount = Static<typeof WorkspaceMountSchema>;
+
+export function workspaceMountGuestPath(name: string): string {
+  return `${WORKSPACE_MOUNT_GUEST_ROOT}/${name}`;
+}
+
 export const SandboxModeSchema = Type.Union([
   Type.Literal("disabled"),
   Type.Literal("optional"),
@@ -237,6 +264,7 @@ export const WorkspacePolicyIssueSchema = Type.Union([
   Type.Literal("sandbox_disabled"),
   Type.Literal("outside_workspace_roots"),
   Type.Literal("protected_path_overlap"),
+  Type.Literal("mount_unavailable"),
   Type.Null(),
 ]);
 export type WorkspacePolicyIssue = Static<typeof WorkspacePolicyIssueSchema>;
@@ -316,6 +344,7 @@ export const WorkspaceSchema = strictObject({
   sessionStorage: WorkspaceSessionStorageSchema,
   sessionDirectory: Type.Union([NonEmptyStringSchema, Type.Null()]),
   securityProfile: WorkspaceSecurityProfileSchema,
+  mounts: Type.Array(WorkspaceMountSchema, { maxItems: MAX_WORKSPACE_MOUNTS }),
   networkPolicy: SandboxNetworkPolicySchema,
   networkPolicySetId: NetworkPolicySetIdSchema,
   createdAt: Type.Number({ minimum: 0 }),
@@ -330,6 +359,7 @@ export const WorkspaceSummarySchema = strictObject({
   sessionStorage: WorkspaceSessionStorageSchema,
   sessionDirectory: Type.Union([NonEmptyStringSchema, Type.Null()]),
   securityProfile: WorkspaceSecurityProfileSchema,
+  mounts: Type.Array(WorkspaceMountSchema, { maxItems: MAX_WORKSPACE_MOUNTS }),
   networkPolicy: SandboxNetworkPolicySchema,
   effectiveSecurityProfile: Type.Union([
     WorkspaceSecurityProfileSchema,
@@ -425,8 +455,10 @@ export const WorkspaceCreateCommandSchema = strictObject({
   path: NonEmptyStringSchema,
   sessionStorage: WorkspaceSessionStorageSchema,
   securityProfile: WorkspaceSecurityProfileSchema,
+  mounts: Type.Optional(Type.Array(WorkspaceMountSchema, { maxItems: MAX_WORKSPACE_MOUNTS })),
   networkPolicy: Type.Optional(SandboxNetworkPolicySchema),
   networkPolicySetId: Type.Optional(NetworkPolicySetIdSchema),
+  acknowledgeWritableMounts: Type.Optional(Type.Literal(true)),
 });
 export const WorkspaceUpdateCommandSchema = strictObject({
   type: Type.Literal("workspace.update"),
@@ -435,10 +467,12 @@ export const WorkspaceUpdateCommandSchema = strictObject({
   name: Type.Optional(NonEmptyStringSchema),
   path: Type.Optional(NonEmptyStringSchema),
   securityProfile: Type.Optional(WorkspaceSecurityProfileSchema),
+  mounts: Type.Optional(Type.Array(WorkspaceMountSchema, { maxItems: MAX_WORKSPACE_MOUNTS })),
   networkPolicy: Type.Optional(SandboxNetworkPolicySchema),
   networkPolicySetId: Type.Optional(NetworkPolicySetIdSchema),
   acknowledgeSecurityDowngrade: Type.Optional(Type.Literal(true)),
   acknowledgeNetworkExposure: Type.Optional(Type.Literal(true)),
+  acknowledgeWritableMounts: Type.Optional(Type.Literal(true)),
 });
 export const WorkspaceDeleteCommandSchema = strictObject({
   type: Type.Literal("workspace.delete"),

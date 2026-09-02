@@ -4,7 +4,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 
 export const DATABASE_FILENAME = "chatwca.sqlite";
-export const DATABASE_SCHEMA_VERSION = 5;
+export const DATABASE_SCHEMA_VERSION = 6;
 export const DATABASE_BUSY_TIMEOUT_MS = 5_000;
 
 const INITIAL_SCHEMA = `
@@ -27,6 +27,24 @@ const INITIAL_SCHEMA = `
       ),
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE workspace_mounts (
+    workspace_id TEXT NOT NULL
+      REFERENCES workspaces(id) ON DELETE CASCADE,
+    name TEXT NOT NULL
+      CHECK (
+        length(name) BETWEEN 1 AND 64 AND
+        name NOT GLOB '*[^a-z0-9_-]*' AND
+        substr(name, 1, 1) GLOB '[a-z0-9]' AND
+        substr(name, -1, 1) GLOB '[a-z0-9]'
+      ),
+    source_path TEXT NOT NULL
+      CHECK (length(source_path) BETWEEN 1 AND 4096),
+    access TEXT NOT NULL
+      CHECK (access IN ('read-only', 'read-write')),
+    PRIMARY KEY (workspace_id, name),
+    UNIQUE (workspace_id, source_path)
   );
 `;
 
@@ -129,6 +147,31 @@ function migrateVersionFour(connection: Database.Database): void {
   })();
 }
 
+function migrateVersionFive(connection: Database.Database): void {
+  connection.transaction(() => {
+    connection.exec(`
+      CREATE TABLE workspace_mounts (
+        workspace_id TEXT NOT NULL
+          REFERENCES workspaces(id) ON DELETE CASCADE,
+        name TEXT NOT NULL
+          CHECK (
+            length(name) BETWEEN 1 AND 64 AND
+            name NOT GLOB '*[^a-z0-9_-]*' AND
+            substr(name, 1, 1) GLOB '[a-z0-9]' AND
+            substr(name, -1, 1) GLOB '[a-z0-9]'
+          ),
+        source_path TEXT NOT NULL
+          CHECK (length(source_path) BETWEEN 1 AND 4096),
+        access TEXT NOT NULL
+          CHECK (access IN ('read-only', 'read-write')),
+        PRIMARY KEY (workspace_id, name),
+        UNIQUE (workspace_id, source_path)
+      );
+    `);
+    connection.pragma("user_version = 6");
+  })();
+}
+
 /**
  * Create/open and initialize ChatWCA's SQLite database.
  *
@@ -158,15 +201,21 @@ export function openDatabase(
       migrateVersionTwo(connection);
       migrateVersionThree(connection);
       migrateVersionFour(connection);
+      migrateVersionFive(connection);
     } else if (version === 2) {
       migrateVersionTwo(connection);
       migrateVersionThree(connection);
       migrateVersionFour(connection);
+      migrateVersionFive(connection);
     } else if (version === 3) {
       migrateVersionThree(connection);
       migrateVersionFour(connection);
+      migrateVersionFive(connection);
     } else if (version === 4) {
       migrateVersionFour(connection);
+      migrateVersionFive(connection);
+    } else if (version === 5) {
+      migrateVersionFive(connection);
     } else if (version !== DATABASE_SCHEMA_VERSION) {
       throw new UnsupportedDatabaseVersionError(version);
     }

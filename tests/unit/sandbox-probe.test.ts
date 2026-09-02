@@ -28,7 +28,7 @@ const context: SandboxProbeContext = {
   workspaceDevice: "1",
   workspaceInode: "2",
   hiddenPathCount: 3,
-  mounts: { "/opt/tool": { dev: "3", ino: "4" } },
+  mounts: { "/opt/tool": { dev: "3", ino: "4", readOnly: true } },
 };
 
 function ready(): Record<string, unknown> {

@@ -16,6 +16,7 @@ import type { Readable, Writable } from "node:stream";
 import { TextDecoder } from "node:util";
 
 import { AppError, ERROR_CODES } from "../../shared/errors.js";
+import { workspaceMountGuestPath, type WorkspaceMount } from "../../shared/protocol.js";
 import type { ManagedNetworkConfig } from "../network/config.js";
 import type { ValidatedNetworkHelper } from "../network/helper.js";
 import { ManagedNetworkRuntime } from "../network/managed-runtime.js";
@@ -54,7 +55,11 @@ export interface SandboxProbeContext {
   readonly workspaceDevice: string;
   readonly workspaceInode: string;
   readonly hiddenPathCount: number;
-  readonly mounts: Readonly<Record<string, { readonly dev: string; readonly ino: string }>>;
+  readonly mounts: Readonly<Record<string, {
+    readonly dev: string;
+    readonly ino: string;
+    readonly readOnly: boolean;
+  }>>;
 }
 
 export interface SandboxFunctionalProbeResult {
@@ -165,8 +170,8 @@ export function validateSandboxWorkerReady(
   }
   for (const [destination, expected] of Object.entries(context.mounts)) {
     const identity = object(mountIdentities[destination]);
-    if (identity.dev !== expected.dev || identity.ino !== expected.ino || identity.readOnly !== true) {
-      throw new Error("read-only mount identity or mode differs");
+    if (identity.dev !== expected.dev || identity.ino !== expected.ino || identity.readOnly !== expected.readOnly) {
+      throw new Error("filesystem mount identity or mode differs");
     }
   }
   const artifact = object(probe.artifact);
@@ -296,14 +301,31 @@ export async function buildSandboxProbeContext(input: {
   readonly config: Readonly<SandboxConfig>;
   readonly worker: Readonly<SandboxWorkerArtifact>;
   readonly workspace: string;
+  readonly mounts?: readonly WorkspaceMount[];
   readonly hiddenPaths: readonly string[];
   readonly nonce: string;
   readonly specification: Readonly<BwrapLaunchSpecification>;
 }): Promise<Readonly<SandboxProbeContext>> {
   const workspaceMetadata = await stat(input.workspace, { bigint: true });
-  const mounts = Object.fromEntries(await Promise.all(input.config.readOnlyMounts.map(async (mount) => {
+  const mountEntries = [
+    ...input.config.readOnlyMounts.map((mount) => ({
+      source: mount.source,
+      destination: mount.destination,
+      readOnly: true,
+    })),
+    ...(input.mounts ?? []).map((mount) => ({
+      source: mount.source,
+      destination: workspaceMountGuestPath(mount.name),
+      readOnly: mount.access === "read-only",
+    })),
+  ];
+  const mounts = Object.fromEntries(await Promise.all(mountEntries.map(async (mount) => {
     const metadata = await stat(mount.source, { bigint: true });
-    return [mount.destination, { dev: String(metadata.dev), ino: String(metadata.ino) }];
+    return [mount.destination, {
+      dev: String(metadata.dev),
+      ino: String(metadata.ino),
+      readOnly: mount.readOnly,
+    }];
   })));
   return Object.freeze({
     nonce: input.nonce,
@@ -327,6 +349,7 @@ export async function runSandboxWorkerProbe(input: {
   readonly host: Readonly<ValidatedSandboxHost>;
   readonly worker: Readonly<SandboxWorkerArtifact>;
   readonly workspace: string;
+  readonly mounts?: readonly WorkspaceMount[];
   readonly hiddenPaths: readonly string[];
   readonly managedProfile?: {
     readonly helper: import("../network/helper.js").ValidatedNetworkHelper;
@@ -384,7 +407,7 @@ export async function runSandboxWorkerProbe(input: {
       artifactSha256: input.worker.sha256,
       artifactVersion: input.worker.version,
       hiddenPaths: input.hiddenPaths,
-      mountPaths: input.config.readOnlyMounts.map((mount) => mount.destination),
+      mountPaths: Object.keys(context.mounts),
       exitAfterProbe: true,
       commandTimeoutMs: input.config.commandTimeoutMs,
       maxCommandOutputBytes: input.config.maxCommandOutputBytes,

@@ -113,6 +113,23 @@ describe("sandbox workspace admission", () => {
     await rejected(admission.admit(policy(alias, workspaceRoot)));
   });
 
+  it("admits canonical socket-free mount directories and rejects aliases or sockets", async () => {
+    const mountRoot = await root();
+    const source = path.join(mountRoot, "shared");
+    await mkdir(source);
+    await writeFile(path.join(source, "data.txt"), "ok");
+    const admission = new SandboxWorkspaceAdmission();
+    await expect(admission.admitMount({ sourcePath: source, writable: true }))
+      .resolves.toBeUndefined();
+
+    const alias = path.join(mountRoot, "alias");
+    await symlink(source, alias, "dir");
+    await rejected(admission.admitMount({ sourcePath: alias, writable: false }));
+
+    await listenUnix(path.join(source, "service.sock"));
+    await rejected(admission.admitMount({ sourcePath: source, writable: false }));
+  });
+
   it("fails closed at the named entry and deadline bounds", async () => {
     expect(SANDBOX_SOCKET_WALK_MAX_ENTRIES).toBe(100_000);
     expect(SANDBOX_SOCKET_WALK_DEADLINE_MS).toBe(2_000);

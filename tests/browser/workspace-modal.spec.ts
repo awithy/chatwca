@@ -8,6 +8,12 @@ interface SentFrame {
   readonly networkPolicySetId?: string;
   readonly acknowledgeNetworkExposure?: boolean;
   readonly acknowledgeSecurityDowngrade?: boolean;
+  readonly acknowledgeWritableMounts?: boolean;
+  readonly mounts?: readonly {
+    readonly name: string;
+    readonly source: string;
+    readonly access: string;
+  }[];
   readonly allowedDomains?: unknown;
   readonly allowedPorts?: unknown;
 }
@@ -127,6 +133,35 @@ test("confirmation retains selected disclosure and sends only the exact named-se
   expect(frame).not.toHaveProperty("acknowledgeNetworkExposure");
   expect(frame).not.toHaveProperty("allowedDomains");
   expect(frame).not.toHaveProperty("allowedPorts");
+});
+
+test("adds named read-only and read-write mounts under /mounts with writable confirmation", async ({ page }) => {
+  const sent = captureSent(page);
+  await waitForConnected(page);
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Add workspace" });
+  await dialog.getByLabel("Name").fill("Mounted workspace");
+  await dialog.getByLabel("Directory path").fill("/tmp/chatwca-mounted-workspace");
+  await dialog.getByLabel("Security profile", { exact: true }).selectOption("workspace-sandboxed");
+  await dialog.getByRole("button", { name: "Add mount" }).click();
+  await dialog.getByLabel("Mount name").fill("shared-data");
+  await dialog.getByLabel("Server directory").fill("/srv/shared/data");
+  await dialog.getByLabel("Access").selectOption("read-write");
+  await expect(dialog).toContainText("/mounts/shared-data");
+
+  page.once("dialog", (confirmation) => confirmation.dismiss());
+  await dialog.getByRole("button", { name: "Add workspace" }).click();
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByLabel("Server directory")).toHaveValue("/srv/shared/data");
+
+  page.once("dialog", (confirmation) => confirmation.accept());
+  await dialog.getByRole("button", { name: "Add workspace" }).click();
+  await expect(dialog).toHaveCount(0);
+  const frame = sent.find(({ type, name }) => type === "workspace.create" && name === "Mounted workspace");
+  expect(frame).toMatchObject({
+    mounts: [{ name: "shared-data", source: "/srv/shared/data", access: "read-write" }],
+    acknowledgeWritableMounts: true,
+  });
 });
 
 test("unavailable sets fail visibly and can be explicitly replaced with acknowledged exact updates", async ({ page }) => {

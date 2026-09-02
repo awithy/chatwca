@@ -35,6 +35,8 @@ interface Fixture {
   readonly data: string;
   readonly agent: string;
   readonly toolchain: string;
+  readonly readOnlyMount: string;
+  readonly writableMount: string;
   readonly client: SandboxWorkerClient;
   readonly fatal: ReturnType<typeof vi.fn>;
 }
@@ -47,9 +49,12 @@ async function fixture(): Promise<Fixture> {
   const unrelated = path.join(root, "unrelated");
   const data = path.join(root, "data");
   const agent = path.join(root, "agent");
+  const readOnlyMount = path.join(root, "mounted-reference");
+  const writableMount = path.join(root, "mounted-artifacts");
   await Promise.all([
     mkdir(path.join(workspace, ".chatwca", "sessions"), { recursive: true }),
     mkdir(unrelated), mkdir(data), mkdir(path.join(agent, "sessions"), { recursive: true }),
+    mkdir(readOnlyMount), mkdir(writableMount),
   ]);
   await Promise.all([
     writeFile(path.join(workspace, "source.txt"), "original\n"),
@@ -62,6 +67,8 @@ async function fixture(): Promise<Fixture> {
     writeFile(path.join(agent, "sessions", "global.jsonl"), "global-session-secret"),
     writeFile(path.join(root, "parent-canary"), "parent-canary-secret"),
     writeFile(path.join(toolchain, "runtime.txt"), "read-only-runtime"),
+    writeFile(path.join(readOnlyMount, "reference.txt"), "mounted-reference"),
+    writeFile(path.join(writableMount, "artifact.txt"), "mounted-artifact"),
   ]);
   await symlink(unrelated, path.join(workspace, "host-escape"));
 
@@ -78,11 +85,18 @@ async function fixture(): Promise<Fixture> {
     host: validateBwrapAndToolchain(config),
     worker: await loadSandboxWorkerArtifact(),
     workspace,
+    mounts: [
+      { name: "reference", source: await realpath(readOnlyMount), access: "read-only" },
+      { name: "artifacts", source: await realpath(writableMount), access: "read-write" },
+    ],
     hiddenPaths: [path.join(root, "parent-canary"), data, agent, unrelated],
     onFatal: fatal,
   });
   clients.push(client);
-  return { root, workspace, unrelated, data, agent, toolchain, client, fatal };
+  return {
+    root, workspace, unrelated, data, agent, toolchain,
+    readOnlyMount, writableMount, client, fatal,
+  };
 }
 
 async function expectUnreadable(client: SandboxWorkerClient, target: string): Promise<void> {
@@ -146,7 +160,9 @@ realSandbox("Bubblewrap attack and concurrency matrix", () => {
   }, 30_000);
 
   it("keeps source and git writable while runtime mounts stay read-only and aliases serialize", async () => {
-    const { client, workspace, toolchain, fatal } = await fixture();
+    const {
+      client, workspace, toolchain, readOnlyMount, writableMount, fatal,
+    } = await fixture();
     await client.writeFile("source.txt", "changed by sandbox\n");
     expect(await readFile(path.join(workspace, "source.txt"), "utf8")).toBe("changed by sandbox\n");
 
@@ -165,6 +181,15 @@ realSandbox("Bubblewrap attack and concurrency matrix", () => {
       .toBe("read-only-runtime");
     await expect(client.writeFile(path.join(toolchain, "runtime.txt"), "tamper"))
       .rejects.toMatchObject({ code: "permission_denied" });
+
+    expect((await client.readFile({
+      path: "/mounts/reference/reference.txt", maxBytes: 1024, detectMime: false,
+    })).data.toString()).toBe("mounted-reference");
+    await expect(client.writeFile("/mounts/reference/reference.txt", "tamper"))
+      .rejects.toMatchObject({ code: "permission_denied" });
+    await client.writeFile("/mounts/artifacts/artifact.txt", "updated-artifact");
+    expect(await readFile(path.join(writableMount, "artifact.txt"), "utf8")).toBe("updated-artifact");
+    expect(await readFile(path.join(readOnlyMount, "reference.txt"), "utf8")).toBe("mounted-reference");
     const node = await execute(client, "node --version && rg --version | head -1");
     expect(node.result.exitCode).toBe(0);
     expect(node.output).toMatch(/v\d+\.\d+\.\d+/);

@@ -79,8 +79,10 @@ export interface ProtocolWorkspaceRepository {
     readonly path: string;
     readonly sessionStorage: WorkspaceSummary["sessionStorage"];
     readonly securityProfile: WorkspaceSummary["securityProfile"];
+    readonly mounts?: WorkspaceSummary["mounts"];
     readonly networkPolicy?: WorkspaceSummary["networkPolicy"];
     readonly networkPolicySetId?: WorkspaceSummary["networkPolicySetId"];
+    readonly acknowledgeWritableMounts?: true;
   }): WorkspaceSummary;
   update(workspaceId: string, changes: UpdateWorkspaceInput): WorkspaceSummary;
   delete(workspaceId: string): void;
@@ -177,12 +179,16 @@ export async function dispatchClientCommand(
         path: command.path,
         sessionStorage: command.sessionStorage,
         securityProfile: command.securityProfile,
+        ...(command.mounts === undefined ? {} : { mounts: command.mounts }),
         ...(command.networkPolicy === undefined
           ? {}
           : { networkPolicy: command.networkPolicy }),
         ...(command.networkPolicySetId === undefined
           ? {}
           : { networkPolicySetId: command.networkPolicySetId }),
+        ...(command.acknowledgeWritableMounts === undefined
+          ? {}
+          : { acknowledgeWritableMounts: command.acknowledgeWritableMounts }),
       });
       const authoritative = workspaces.list();
       return {
@@ -192,12 +198,14 @@ export async function dispatchClientCommand(
     }
     case "workspace.update": {
       const securityProfile = command.securityProfile;
+      const mounts = command.mounts;
       const networkPolicy = command.networkPolicy;
       const networkPolicySetId = command.networkPolicySetId;
       if (
         (
           command.path !== undefined ||
           securityProfile !== undefined ||
+          mounts !== undefined ||
           networkPolicy !== undefined ||
           networkPolicySetId !== undefined
         ) &&
@@ -211,6 +219,7 @@ export async function dispatchClientCommand(
         ...(securityProfile === undefined
           ? {}
           : { securityProfile }),
+        ...(mounts === undefined ? {} : { mounts }),
         ...(networkPolicy === undefined
           ? {}
           : { networkPolicy }),
@@ -223,6 +232,9 @@ export async function dispatchClientCommand(
         ...(command.acknowledgeNetworkExposure === undefined
           ? {}
           : { acknowledgeNetworkExposure: command.acknowledgeNetworkExposure }),
+        ...(command.acknowledgeWritableMounts === undefined
+          ? {}
+          : { acknowledgeWritableMounts: command.acknowledgeWritableMounts }),
       });
       const authoritative = workspaces.list();
       return {

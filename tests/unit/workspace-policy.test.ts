@@ -95,6 +95,7 @@ describe("workspace security policy", () => {
           cwd: realpathSync(workspacePath),
           sessionDirectory: null,
           securityProfile: effective,
+          mounts: [],
           networkPolicy: effective === "workspace-sandboxed" ? "isolated" : null,
           networkPolicySetId: "default",
           effectiveNetworkPolicySetId: null,
@@ -226,7 +227,7 @@ describe("workspace security policy", () => {
     const configuredPolicy = policy("optional", root);
     const repository = new WorkspaceRepository(opened.connection, {
       policy: configuredPolicy,
-      sandboxAdmission: { admit },
+      sandboxAdmission: { admit, admitMount: vi.fn(async () => undefined) },
     });
 
     await repository.requireUsable("workspace-1");
@@ -260,7 +261,7 @@ describe("workspace security policy", () => {
         networkHelperPath: helperPath,
         networkHelperDirectory: helperDirectory,
       }),
-      sandboxAdmission: { admit },
+      sandboxAdmission: { admit, admitMount: vi.fn(async () => undefined) },
     });
 
     expect(repository.get("workspace-1")).toMatchObject({

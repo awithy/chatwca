@@ -10,6 +10,11 @@ import path from "node:path";
 
 import { AppError, ERROR_CODES } from "../../shared/errors.js";
 import {
+  WORKSPACE_MOUNT_GUEST_ROOT,
+  workspaceMountGuestPath,
+  type WorkspaceMount,
+} from "../../shared/protocol.js";
+import {
   NETWORK_HELPER_BUILD_VERSION,
   NETWORK_HELPER_PROTOCOL_VERSION,
   type ValidatedNetworkHelper,
@@ -362,6 +367,7 @@ interface SandboxBuildInput {
   readonly config: Readonly<SandboxConfig>;
   readonly host: Readonly<ValidatedSandboxHost>;
   readonly workspace: string;
+  readonly mounts?: readonly WorkspaceMount[];
   readonly worker: Readonly<SandboxWorkerArtifact>;
 }
 
@@ -387,6 +393,7 @@ function expectedRoots(input: SandboxBuildInput): readonly string[] {
     const top = mount.destination.split("/").filter(Boolean)[0];
     if (top !== undefined) roots.add(top);
   }
+  if ((input.mounts?.length ?? 0) > 0) roots.add(WORKSPACE_MOUNT_GUEST_ROOT.slice(1));
   return Object.freeze([...roots].sort());
 }
 
@@ -433,6 +440,14 @@ function baseBwrapArguments(input: SandboxBuildInput, managed: boolean): string[
   }
   for (const directory of mountParentDirectories(input.config.readOnlyMounts)) argv.push("--dir", directory);
   for (const mount of input.config.readOnlyMounts) argv.push("--ro-bind", mount.source, mount.destination);
+  if ((input.mounts?.length ?? 0) > 0) argv.push("--dir", WORKSPACE_MOUNT_GUEST_ROOT);
+  for (const mount of input.mounts ?? []) {
+    argv.push(
+      mount.access === "read-only" ? "--ro-bind" : "--bind",
+      mount.source,
+      workspaceMountGuestPath(mount.name),
+    );
+  }
   argv.push("--bind", input.workspace, "/workspace");
   argv.push("--tmpfs", "/workspace/.chatwca");
   return argv;

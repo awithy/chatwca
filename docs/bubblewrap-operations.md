@@ -128,17 +128,19 @@ CHATWCA_SANDBOX_COMMAND_TIMEOUT_MS=900000
 CHATWCA_SANDBOX_MAX_COMMAND_OUTPUT_BYTES=67108864
 ```
 
-A source path in `CHATWCA_SANDBOX_RO_MOUNTS` appears at the same absolute path in the guest. Mounts are administrator trust decisions and their host paths are intentionally absent from `/api/config` and Workspace Info.
+A source path in `CHATWCA_SANDBOX_RO_MOUNTS` appears at the same absolute path in the guest. These process-wide mounts are administrator trust decisions and their host paths are intentionally absent from `/api/config` and Workspace Info.
+
+A sandboxed workspace may additionally define up to 32 directory mounts in Add/Edit workspace. Each unique lowercase name appears at `/mounts/<name>` and can be read-only or read-write. Sources may be any existing directory accessible to the service user except the workspace, other mounts, and protected ChatWCA/Pi/helper/runtime paths. Read-write additions require confirmation. Mount changes require all workspace conversations to be closed.
 
 ## Filesystem, network, and compatibility model
 
-The synthetic root contains `/usr`, minimal `/dev` and `/proc`, immutable minimal `/etc` files, ephemeral home/temp directories, approved read-only mounts, and the selected workspace at `/workspace`. It does not bind the host root, home, `/run`, `/sys`, ChatWCA data, Pi agent state, or the application checkout. The host `<workspace>/.chatwca` is masked by ephemeral guest storage. The workspace—including `.git`, hooks, source, generated files, dependencies, and build scripts—remains writable.
+The synthetic root contains `/usr`, minimal `/dev` and `/proc`, immutable minimal `/etc` files, ephemeral home/temp directories, approved process-wide read-only mounts, workspace-specific directories under `/mounts`, and the selected workspace at `/workspace`. It does not bind the host root, home, `/run`, `/sys`, ChatWCA data, Pi agent state, or the application checkout. The host `<workspace>/.chatwca` is masked by ephemeral guest storage. The workspace—including `.git`, hooks, source, generated files, dependencies, and build scripts—remains writable.
 
-The default **isolated** policy has no IPv4, IPv6, DNS, or loopback access. Package downloads and direct external services therefore do not work. Optional **managed egress** retains the same route-less namespace but enables two designated loopback bridges to conversation-owned parent proxies; see [`network-sandbox-operations.md`](network-sandbox-operations.md). Model-provider calls still run in the parent and may send workspace content to the configured remote provider. Neither policy provides confidentiality from the provider, and managed destinations may receive readable workspace content.
+The default **isolated** policy has no IPv4, IPv6, DNS, or loopback access. Package downloads and direct external services therefore do not work. Optional **managed egress** retains the same route-less namespace but enables two designated loopback bridges to conversation-owned parent proxies; see [`network-sandbox-operations.md`](network-sandbox-operations.md). Model-provider calls still run in the parent and may send workspace and mounted content to the configured remote provider. Neither policy provides confidentiality from the provider, and managed destinations may receive readable workspace content.
 
 Sandboxed Pi sessions use exactly `read`, `write`, `edit`, `bash`, `ls`, `grep`, and `find`. Arbitrary extensions, dynamic tools, project/global skills, prompt packages, extension commands, and extension-only providers are disabled. Administrator-configured native remote providers remain usable through the parent. Keep unrestricted extensions globally disabled or run unrestricted and sandboxed workloads in separate ChatWCA processes when parent-process extension risk is unacceptable.
 
-A Unix-domain socket mounted in a workspace can bypass IP-network isolation. Admission rejects sockets with a no-follow walk bounded at 100,000 entries and two seconds, and rejects rather than skipping when a bound is reached. This is a best-effort race check: a host process can create or replace a socket after admission. Never place Docker, SSH-agent, database, service, or other sockets in a sandboxed workspace.
+A Unix-domain socket mounted in a workspace or additional directory can bypass IP-network isolation. Admission rejects sockets with a no-follow walk bounded at 100,000 entries and two seconds, and rejects rather than skipping when a bound is reached. This is a best-effort race check: a host process can create or replace a socket after admission. Never place Docker, SSH-agent, database, service, or other sockets in a sandboxed workspace or mounted directory.
 
 ## Protected paths and deployment layout
 
@@ -146,7 +148,9 @@ A sandbox workspace must not overlap in either direction with:
 
 - `CHATWCA_DATA_DIR` (including SQLite, WAL, and SHM files);
 - `PI_CODING_AGENT_DIR` (credentials, models, and global sessions); or
-- an approved read-only mount.
+- an approved process-wide read-only mount;
+- a workspace-specific mount; or
+- the managed-network helper and its protected directory.
 
 The common trap is registering the ChatWCA checkout while using its default `./data`: the workspace contains protected ChatWCA state and is rejected. Move data and Pi state outside every approved workspace root, for example:
 
@@ -156,7 +160,9 @@ The common trap is registering the ChatWCA checkout while using its default `./d
 /srv/chatwca/workspaces/*   # approved workspaces
 ```
 
-Workspace-local Pi sessions are intentionally stored by the parent under `.chatwca/sessions`; the guest sees only the ephemeral mask.
+Workspace-local Pi sessions are intentionally stored by the parent under `.chatwca/sessions`; the guest sees only the ephemeral mask. Workspace-specific mount definitions are stored in SQLite schema v6 and must be included with the complete ChatWCA data-directory backup.
+
+Because ChatWCA has no authentication, every accepted client can configure an eligible source. A read-only mount exposes its contents to tools and the model; a read-write mount also allows modification with the service user's authority. Treat listener/proxy/firewall access as authority over every non-protected directory the service user can access.
 
 ## Rollout, failure, and rollback
 

@@ -28,7 +28,7 @@ afterEach(() => {
 });
 
 describe("openDatabase", () => {
-  it("creates nested storage and initializes the version-five schema", () => {
+  it("creates nested storage and initializes the version-six schema", () => {
     const dataDir = path.join(temporaryDirectory(), "nested", "data");
     const database = openDatabase(dataDir);
 
@@ -64,7 +64,7 @@ describe("openDatabase", () => {
     database.close();
   });
 
-  it("accepts and preserves an existing version-five database", () => {
+  it("accepts and preserves an existing version-six database", () => {
     const dataDir = temporaryDirectory();
     const first = openDatabase(dataDir);
     first.connection
@@ -153,7 +153,7 @@ describe("openDatabase", () => {
     expect(migrated.connection.prepare(
       "SELECT security_profile FROM workspaces WHERE id = 'version-2'",
     ).get()).toEqual({ security_profile: "unrestricted" });
-    expect(migrated.connection.pragma("user_version", { simple: true })).toBe(5);
+    expect(migrated.connection.pragma("user_version", { simple: true })).toBe(DATABASE_SCHEMA_VERSION);
     expect(migrated.connection.prepare(
       "SELECT network_policy, network_policy_set_id FROM workspaces WHERE id = 'version-2'",
     ).get()).toEqual({ network_policy: "isolated", network_policy_set_id: "default" });
@@ -188,7 +188,7 @@ describe("openDatabase", () => {
       { id: "version-3a", network_policy: "isolated" },
       { id: "version-3b", network_policy: "isolated" },
     ]);
-    expect(migrated.connection.pragma("user_version", { simple: true })).toBe(5);
+    expect(migrated.connection.pragma("user_version", { simple: true })).toBe(DATABASE_SCHEMA_VERSION);
     expect(migrated.connection.prepare(
       "SELECT id, network_policy_set_id, created_at, updated_at FROM workspaces ORDER BY id",
     ).all()).toEqual([
@@ -304,7 +304,32 @@ describe("openDatabase", () => {
       { id: "v4-isolated", network_policy: "isolated", network_policy_set_id: "default" },
       { id: "v4-managed", network_policy: "managed-egress", network_policy_set_id: "default" },
     ]);
-    expect(migrated.connection.pragma("user_version", { simple: true })).toBe(5);
+    expect(migrated.connection.pragma("user_version", { simple: true })).toBe(DATABASE_SCHEMA_VERSION);
+    migrated.close();
+  });
+
+  it("migrates version-five databases to empty workspace mount collections", () => {
+    const dataDir = temporaryDirectory();
+    const filename = path.join(dataDir, DATABASE_FILENAME);
+    const legacy = new Database(filename);
+    legacy.exec(`
+      CREATE TABLE workspaces (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL UNIQUE,
+        session_storage TEXT NOT NULL DEFAULT 'pi-default',
+        security_profile TEXT NOT NULL DEFAULT 'unrestricted',
+        network_policy TEXT NOT NULL DEFAULT 'isolated',
+        network_policy_set_id TEXT NOT NULL DEFAULT 'default',
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      INSERT INTO workspaces VALUES
+        ('v5', 'Version 5', '/work/v5', 'pi-default', 'workspace-sandboxed', 'isolated', 'default', 1, 2);
+      PRAGMA user_version = 5;
+    `);
+    legacy.close();
+
+    const migrated = openDatabase(dataDir);
+    expect(migrated.connection.prepare("SELECT * FROM workspace_mounts").all()).toEqual([]);
+    expect(migrated.connection.pragma("user_version", { simple: true })).toBe(DATABASE_SCHEMA_VERSION);
     migrated.close();
   });
 
@@ -347,14 +372,14 @@ describe("openDatabase", () => {
     const dataDir = temporaryDirectory();
     const filename = path.join(dataDir, DATABASE_FILENAME);
     const unsupported = new Database(filename);
-    unsupported.pragma("user_version = 6");
+    unsupported.pragma("user_version = 7");
     unsupported.close();
 
     expect(() => openDatabase(dataDir)).toThrow(
       UnsupportedDatabaseVersionError,
     );
     expect(() => openDatabase(dataDir)).toThrow(
-      /schema version 6; expected 5/,
+      /schema version 7; expected 6/,
     );
 
     const afterFailure = new Database(filename);

@@ -13,7 +13,7 @@ This document maps every criterion in [`bubblewrap-design.md`](bubblewrap-design
 | 5 | No model-directed path/process runs in the parent. | `tests/unit/sandbox-tools.test.ts`, `sandbox-worker-fs.test.ts`, `conversation-registry.test.ts` (sandbox Markdown images); real escape matrix in `sandbox-attack-concurrency.test.ts`. Code review boundary: only typed `SandboxController` operations are captured by sandbox tools. |
 | 6 | No arbitrary extension or unapproved tool in strict sessions. | `tests/integration/sandbox-pi-contract.test.ts`, `tests/unit/sandbox-resources.test.ts`, `tests/integration/pi-runtime.test.ts`. |
 | 7 | Tool processes receive no parent credentials/Pi variables. | Startup and per-worker probe validation in `sandbox-probe.test.ts`; parent sentinel and `/proc/*/environ` attack in `sandbox-attack-concurrency.test.ts`. |
-| 8 | Synthetic root mounts only workspace, `/usr`, and approved read-only paths. | `tests/unit/sandbox-bwrap.test.ts`; real startup probe and read-only mount write rejection in the attack suite; deployment profile spike. |
+| 8 | Synthetic root mounts only workspace, `/usr`, approved process-wide read-only paths, and validated workspace-specific `/mounts/<name>` directories with exact access. | `tests/unit/sandbox-bwrap.test.ts`; real startup probe and read-only mount write rejection in the attack suite; deployment profile spike. |
 | 9 | ChatWCA data, Pi state, and session stores remain absent. | Real SQLite/WAL/SHM, Pi credential/global-session, workspace-session, unrelated directory, and canary attacks in `sandbox-attack-concurrency.test.ts`; startup hidden-path probe. |
 | 10 | `.chatwca` hidden; writable `.git` documented. | Real worker-client mask test and real Git init/commit in attack suite; README, operations runbook, and Workspace Info browser/unit tests. |
 | 11 | IPv4, IPv6, DNS, and loopback fail. | `tests/integration/sandbox-probe.test.ts` and every production worker handshake validate all five probes; `npm run spike:sandbox-profile` repeats them under service constraints. |
@@ -46,7 +46,7 @@ This document maps every criterion in [`bubblewrap-design.md`](bubblewrap-design
 - Real pre-listen probe: criteria 7–9 and 11; startup ordering is asserted in `tests/unit/startup.test.ts`.
 - Worker-only tools and workspace images: criteria 4–5.
 - Exactly seven strict tools/resources: criterion 6.
-- Namespace contents, `.chatwca`, network, and read-only mounts: criteria 7–11.
+- Namespace contents, `.chatwca`, network, and read-only/read-write mounts: criteria 7–11.
 - Cleanup for abort, timeout, failure, close, eviction, fork rollback, and shutdown: criteria 12–14.
 - No fallback and concurrent isolation: criteria 12 and 15.
 - Accurate operator/UI disclosures: criterion 16.

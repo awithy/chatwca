@@ -156,6 +156,21 @@ describe("Bubblewrap argument builder", () => {
     expect(built.expectedRootEntries).toContain("opt");
   });
 
+  it("binds workspace-specific directories under /mounts with their configured access", () => {
+    const built = buildBwrapLaunchSpecification({
+      config: config(), host, workspace: "/srv/workspaces/project", worker,
+      mounts: [
+        { name: "reference", source: "/srv/reference", access: "read-only" },
+        { name: "artifacts", source: "/srv/artifacts", access: "read-write" },
+      ],
+    });
+
+    expect(pairs(built.argv, "--ro-bind")).toContainEqual(["/srv/reference", "/mounts/reference"]);
+    expect(pairs(built.argv, "--bind")).toContainEqual(["/srv/artifacts", "/mounts/artifacts"]);
+    expect(built.argv).toContain("/mounts");
+    expect(built.expectedRootEntries).toContain("mounts");
+  });
+
   it("never binds a host root, protected store, session path, home, temp, run, sys, or checkout", () => {
     const workspace = "/srv/workspaces/project";
     const built = buildBwrapLaunchSpecification({ config: config(), host, workspace, worker });

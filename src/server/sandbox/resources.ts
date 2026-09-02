@@ -8,7 +8,11 @@ import {
   type ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
 
-import type { SandboxNetworkPolicy } from "../../shared/protocol.js";
+import {
+  workspaceMountGuestPath,
+  type SandboxNetworkPolicy,
+  type WorkspaceMount,
+} from "../../shared/protocol.js";
 
 const CONTEXT_FILE_NAMES = Object.freeze([
   "AGENTS.override.md",
@@ -36,7 +40,7 @@ Guidelines:
 - Use edit for precise changes; every edits[].oldText must be unique in the original file and edits must not overlap.
 - Use one edit call for multiple disjoint changes to the same file.
 - Tools operate from /workspace in a workspace sandbox.
-- Host absolute paths and files outside the synthetic guest filesystem are unavailable.
+- Host paths are unavailable unless they are explicitly exposed at a guest path under /mounts.
 - /workspace/.chatwca is ephemeral and must not be used for persistent state.`;
 
 const SANDBOX_PROMPT_FOOTER = `- Temporary command, home, and /tmp state disappears after abort, close, or eviction.
@@ -154,6 +158,7 @@ export class SandboxResourceLoader implements ResourceLoader {
   private constructor(
     canonicalWorkspace: string,
     private readonly networkPolicy: SandboxNetworkPolicy,
+    private readonly mounts: readonly WorkspaceMount[],
   ) {
     this.#canonicalWorkspace = canonicalWorkspace;
   }
@@ -161,8 +166,9 @@ export class SandboxResourceLoader implements ResourceLoader {
   static async create(
     canonicalWorkspace: string,
     networkPolicy: SandboxNetworkPolicy = "isolated",
+    mounts: readonly WorkspaceMount[] = [],
   ): Promise<SandboxResourceLoader> {
-    const loader = new SandboxResourceLoader(canonicalWorkspace, networkPolicy);
+    const loader = new SandboxResourceLoader(canonicalWorkspace, networkPolicy, mounts);
     await loader.reload();
     return loader;
   }
@@ -173,9 +179,14 @@ export class SandboxResourceLoader implements ResourceLoader {
   getThemes() { return { themes: [], diagnostics: [] }; }
   getAgentsFiles() { return { agentsFiles: [...this.#agentsFiles] }; }
   getSystemPrompt(): string {
-    return this.networkPolicy === "managed-egress"
+    const base = this.networkPolicy === "managed-egress"
       ? MANAGED_EGRESS_SANDBOX_SYSTEM_PROMPT
       : ISOLATED_SANDBOX_SYSTEM_PROMPT;
+    if (this.mounts.length === 0) return base;
+    const descriptions = this.mounts.map((mount) =>
+      `- ${workspaceMountGuestPath(mount.name)} is ${mount.access}.`
+    );
+    return `${base}\n\nAdditional workspace mounts:\n${descriptions.join("\n")}`;
   }
   getSystemPromptSource(): undefined { return undefined; }
   getAppendSystemPrompt(): string[] { return []; }

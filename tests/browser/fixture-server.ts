@@ -43,6 +43,7 @@ const WORKSPACE: WorkspaceSummary = {
   sessionStorage: "pi-default",
   sessionDirectory: null,
   securityProfile: "unrestricted",
+  mounts: [],
   networkPolicy: "isolated",
   effectiveSecurityProfile: "unrestricted",
   effectiveNetworkPolicy: null,
@@ -629,6 +630,7 @@ const workspaces: ProtocolWorkspaceRepository = {
           ? `${input.path.trim()}/.chatwca/sessions`
           : null,
       securityProfile: input.securityProfile,
+      mounts: input.mounts ?? [],
       networkPolicy: input.networkPolicy ?? "isolated",
       networkPolicySetId: selectedSetId,
       effectiveSecurityProfile: input.securityProfile,
@@ -668,6 +670,7 @@ const workspaces: ProtocolWorkspaceRepository = {
                 ? `${changes.path.trim()}/.chatwca/sessions`
                 : null,
           }),
+      ...(changes.mounts === undefined ? {} : { mounts: [...changes.mounts] }),
       ...(changes.securityProfile === undefined
         ? {}
         : {

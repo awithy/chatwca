@@ -227,6 +227,10 @@ describe("ClientCommandSchema", () => {
       { securityProfile: "workspace-sandboxed", acknowledgeSecurityDowngrade: true },
       { networkPolicy: "managed-egress", acknowledgeNetworkExposure: true },
       { networkPolicySetId: "github", acknowledgeNetworkExposure: true },
+      {
+        mounts: [{ name: "shared-data", source: "/srv/shared", access: "read-write" }],
+        acknowledgeWritableMounts: true,
+      },
     ]) {
       expect(Value.Check(ClientCommandSchema, {
         type: "workspace.update",
@@ -242,6 +246,17 @@ describe("ClientCommandSchema", () => {
       name: "Renamed",
       sessionStorage: "workspace",
     })).toBe(false);
+    for (const mounts of [
+      [{ name: "Has spaces", source: "/srv/shared", access: "read-only" }],
+      [{ name: "shared", source: "/srv/shared", access: "execute" }],
+      Array.from({ length: 33 }, (_, index) => ({
+        name: `mount-${String(index)}`, source: `/srv/${String(index)}`, access: "read-only",
+      })),
+    ]) {
+      expect(Value.Check(ClientCommandSchema, {
+        type: "workspace.update", requestId, workspaceId: "workspace-1", mounts,
+      })).toBe(false);
+    }
     for (const forbiddenRules of [
       { allowedDomains: ["browser.example"] },
       { allowedPorts: [443] },
@@ -389,6 +404,7 @@ describe("workspace schemas", () => {
     sessionStorage: "pi-default",
     sessionDirectory: null,
     securityProfile: "unrestricted",
+    mounts: [],
     networkPolicy: "isolated",
     networkPolicySetId: "default",
     createdAt: 10,
@@ -511,6 +527,7 @@ describe("ServerMessageSchema", () => {
             sessionStorage: "workspace",
             sessionDirectory: "/workspace/.chatwca/sessions",
             securityProfile: "workspace-sandboxed",
+            mounts: [],
             networkPolicy: "isolated",
             networkPolicySetId: "default",
             effectiveSecurityProfile: "workspace-sandboxed",

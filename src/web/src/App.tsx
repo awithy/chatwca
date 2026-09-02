@@ -138,7 +138,9 @@ export function App() {
     }
   }
 
-  async function createWorkspace(values: WorkspaceFormValues): Promise<void> {
+  async function createWorkspace(
+    values: WorkspaceFormValues & { readonly acknowledgeWritableMounts?: true },
+  ): Promise<void> {
     const knownIds = new Set(chat.workspaces.map((workspace) => workspace.id));
     const result = await runExclusive("workspace.create", () => client.send<"workspace.create">({
       type: "workspace.create",
@@ -146,8 +148,12 @@ export function App() {
       path: values.path,
       sessionStorage: values.sessionStorage,
       securityProfile: values.securityProfile,
+      mounts: [...values.mounts],
       networkPolicy: values.networkPolicy,
       networkPolicySetId: values.networkPolicySetId,
+      ...(values.acknowledgeWritableMounts === true
+        ? { acknowledgeWritableMounts: true as const }
+        : {}),
     }));
     const created = result.workspaces.find((workspace) => !knownIds.has(workspace.id));
     if (created !== undefined) {
@@ -161,10 +167,12 @@ export function App() {
       readonly name: string;
       readonly path?: string;
       readonly securityProfile?: WorkspaceFormValues["securityProfile"];
+      readonly mounts?: WorkspaceFormValues["mounts"];
       readonly networkPolicy?: WorkspaceFormValues["networkPolicy"];
       readonly networkPolicySetId?: string;
       readonly acknowledgeSecurityDowngrade?: true;
       readonly acknowledgeNetworkExposure?: true;
+      readonly acknowledgeWritableMounts?: true;
     },
   ): Promise<void> {
     await runExclusive("workspace.update", () => client.send({
@@ -175,6 +183,7 @@ export function App() {
       ...(values.securityProfile === undefined
         ? {}
         : { securityProfile: values.securityProfile }),
+      ...(values.mounts === undefined ? {} : { mounts: [...values.mounts] }),
       ...(values.networkPolicy === undefined
         ? {}
         : { networkPolicy: values.networkPolicy }),
@@ -186,6 +195,9 @@ export function App() {
         : {}),
       ...(values.acknowledgeNetworkExposure === true
         ? { acknowledgeNetworkExposure: true as const }
+        : {}),
+      ...(values.acknowledgeWritableMounts === true
+        ? { acknowledgeWritableMounts: true as const }
         : {}),
     }));
     if (values.path !== undefined && chat.selectedWorkspaceId === workspaceId) {

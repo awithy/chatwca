@@ -1,11 +1,17 @@
 import * as React from "react";
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 
+import {
+  MAX_WORKSPACE_MOUNTS,
+  WORKSPACE_MOUNT_NAME_PATTERN,
+  workspaceMountGuestPath,
+} from "../../../shared/protocol.js";
 import type {
   PublicManagedEgressConfig,
   PublicNetworkPolicySet,
   PublicSandboxConfig,
   SandboxNetworkPolicy,
+  WorkspaceMount,
   WorkspaceNetworkPolicyIssue,
   WorkspaceSecurityProfile,
   WorkspaceSessionStorage,
@@ -16,6 +22,7 @@ export interface WorkspaceFormValues {
   readonly path: string;
   readonly sessionStorage: WorkspaceSessionStorage;
   readonly securityProfile: WorkspaceSecurityProfile;
+  readonly mounts: readonly WorkspaceMount[];
   readonly networkPolicy: SandboxNetworkPolicy;
   readonly networkPolicySetId: string;
 }
@@ -102,6 +109,9 @@ export function WorkspaceForm({
         ? "workspace-sandboxed"
         : initialProfile,
   );
+  const [mounts, setMounts] = useState<readonly WorkspaceMount[]>(
+    initialValues?.mounts ?? [],
+  );
   const [networkPolicy, setNetworkPolicy] = useState<SandboxNetworkPolicy>(
     initialValues?.networkPolicy ?? "isolated",
   );
@@ -109,7 +119,7 @@ export function WorkspaceForm({
     initialValues?.networkPolicySetId ?? defaultPolicySet(publicManagedEgressConfig).id,
   );
   const [validationError, setValidationError] = useState<{
-    readonly field: "name" | "path";
+    readonly field: "name" | "path" | "mounts";
     readonly message: string;
   } | null>(null);
   const visibleError = validationError?.message ?? error;
@@ -142,6 +152,7 @@ export function WorkspaceForm({
       path: path.trim(),
       sessionStorage,
       securityProfile,
+      mounts: mounts.map((mount) => ({ ...mount, name: mount.name.trim(), source: mount.source.trim() })),
       networkPolicy,
       networkPolicySetId,
     };
@@ -151,6 +162,22 @@ export function WorkspaceForm({
     }
     if (values.path.length === 0) {
       setValidationError({ field: "path", message: "Enter the full path to an existing directory." });
+      return;
+    }
+    const mountNames = new Set<string>();
+    let invalidMount = false;
+    for (const mount of values.mounts) {
+      if (
+        !new RegExp(WORKSPACE_MOUNT_NAME_PATTERN, "u").test(mount.name) ||
+        mountNames.has(mount.name) || mount.source.length === 0 || !mount.source.startsWith("/")
+      ) invalidMount = true;
+      mountNames.add(mount.name);
+    }
+    if (invalidMount) {
+      setValidationError({
+        field: "mounts",
+        message: "Each mount needs a unique lowercase name and an absolute server directory path.",
+      });
       return;
     }
     setValidationError(null);
@@ -201,7 +228,7 @@ export function WorkspaceForm({
       />
       <p className="workspace-form-help" id={pathHelpId}>
         {pathLocked
-          ? "Close this workspace’s live conversations before changing its directory or security profile, network type, or destination policy."
+          ? "Close this workspace’s live conversations before changing its directory, filesystem mounts, security profile, network type, or destination policy."
           : "The server must be able to read and search this directory."}
       </p>
 
@@ -216,7 +243,10 @@ export function WorkspaceForm({
             onChange={(event) => {
               const profile = event.target.value as WorkspaceSecurityProfile;
               setSecurityProfile(profile);
-              if (!editing && profile !== "workspace-sandboxed") setNetworkPolicy("isolated");
+              if (!editing && profile !== "workspace-sandboxed") {
+                setNetworkPolicy("isolated");
+                setMounts([]);
+              }
               setValidationError(null);
             }}
           >
@@ -306,6 +336,98 @@ export function WorkspaceForm({
             </dl>
           )}
         </section>
+      )}
+      {sandboxNetworkRelevant && (
+        <fieldset
+          className="workspace-mounts-control"
+          disabled={submitting || securityControlsLocked}
+          aria-describedby={validationError?.field === "mounts" ? errorId : undefined}
+        >
+          <legend>Additional filesystem mounts</legend>
+          <p className="workspace-form-help">
+            Existing server directories are exposed under <code>/mounts/&lt;name&gt;</code>. These paths may contain sensitive host data.
+          </p>
+          {mounts.map((mount, index) => (
+            <div className="workspace-mount-row" key={index}>
+              <label htmlFor={`${formId}-mount-name-${String(index)}`}>Mount name</label>
+              <input
+                id={`${formId}-mount-name-${String(index)}`}
+                value={mount.name}
+                spellCheck={false}
+                autoComplete="off"
+                placeholder="shared-data"
+                onChange={(event) => {
+                  const name = event.target.value;
+                  setMounts((current) => current.map((item, itemIndex) =>
+                    itemIndex === index ? { ...item, name } : item
+                  ));
+                  setValidationError(null);
+                }}
+              />
+              <label htmlFor={`${formId}-mount-source-${String(index)}`}>Server directory</label>
+              <input
+                id={`${formId}-mount-source-${String(index)}`}
+                value={mount.source}
+                spellCheck={false}
+                autoComplete="off"
+                placeholder="/srv/shared/data"
+                onChange={(event) => {
+                  const source = event.target.value;
+                  setMounts((current) => current.map((item, itemIndex) =>
+                    itemIndex === index ? { ...item, source } : item
+                  ));
+                  setValidationError(null);
+                }}
+              />
+              <label htmlFor={`${formId}-mount-access-${String(index)}`}>Access</label>
+              <select
+                id={`${formId}-mount-access-${String(index)}`}
+                value={mount.access}
+                onChange={(event) => {
+                  const access = event.target.value as WorkspaceMount["access"];
+                  setMounts((current) => current.map((item, itemIndex) =>
+                    itemIndex === index ? { ...item, access } : item
+                  ));
+                  setValidationError(null);
+                }}
+              >
+                <option value="read-only">Read-only</option>
+                <option value="read-write">Read-write</option>
+              </select>
+              <div className="workspace-mount-destination">
+                Guest path: <code>{workspaceMountGuestPath(mount.name || "name")}</code>
+              </div>
+              <button
+                type="button"
+                className="workspace-mount-remove"
+                onClick={() => setMounts((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+              >
+                Remove mount
+              </button>
+            </div>
+          ))}
+          <button
+            type="button"
+            className="workspace-mount-add"
+            disabled={submitting || securityControlsLocked || mounts.length >= MAX_WORKSPACE_MOUNTS}
+            onClick={() => {
+              let sequence = mounts.length + 1;
+              while (mounts.some(({ name }) => name === `mount-${String(sequence)}`)) sequence += 1;
+              setMounts((current) => [...current, {
+                name: `mount-${String(sequence)}`,
+                source: "",
+                access: "read-only",
+              }]);
+            }}
+          >
+            Add mount
+          </button>
+          {mounts.some(({ access }) => access === "read-write") && (
+            <p className="workspace-form-warning">
+              Read-write mounts let sandboxed tools modify files outside the workspace.
+            </p>
+          )}
+        </fieldset>
       )}
       {editing && initialValues !== undefined && (
         <dl className="workspace-profile-summary">

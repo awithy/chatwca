@@ -17,6 +17,7 @@ ChatWCA will add a workspace security profile that routes every enabled coding t
 The initial profile is deliberately strict:
 
 - the selected workspace is mounted read/write at `/workspace`;
+- optional workspace-specific directories are mounted read-only or read-write at `/mounts/<name>`;
 - `.chatwca` is hidden behind an ephemeral mount;
 - the worker has no host network namespace;
 - the root filesystem is synthetic rather than a read-only host root;
@@ -56,7 +57,7 @@ The initial release will not provide:
 - Docker, VM, or remote-worker backends;
 - arbitrary extension tools in sandboxed runtimes;
 - cgroup-based per-conversation CPU, memory, disk, or process quotas;
-- a general-purpose host filesystem broker; or
+- model-directed mount changes while a conversation is live; or
 - a guarantee that an unrestricted Pi extension running in the parent cannot bypass the sandbox boundary.
 
 The separate managed-egress profile described in [`network-sandbox-design.md`](network-sandbox-design.md) supports package installation and administrator-filtered network access without weakening the isolated namespace boundary.
@@ -86,7 +87,8 @@ The profile still permits:
 
 - arbitrary modification of the workspace, including `.git`;
 - malicious source, test, hook, dependency, and build-script changes;
-- reads of all files intentionally mounted in the workspace or read-only toolchain mounts;
+- reads of all files intentionally mounted in the workspace, workspace-specific mounts, or read-only toolchain mounts;
+- modifications anywhere exposed by a workspace-specific read-write mount;
 - workspace content entering model context and leaving through the configured provider;
 - workspace content appearing in assistant responses to an authorized client;
 - resource exhaustion before process-wide limits or the host intervene; and
@@ -176,7 +178,7 @@ The configured Bubblewrap executable must be:
 
 The server requires Bubblewrap 0.6.1 or newer. `disabled` mode does not inspect or execute Bubblewrap. `optional` and `required` modes validate all sandbox configuration and run a functional probe during startup. Operators who want the server to run without a working sandbox must explicitly select `disabled`.
 
-Extra read-only mounts are administrator trust decisions. Each source is canonicalized and must not overlap a workspace, the ChatWCA data directory, the Pi agent directory, `/proc`, `/dev`, `/sys`, `/run`, `/tmp`, `/var/tmp`, `/workspace`, or the worker control paths. Documentation will warn against mounting home directories, credential stores, caches containing tokens, or service sockets.
+Extra process-wide read-only mounts are administrator trust decisions and remain separate from workspace-specific mounts. Each source is canonicalized and must not overlap a workspace, the ChatWCA data directory, the Pi agent directory, `/proc`, `/dev`, `/sys`, `/run`, `/tmp`, `/var/tmp`, `/workspace`, or the worker control paths. Documentation will warn against mounting home directories, credential stores, caches containing tokens, or service sockets.
 
 ### 7.1 Per-workspace managed-egress policy sets
 
@@ -219,12 +221,21 @@ PRAGMA user_version = 3;
 
 All existing rows migrate to `unrestricted`. The migration does not create files or change Pi sessions.
 
-### 8.2 Workspace projections
+### 8.2 Workspace-specific filesystem mounts
+
+Schema version 6 adds `workspace_mounts`, keyed by workspace and bounded lowercase mount name. Each row stores a canonical directory source and `read-only` or `read-write` access. The guest destination is derived as `/mounts/<name>` and is never browser-selectable. A v5-to-v6 migration creates the child table empty.
+
+The browser may select any existing directory accessible to the ChatWCA service user, subject to mandatory exclusions: sources cannot overlap the workspace, another mount, ChatWCA data, Pi state or session storage, helper paths, or administrator runtime mounts. Regular files are unsupported. Every mounted tree receives the same bounded no-follow Unix-socket scan as the workspace. Read-write additions or upgrades require explicit confirmation. Mount changes are rejected while the workspace owns a live runtime.
+
+Because ChatWCA has no authentication, this deliberately gives every accepted client the ability to expose non-protected host directories to tools and the model, and to grant modifications where the service user has write access. The UI must disclose that authority clearly.
+
+### 8.3 Workspace projections
 
 Workspace wire objects add:
 
 ```ts
 interface WorkspaceSecurityProjection {
+  mounts: WorkspaceMount[];                           // Stored canonical sources and access
   securityProfile: WorkspaceSecurityProfile;          // stored preference
   effectiveSecurityProfile: WorkspaceSecurityProfile | null;
   usable: boolean;
@@ -240,7 +251,7 @@ interface WorkspaceSecurityProjection {
 
 `ConversationState` adds `securityProfile`, containing the immutable effective profile of that live runtime.
 
-### 8.3 Commands
+### 8.4 Commands
 
 `workspace.create` requires `securityProfile`. `workspace.update` accepts an optional `securityProfile` in addition to name and path.
 
@@ -263,8 +274,9 @@ Before starting a sandboxed runtime, the server revalidates:
 3. that `.chatwca` is absent or a real directory, never a symlink;
 4. that the workspace does not overlap the canonical ChatWCA data directory;
 5. that the workspace does not overlap the canonical Pi agent directory;
-6. that the workspace does not overlap any extra read-only mount; and
-7. that no Unix-domain socket is present in the initial workspace walk.
+6. that the workspace and per-workspace mounts do not overlap any extra process-wide read-only mount or one another;
+7. that each mount remains the same canonical directory and has sufficient read/search and optional write access; and
+8. that no Unix-domain socket is present in the initial workspace or mount walks.
 
 "Overlap" means either path is equal to or an ancestor of the other. Rejecting overlap is preferable to relying on mount ordering to hide SQLite, credentials, or global sessions. In particular, a deployment checkout whose default `./data` directory is beneath it cannot itself be registered as a sandboxed workspace unless `CHATWCA_DATA_DIR` is moved outside that checkout.
 
@@ -302,6 +314,9 @@ bwrap
   --tmpfs /var/tmp
   --dir /etc
   --dir /app
+  --dir /mounts
+  --ro-bind <canonical-read-source> /mounts/<name>
+  --bind <canonical-write-source> /mounts/<name>
   --bind <canonical-workspace> /workspace
   --tmpfs /workspace/.chatwca
   --ro-bind-data <worker-source-fd> /app/worker.mjs
@@ -309,7 +324,7 @@ bwrap
   /usr/bin/node /app/worker.mjs
 ```
 
-Arguments are assembled as an array and never through a shell. Conditional compatibility symlinks are created only when their `/usr` targets exist. Administrator mounts are inserted before the workspace mount and use their canonical source and fixed destination.
+Arguments are assembled as an array and never through a shell. Conditional compatibility symlinks are created only when their `/usr` targets exist. Administrator mounts are inserted before the workspace mount and use their canonical source and fixed destination. Workspace-specific mounts use only derived `/mounts/<name>` destinations and the selected `--ro-bind` or `--bind` mode.
 
 The root contains no bind of `/`, `/home`, `/etc`, `/run`, `/sys`, host `/tmp`, ChatWCA data, or the Pi agent directory. Minimal `passwd`, `group`, `hosts`, and `nsswitch.conf` files are supplied through `--ro-bind-data`; host configuration files are not copied wholesale.
 
@@ -504,7 +519,8 @@ The unrestricted runtime keeps current Pi behavior. Arbitrary unrestricted exten
 The sandboxed system prompt reports `/workspace` as the tool working directory and adds concise constraints:
 
 - tools operate in a network-isolated workspace sandbox;
-- host absolute paths are not available;
+- host absolute paths are not available unless explicitly exposed under `/mounts`;
+- every additional mount and its read-only/read-write mode is listed;
 - `/workspace/.chatwca` is ephemeral and must not be used;
 - package downloads and external services are unavailable; and
 - command temporary files disappear after abort, close, or eviction.
@@ -568,11 +584,11 @@ The control is hidden or fixed when the server mode permits only one choice. In 
 
 ### 17.1 Add and edit modal
 
-The workspace add/edit form is displayed in a responsive modal dialog rather than inline in the narrow sidebar. Workspace list, selection, and action triggers remain in the sidebar. The modal provides enough width for path, security profile, sandbox network type, and managed-egress policy-set controls and disclosures without compressing the conversation list.
+The workspace add/edit form is displayed in a responsive modal dialog rather than inline in the narrow sidebar. Workspace list, selection, and action triggers remain in the sidebar. The modal provides enough width for path, filesystem mounts, security profile, sandbox network type, and managed-egress policy-set controls and disclosures without compressing the conversation list.
 
 The dialog must use native or equivalent accessible modal semantics: `role="dialog"`, `aria-modal="true"`, an accessible title, initial focus, contained Tab/Shift+Tab navigation, Escape cancellation when submission is not pending, background interaction suppression, and focus restoration to the button that opened it. Small viewports use an inset full-height sheet while retaining a visible title and actions. Validation and server errors remain associated with the relevant controls; opening a confirmation must not close or reset the underlying form.
 
-Editing path, security profile, network type, or destination policy set is allowed only after all live conversations in that workspace are closed. The name remains editable independently. Reducing the security profile requires a confirmation stating that tools will again run with the ChatWCA server user's host permissions. Enabling managed egress or changing its destination set requires a separate workspace-disclosure confirmation and server acknowledgement.
+Editing path, filesystem mounts, security profile, network type, or destination policy set is allowed only after all live conversations in that workspace are closed. The name remains editable independently. Reducing the security profile requires a confirmation stating that tools will again run with the ChatWCA server user's host permissions. Enabling managed egress or changing its destination set requires a separate workspace-disclosure confirmation and server acknowledgement.
 
 When **Managed egress** is selected, the form offers only administrator-defined named policy sets returned by `/api/config`. It shows the selected set's normalized domains and ports as read-only details; it does not provide domain or port text inputs and no one-time approval action. A configured set that is no longer available remains visible as unavailable so the operator can deliberately choose a valid replacement or switch to isolated networking.
 
@@ -585,12 +601,12 @@ Workspace Info shows:
 - the selected set's normalized allowed domains and ports;
 - mandatory local/private denial and protocol/TLS properties;
 - `.git` writable status;
-- configured read-only runtime mounts; and
+- configured process-wide read-only runtime mounts and workspace-specific mount sources, guest paths, and access; and
 - the workspace-egress and remote-model disclosure warnings.
 
 The conversation header shows an always-visible **Sandboxed · Network isolated**, **Sandboxed · Managed egress**, or **Unrestricted** badge derived from immutable `ConversationState`, not current form state. Managed conversation details also show the immutable destination policy-set label or ID. A policy-blocked workspace remains visible but cannot create or open a conversation.
 
-`GET /api/config` adds only client-safe sandbox data: mode, selectable profiles, selectable named destination sets and their normalized public rules, warning text, and whether the functional probe succeeded. It does not expose Bubblewrap/helper paths, approved roots, read-only mounts, protected paths, proxy sockets, resolved addresses, or private diagnostics.
+`GET /api/config` adds only client-safe sandbox data: mode, selectable profiles, selectable named destination sets and their normalized public rules, warning text, and whether the functional probe succeeded. It does not expose Bubblewrap/helper paths, approved roots, process-wide read-only mounts, protected paths, proxy sockets, resolved addresses, or private diagnostics. Workspace objects do expose their own browser-configured mount sources and modes.
 
 ## 18. Resource controls
 
@@ -695,20 +711,21 @@ Tests must run both directly and under the provided systemd unit constraints. Un
 9. **Hardening tests** — escape attempts, malformed IPC, systemd operation, concurrent profiles.
 10. **Named destination sets** — schema v5, administrator ceiling/subset validation, workspace selection, immutable runtime/audit identity, and cross-workspace isolation tests.
 11. **Workspace modal** — move add/edit out of the sidebar with accessible focus management, responsive layout, policy-set disclosure, and command-payload tests.
-12. **Follow-on hardening** — migration compatibility, unavailable-set fail-closed behavior, operations guidance, and acceptance mapping.
+12. **Workspace filesystem mounts** — schema v6, canonical directory admission, `/mounts/<name>` bindings, writable acknowledgement, immutable runtime snapshots, UI, and real-profile tests.
+13. **Follow-on hardening** — migration compatibility, unavailable-set fail-closed behavior, operations guidance, and acceptance mapping.
 
 ## 22. Acceptance criteria
 
 The feature is complete when:
 
 - workspace rows persist a requested security profile and expose the effective profile;
-- browser commands cannot exceed `CHATWCA_SANDBOX_MODE` or approved workspace roots;
+- browser commands cannot exceed `CHATWCA_SANDBOX_MODE` or approved workspace roots, while explicitly configured workspace mounts remain constrained by mandatory protected-path, overlap, directory, permission, and socket checks;
 - required mode applies sandboxing to every usable conversation;
 - every enabled sandboxed tool executes through the per-conversation worker;
 - no model-directed path is opened and no model-directed process is spawned in the parent;
 - sandboxed runtimes load no arbitrary Pi extension or unapproved tool;
 - tool processes receive no parent credentials or Pi session variables;
-- the synthetic root mounts only the workspace, `/usr`, and explicit read-only paths;
+- the synthetic root mounts only the workspace, `/usr`, explicit process-wide read-only paths, and the workspace's validated `/mounts/<name>` directories;
 - ChatWCA data, Pi state, and all canonical session stores remain outside the namespace;
 - `.chatwca` is hidden and `.git` is explicitly documented as writable;
 - IPv4, IPv6, DNS, and loopback probes fail inside the worker;

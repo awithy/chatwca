@@ -57,6 +57,7 @@ const workspace = {
   sessionStorage: "pi-default",
   sessionDirectory: null,
   securityProfile: "unrestricted",
+  mounts: [],
   networkPolicy: "isolated",
   effectiveSecurityProfile: "unrestricted",
   effectiveNetworkPolicy: null,

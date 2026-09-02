@@ -16,13 +16,18 @@ import {
   toAppError,
 } from "../shared/errors.js";
 import {
+  MAX_WORKSPACE_MOUNTS,
   NETWORK_POLICY_SET_ID_MAX_LENGTH,
   NETWORK_POLICY_SET_ID_PATTERN,
+  WORKSPACE_MOUNT_NAME_PATTERN,
+  WORKSPACE_MOUNT_SOURCE_MAX_LENGTH,
   type ManagedEgressMode,
   type NetworkPolicySetId,
   type SandboxMode,
   type SandboxNetworkPolicy,
   type Workspace,
+  type WorkspaceMount,
+  type WorkspaceMountAccess,
   type WorkspaceNetworkPolicyIssue,
   type WorkspacePolicyIssue,
   type WorkspaceSecurityProfile,
@@ -45,6 +50,13 @@ interface WorkspaceRow {
   readonly network_policy_set_id: NetworkPolicySetId;
   readonly created_at: number;
   readonly updated_at: number;
+}
+
+interface WorkspaceMountRow {
+  readonly workspace_id: string;
+  readonly name: string;
+  readonly source_path: string;
+  readonly access: WorkspaceMountAccess;
 }
 
 export const WORKSPACE_SESSION_DIRECTORY = path.join(".chatwca", "sessions");
@@ -114,7 +126,7 @@ export interface WorkspaceRepositoryOptions {
   readonly clock?: () => number;
   readonly fileSystem?: WorkspaceFileSystem;
   readonly policy?: Readonly<WorkspacePolicyInputs>;
-  readonly sandboxAdmission?: Pick<SandboxWorkspaceAdmission, "admit">;
+  readonly sandboxAdmission?: Pick<SandboxWorkspaceAdmission, "admit" | "admitMount">;
 }
 
 export interface RuntimeWorkspacePolicy {
@@ -122,6 +134,7 @@ export interface RuntimeWorkspacePolicy {
   readonly cwd: string;
   readonly sessionDirectory: string | null;
   readonly securityProfile: WorkspaceSecurityProfile;
+  readonly mounts?: readonly WorkspaceMount[];
   readonly networkPolicy: SandboxNetworkPolicy | null;
   /** Stored workspace selection, retained even while networking is isolated. */
   readonly networkPolicySetId: NetworkPolicySetId;
@@ -134,18 +147,22 @@ export interface CreateWorkspaceInput {
   readonly path: string;
   readonly sessionStorage?: WorkspaceSessionStorage;
   readonly securityProfile?: WorkspaceSecurityProfile;
+  readonly mounts?: readonly WorkspaceMount[];
   readonly networkPolicy?: SandboxNetworkPolicy;
   readonly networkPolicySetId?: NetworkPolicySetId;
+  readonly acknowledgeWritableMounts?: true;
 }
 
 export interface UpdateWorkspaceInput {
   readonly name?: string;
   readonly path?: string;
   readonly securityProfile?: WorkspaceSecurityProfile;
+  readonly mounts?: readonly WorkspaceMount[];
   readonly networkPolicy?: SandboxNetworkPolicy;
   readonly networkPolicySetId?: NetworkPolicySetId;
   readonly acknowledgeSecurityDowngrade?: true;
   readonly acknowledgeNetworkExposure?: true;
+  readonly acknowledgeWritableMounts?: true;
 }
 
 function isPathContained(parent: string, child: string): boolean {
@@ -161,7 +178,7 @@ function pathsOverlap(left: string, right: string): boolean {
   return isPathContained(left, right) || isPathContained(right, left);
 }
 
-function workspaceFromRow(row: WorkspaceRow): Workspace {
+function workspaceFromRow(row: WorkspaceRow, mounts: readonly WorkspaceMount[]): Workspace {
   if (
     row.security_profile !== "unrestricted" &&
     row.security_profile !== "workspace-sandboxed"
@@ -181,6 +198,7 @@ function workspaceFromRow(row: WorkspaceRow): Workspace {
     sessionStorage: row.session_storage,
     sessionDirectory: workspaceSessionDirectory(row.path, row.session_storage),
     securityProfile: row.security_profile,
+    mounts: [...mounts],
     networkPolicy: row.network_policy,
     networkPolicySetId: row.network_policy_set_id,
     createdAt: row.created_at,
@@ -221,16 +239,17 @@ function isDuplicatePathConstraint(error: unknown): boolean {
  * Persistent CRUD boundary for ChatWCA-owned workspace metadata.
  *
  * The repository does not own the SQLite connection and never mutates anything
- * beneath a workspace path. Filesystem access is limited to validating and
- * projecting the registered directory itself.
+ * beneath a workspace or mount path. Filesystem access is limited to
+ * validating registered directories and their sandbox policy.
  */
 export class WorkspaceRepository {
+  readonly #connection: Database.Database;
   readonly #cwd: string;
   readonly #uuid: () => string;
   readonly #clock: () => number;
   readonly #fileSystem: WorkspaceFileSystem;
   readonly #policy: Readonly<WorkspacePolicyInputs>;
-  readonly #sandboxAdmission: Pick<SandboxWorkspaceAdmission, "admit">;
+  readonly #sandboxAdmission: Pick<SandboxWorkspaceAdmission, "admit" | "admitMount">;
   readonly #networkPolicySets: ReadonlyMap<string, CompiledNetworkPolicySet>;
   readonly #listStatement: Database.Statement<[], WorkspaceRow>;
   readonly #getStatement: Database.Statement<[string], WorkspaceRow>;
@@ -241,11 +260,15 @@ export class WorkspaceRepository {
     [string, string, WorkspaceSecurityProfile, SandboxNetworkPolicy, NetworkPolicySetId, number, string]
   >;
   readonly #deleteStatement: Database.Statement<[string]>;
+  readonly #listMountsStatement: Database.Statement<[string], WorkspaceMountRow>;
+  readonly #insertMountStatement: Database.Statement<[string, string, string, WorkspaceMountAccess]>;
+  readonly #deleteMountsStatement: Database.Statement<[string]>;
 
   constructor(
     connection: Database.Database,
     options: WorkspaceRepositoryOptions = {},
   ) {
+    this.#connection = connection;
     this.#cwd = path.resolve(options.cwd ?? process.cwd());
     this.#uuid = options.uuid ?? randomUUID;
     this.#clock = options.clock ?? Date.now;
@@ -282,6 +305,15 @@ export class WorkspaceRepository {
       this.#deleteStatement = connection.prepare<[string]>(
         "DELETE FROM workspaces WHERE id = ?",
       );
+      this.#listMountsStatement = connection.prepare<[string], WorkspaceMountRow>(
+        "SELECT workspace_id, name, source_path, access FROM workspace_mounts WHERE workspace_id = ? ORDER BY name",
+      );
+      this.#insertMountStatement = connection.prepare<[string, string, string, WorkspaceMountAccess]>(
+        "INSERT INTO workspace_mounts (workspace_id, name, source_path, access) VALUES (?, ?, ?, ?)",
+      );
+      this.#deleteMountsStatement = connection.prepare<[string]>(
+        "DELETE FROM workspace_mounts WHERE workspace_id = ?",
+      );
     } catch (error) {
       throw toAppError(error, { source: "database" });
     }
@@ -289,7 +321,7 @@ export class WorkspaceRepository {
 
   list(): WorkspaceSummary[] {
     return this.#database(() => this.#listStatement.all()
-      .map((row) => this.#summary(workspaceFromRow(row)))
+      .map((row) => this.#summary(this.#workspaceFromRow(row)))
       .sort(compareWorkspaces));
   }
 
@@ -330,12 +362,22 @@ export class WorkspaceRepository {
         workspaceRoots: this.#policy.workspaceRoots,
         protectedPaths: this.#protectedPaths(),
       });
+      for (const mount of workspace.mounts) {
+        await this.#sandboxAdmission.admitMount({
+          sourcePath: mount.source,
+          writable: mount.access === "read-write",
+        });
+      }
     }
+    const mounts = evaluation.effectiveSecurityProfile === "workspace-sandboxed"
+      ? Object.freeze(workspace.mounts.map((mount) => Object.freeze({ ...mount })))
+      : Object.freeze([]);
     return Object.freeze({
       workspaceId: workspace.id,
       cwd: workspace.path,
       sessionDirectory: workspace.sessionDirectory,
       securityProfile: evaluation.effectiveSecurityProfile,
+      mounts,
       networkPolicy: evaluation.effectiveNetworkPolicy,
       networkPolicySetId: workspace.networkPolicySetId,
       effectiveNetworkPolicySetId: evaluation.effectiveNetworkPolicySetId,
@@ -386,23 +428,36 @@ export class WorkspaceRepository {
     ) {
       throw new AppError(ERROR_CODES.INVALID_WORKSPACE_PATH);
     }
-    this.#assertPathPolicy(canonicalPath, securityProfile, networkPolicy);
+    const mounts = this.#validMounts(input.mounts ?? [], canonicalPath);
+    const addsWritableMounts = mounts.some(({ access }) => access === "read-write");
+    if (input.acknowledgeWritableMounts === true && !addsWritableMounts) {
+      throw new AppError(ERROR_CODES.INVALID_COMMAND);
+    }
+    if (addsWritableMounts && input.acknowledgeWritableMounts !== true) {
+      throw new AppError(ERROR_CODES.INVALID_COMMAND);
+    }
+    this.#assertPathPolicy(canonicalPath, securityProfile, networkPolicy, mounts);
     const id = this.#uuid();
     const now = this.#clock();
 
     this.#database(() => {
       try {
-        this.#insertStatement.run(
-          id,
-          name,
-          canonicalPath,
-          sessionStorage,
-          securityProfile,
-          networkPolicy,
-          networkPolicySetId,
-          now,
-          now,
-        );
+        this.#connection.transaction(() => {
+          this.#insertStatement.run(
+            id,
+            name,
+            canonicalPath,
+            sessionStorage,
+            securityProfile,
+            networkPolicy,
+            networkPolicySetId,
+            now,
+            now,
+          );
+          for (const mount of mounts) {
+            this.#insertMountStatement.run(id, mount.name, mount.source, mount.access);
+          }
+        })();
       } catch (error) {
         if (isDuplicatePathConstraint(error)) {
           throw toAppError(error, {
@@ -421,6 +476,7 @@ export class WorkspaceRepository {
       sessionStorage,
       sessionDirectory,
       securityProfile,
+      mounts: [...mounts],
       networkPolicy,
       networkPolicySetId,
       createdAt: now,
@@ -437,6 +493,7 @@ export class WorkspaceRepository {
       changes.name === undefined &&
       changes.path === undefined &&
       changes.securityProfile === undefined &&
+      changes.mounts === undefined &&
       changes.networkPolicy === undefined &&
       changes.networkPolicySetId === undefined
     ) {
@@ -517,6 +574,21 @@ export class WorkspaceRepository {
             changes.path,
             current.sessionStorage === "workspace",
           );
+    const mounts = changes.mounts === undefined
+      ? current.mounts
+      : this.#validMounts(changes.mounts, canonicalPath);
+    const previousMounts = new Map(current.mounts.map((mount) => [mount.name, mount]));
+    const addsWritableMounts = changes.mounts !== undefined && mounts.some((mount) => {
+      if (mount.access !== "read-write") return false;
+      const previous = previousMounts.get(mount.name);
+      return previous === undefined || previous.access !== "read-write" || previous.source !== mount.source;
+    });
+    if (changes.acknowledgeWritableMounts === true && !addsWritableMounts) {
+      throw new AppError(ERROR_CODES.INVALID_COMMAND);
+    }
+    if (addsWritableMounts && changes.acknowledgeWritableMounts !== true) {
+      throw new AppError(ERROR_CODES.INVALID_COMMAND);
+    }
     const sessionDirectory = workspaceSessionDirectory(
       canonicalPath,
       current.sessionStorage,
@@ -531,27 +603,36 @@ export class WorkspaceRepository {
     if (
       changes.path !== undefined ||
       changes.securityProfile !== undefined ||
+      changes.mounts !== undefined ||
       changes.networkPolicy !== undefined ||
       changes.networkPolicySetId !== undefined
     ) {
-      this.#assertPathPolicy(canonicalPath, securityProfile, networkPolicy);
+      this.#assertPathPolicy(canonicalPath, securityProfile, networkPolicy, mounts);
     }
     const now = this.#clock();
 
     this.#database(() => {
       try {
-        const result = this.#updateStatement.run(
-          name,
-          canonicalPath,
-          securityProfile,
-          networkPolicy,
-          networkPolicySetId,
-          now,
-          workspaceId,
-        );
-        if (result.changes !== 1) {
-          throw new AppError(ERROR_CODES.WORKSPACE_NOT_FOUND);
-        }
+        this.#connection.transaction(() => {
+          const result = this.#updateStatement.run(
+            name,
+            canonicalPath,
+            securityProfile,
+            networkPolicy,
+            networkPolicySetId,
+            now,
+            workspaceId,
+          );
+          if (result.changes !== 1) {
+            throw new AppError(ERROR_CODES.WORKSPACE_NOT_FOUND);
+          }
+          if (changes.mounts !== undefined) {
+            this.#deleteMountsStatement.run(workspaceId);
+            for (const mount of mounts) {
+              this.#insertMountStatement.run(workspaceId, mount.name, mount.source, mount.access);
+            }
+          }
+        })();
       } catch (error) {
         if (isDuplicatePathConstraint(error)) {
           throw toAppError(error, {
@@ -569,6 +650,7 @@ export class WorkspaceRepository {
       path: canonicalPath,
       sessionDirectory,
       securityProfile,
+      mounts: [...mounts],
       networkPolicy,
       networkPolicySetId,
       updatedAt: now,
@@ -589,7 +671,80 @@ export class WorkspaceRepository {
     if (row === undefined) {
       throw new AppError(ERROR_CODES.WORKSPACE_NOT_FOUND);
     }
-    return workspaceFromRow(row);
+    return this.#workspaceFromRow(row);
+  }
+
+  #workspaceFromRow(row: WorkspaceRow): Workspace {
+    const mounts = this.#listMountsStatement.all(row.id).map((mount): WorkspaceMount => {
+      if (
+        mount.workspace_id !== row.id ||
+        !new RegExp(WORKSPACE_MOUNT_NAME_PATTERN, "u").test(mount.name) ||
+        !path.isAbsolute(mount.source_path) ||
+        mount.source_path.length > WORKSPACE_MOUNT_SOURCE_MAX_LENGTH ||
+        (mount.access !== "read-only" && mount.access !== "read-write")
+      ) {
+        throw new AppError(ERROR_CODES.DATABASE_ERROR);
+      }
+      return Object.freeze({
+        name: mount.name,
+        source: mount.source_path,
+        access: mount.access,
+      });
+    });
+    if (mounts.length > MAX_WORKSPACE_MOUNTS) {
+      throw new AppError(ERROR_CODES.DATABASE_ERROR);
+    }
+    return workspaceFromRow(row, Object.freeze(mounts));
+  }
+
+  #validMounts(input: readonly WorkspaceMount[], workspacePath: string): readonly WorkspaceMount[] {
+    if (!Array.isArray(input) || input.length > MAX_WORKSPACE_MOUNTS) {
+      throw new AppError(ERROR_CODES.INVALID_WORKSPACE_MOUNT);
+    }
+    const mounts: WorkspaceMount[] = [];
+    const names = new Set<string>();
+    for (const candidate of input) {
+      if (
+        typeof candidate !== "object" || candidate === null ||
+        typeof candidate.name !== "string" ||
+        !new RegExp(WORKSPACE_MOUNT_NAME_PATTERN, "u").test(candidate.name) ||
+        names.has(candidate.name) ||
+        typeof candidate.source !== "string" ||
+        candidate.source.length > WORKSPACE_MOUNT_SOURCE_MAX_LENGTH ||
+        !path.isAbsolute(candidate.source) ||
+        (candidate.access !== "read-only" && candidate.access !== "read-write")
+      ) {
+        throw new AppError(ERROR_CODES.INVALID_WORKSPACE_MOUNT);
+      }
+      try {
+        const source = path.normalize(this.#fileSystem.realpath(candidate.source));
+        if (!path.isAbsolute(source) || !this.#fileSystem.stat(source).isDirectory()) {
+          throw new Error("mount source is not a directory");
+        }
+        this.#fileSystem.access(
+          source,
+          fsConstants.R_OK | fsConstants.X_OK |
+            (candidate.access === "read-write" ? fsConstants.W_OK : 0),
+        );
+        if (
+          pathsOverlap(source, workspacePath) ||
+          this.#protectedPaths().some((protectedPath) => pathsOverlap(source, protectedPath)) ||
+          mounts.some((mount) => pathsOverlap(source, mount.source))
+        ) {
+          throw new Error("mount source overlaps another admitted path");
+        }
+        names.add(candidate.name);
+        mounts.push(Object.freeze({
+          name: candidate.name,
+          source,
+          access: candidate.access,
+        }));
+      } catch (error) {
+        if (error instanceof AppError) throw error;
+        throw new AppError(ERROR_CODES.INVALID_WORKSPACE_MOUNT, { cause: error });
+      }
+    }
+    return Object.freeze(mounts);
   }
 
   #validName(input: string): string {
@@ -644,6 +799,7 @@ export class WorkspaceRepository {
     canonicalPath: string,
     storedProfile: WorkspaceSecurityProfile,
     networkPolicy: SandboxNetworkPolicy,
+    mounts: readonly WorkspaceMount[] = [],
   ): void {
     const workspace: Workspace = {
       id: "policy-candidate",
@@ -652,6 +808,7 @@ export class WorkspaceRepository {
       sessionStorage: "pi-default",
       sessionDirectory: null,
       securityProfile: storedProfile,
+      mounts: [...mounts],
       networkPolicy,
       networkPolicySetId: DEFAULT_NETWORK_POLICY_SET_ID,
       createdAt: 0,
@@ -709,6 +866,24 @@ export class WorkspaceRepository {
         )
       ) {
         return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  #mountsAvailable(mounts: readonly WorkspaceMount[]): boolean {
+    try {
+      for (const mount of mounts) {
+        const canonical = path.normalize(this.#fileSystem.realpath(mount.source));
+        if (canonical !== path.normalize(mount.source)) return false;
+        if (!this.#fileSystem.stat(canonical).isDirectory()) return false;
+        this.#fileSystem.access(
+          canonical,
+          fsConstants.R_OK | fsConstants.X_OK |
+            (mount.access === "read-write" ? fsConstants.W_OK : 0),
+        );
       }
       return true;
     } catch {
@@ -817,10 +992,20 @@ export class WorkspaceRepository {
     }
 
     if (policyIssue === null && effectiveSecurityProfile === "workspace-sandboxed") {
-      if (this.#protectedPaths().some((protectedPath) =>
-        pathsOverlap(workspace.path, protectedPath)
-      )) {
+      const mountOverlap = workspace.mounts.some((mount, index) =>
+        pathsOverlap(workspace.path, mount.source) ||
+        this.#protectedPaths().some((protectedPath) => pathsOverlap(mount.source, protectedPath)) ||
+        workspace.mounts.some((other, otherIndex) =>
+          index !== otherIndex && pathsOverlap(mount.source, other.source)
+        )
+      );
+      if (
+        this.#protectedPaths().some((protectedPath) => pathsOverlap(workspace.path, protectedPath)) ||
+        mountOverlap
+      ) {
         policyIssue = "protected_path_overlap";
+      } else if (!this.#mountsAvailable(workspace.mounts)) {
+        policyIssue = "mount_unavailable";
       }
     }
 

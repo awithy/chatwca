@@ -20,6 +20,12 @@ export interface SandboxAdmissionPolicy {
   readonly protectedPaths: readonly string[];
 }
 
+export interface SandboxMountAdmissionPolicy {
+  /** Canonical directory stored with the workspace. */
+  readonly sourcePath: string;
+  readonly writable: boolean;
+}
+
 export interface SandboxAdmissionBounds {
   readonly maxEntries: number;
   readonly deadlineMs: number;
@@ -119,6 +125,30 @@ export class SandboxWorkspaceAdmission {
       // Detect replacement of the registered directory during the bounded walk.
       if (path.normalize(await this.#fileSystem.realpath(expected)) !== expected) {
         throw new Error("workspace canonical identity changed during admission");
+      }
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError(ERROR_CODES.SANDBOX_WORKSPACE_REJECTED, { cause: error });
+    }
+  }
+
+  async admitMount(policy: Readonly<SandboxMountAdmissionPolicy>): Promise<void> {
+    try {
+      const expected = path.normalize(policy.sourcePath);
+      const canonical = path.normalize(await this.#fileSystem.realpath(expected));
+      if (canonical !== expected) throw new Error("mount canonical identity changed");
+      const metadata = await this.#fileSystem.lstat(canonical);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+        throw new Error("mount source is not a real directory");
+      }
+      await this.#fileSystem.access(
+        canonical,
+        fsConstants.R_OK | fsConstants.X_OK |
+          (policy.writable ? fsConstants.W_OK : 0),
+      );
+      await this.#rejectSockets(canonical);
+      if (path.normalize(await this.#fileSystem.realpath(expected)) !== expected) {
+        throw new Error("mount canonical identity changed during admission");
       }
     } catch (error) {
       if (error instanceof AppError) throw error;

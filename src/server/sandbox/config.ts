@@ -56,6 +56,7 @@ const PROTECTED_MOUNT_DESTINATIONS = Object.freeze([
   "/app",
   "/dev",
   "/etc",
+  "/mounts",
   "/proc",
   "/run",
   "/sys",

@@ -84,6 +84,7 @@ describe("WorkspaceRepository CRUD", () => {
       sessionStorage: "pi-default",
       sessionDirectory: null,
       securityProfile: "unrestricted",
+      mounts: [],
       networkPolicy: "isolated",
       networkPolicySetId: "default",
       effectiveSecurityProfile: "unrestricted",
@@ -147,6 +148,7 @@ describe("WorkspaceRepository CRUD", () => {
         sessionStorage: "pi-default",
         sessionDirectory: null,
         securityProfile: "unrestricted",
+        mounts: [],
         networkPolicy: "isolated",
         networkPolicySetId: "default",
         effectiveSecurityProfile: "unrestricted",
@@ -187,6 +189,108 @@ describe("WorkspaceRepository CRUD", () => {
       sessionStorage: "workspace",
       sessionDirectory: path.join(workspacePath, ".chatwca", "sessions"),
     });
+  });
+
+  it("persists directory mounts, requires writable acknowledgement, and resolves an immutable runtime snapshot", async () => {
+    const root = temporaryDirectory();
+    const workspacePath = directory(root, "project");
+    const referencePath = directory(root, "reference");
+    const artifactsPath = directory(root, "artifacts");
+    const dataPath = directory(root, "data");
+    const piPath = directory(root, "pi");
+    const opened = database();
+    const repository = new WorkspaceRepository(opened.connection, {
+      uuid: () => "workspace-mounted",
+      policy: {
+        mode: "optional",
+        workspaceRoots: [root],
+        dataDirectory: dataPath,
+        piAgentDirectory: piPath,
+        readOnlyMounts: [],
+      },
+    });
+    const mounts = [
+      { name: "reference", source: referencePath, access: "read-only" as const },
+      { name: "artifacts", source: artifactsPath, access: "read-write" as const },
+    ];
+
+    expect(() => repository.create({
+      name: "Mounted", path: workspacePath,
+      securityProfile: "workspace-sandboxed", mounts,
+    })).toThrow(expect.objectContaining({ code: ERROR_CODES.INVALID_COMMAND }));
+
+    const created = repository.create({
+      name: "Mounted", path: workspacePath,
+      securityProfile: "workspace-sandboxed", mounts,
+      acknowledgeWritableMounts: true,
+    });
+    expect(created.mounts).toEqual(mounts.map((mount) => ({
+      ...mount, source: realpathSync(mount.source),
+    })));
+    await expect(repository.requireUsable(created.id)).resolves.toMatchObject({
+      securityProfile: "workspace-sandboxed",
+      mounts: expect.arrayContaining(created.mounts),
+    });
+    expect(opened.connection.prepare(
+      "SELECT name, source_path, access FROM workspace_mounts ORDER BY name",
+    ).all()).toEqual([
+      { name: "artifacts", source_path: realpathSync(artifactsPath), access: "read-write" },
+      { name: "reference", source_path: realpathSync(referencePath), access: "read-only" },
+    ]);
+
+    const readOnly = repository.update(created.id, {
+      mounts: mounts.map((mount) => ({ ...mount, access: "read-only" as const })),
+    });
+    expect(readOnly.mounts.every(({ access }) => access === "read-only")).toBe(true);
+    expect(() => repository.update(created.id, { mounts })).toThrow(
+      expect.objectContaining({ code: ERROR_CODES.INVALID_COMMAND }),
+    );
+    repository.update(created.id, { mounts, acknowledgeWritableMounts: true });
+    rmSync(referencePath, { recursive: true, force: true });
+    expect(repository.get(created.id)).toMatchObject({
+      available: true,
+      usable: false,
+      policyIssue: "mount_unavailable",
+    });
+
+    repository.delete(created.id);
+    expect(opened.connection.prepare("SELECT * FROM workspace_mounts").all()).toEqual([]);
+  });
+
+  it("rejects mount files, duplicate destinations, overlaps, and protected paths", () => {
+    const root = temporaryDirectory();
+    const workspacePath = directory(root, "project");
+    const sharedPath = directory(root, "shared");
+    const dataPath = directory(root, "data");
+    const piPath = directory(root, "pi");
+    const filePath = path.join(root, "file.txt");
+    writeFileSync(filePath, "not a directory");
+    const repository = new WorkspaceRepository(database().connection, {
+      uuid: () => "workspace-invalid-mount",
+      policy: {
+        mode: "optional", workspaceRoots: [root], dataDirectory: dataPath,
+        piAgentDirectory: piPath, readOnlyMounts: [],
+      },
+    });
+    const create = (mounts: readonly { name: string; source: string; access: "read-only" }[]) =>
+      repository.create({
+        name: "Invalid", path: workspacePath,
+        securityProfile: "workspace-sandboxed", mounts,
+      });
+
+    for (const mounts of [
+      [{ name: "file", source: filePath, access: "read-only" as const }],
+      [
+        { name: "same", source: sharedPath, access: "read-only" as const },
+        { name: "same", source: root, access: "read-only" as const },
+      ],
+      [{ name: "shared", source: root, access: "read-only" as const }],
+      [{ name: "data", source: dataPath, access: "read-only" as const }],
+    ]) {
+      expect(() => create(mounts)).toThrow(
+        expect.objectContaining({ code: ERROR_CODES.INVALID_WORKSPACE_MOUNT }),
+      );
+    }
   });
 
   it("rejects empty names and preserves the prior timestamp after failed updates", () => {

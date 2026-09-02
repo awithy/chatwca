@@ -10,6 +10,7 @@ import type {
   SandboxNetworkPolicy,
   WorkspaceNetworkPolicyIssue,
   WorkspacePolicyIssue,
+  WorkspaceMount,
   WorkspaceSecurityProfile,
   WorkspaceSummary,
 } from "../../../shared/protocol.js";
@@ -25,10 +26,12 @@ interface WorkspaceUpdateValues {
   readonly name: string;
   readonly path?: string;
   readonly securityProfile?: WorkspaceSecurityProfile;
+  readonly mounts?: readonly WorkspaceMount[];
   readonly networkPolicy?: SandboxNetworkPolicy;
   readonly networkPolicySetId?: string;
   readonly acknowledgeSecurityDowngrade?: true;
   readonly acknowledgeNetworkExposure?: true;
+  readonly acknowledgeWritableMounts?: true;
 }
 
 export interface WorkspaceSidebarProps {
@@ -47,7 +50,9 @@ export interface WorkspaceSidebarProps {
   readonly open: boolean;
   readonly onDismiss: () => void;
   readonly onSelectWorkspace: (workspaceId: string) => void;
-  readonly onCreateWorkspace: (values: WorkspaceFormValues) => Promise<void>;
+  readonly onCreateWorkspace: (
+    values: WorkspaceFormValues & { readonly acknowledgeWritableMounts?: true },
+  ) => Promise<void>;
   readonly onUpdateWorkspace: (workspaceId: string, values: WorkspaceUpdateValues) => Promise<void>;
   readonly onRemoveWorkspace: (workspace: WorkspaceSummary) => Promise<void>;
   readonly onCreateConversation: () => Promise<void>;
@@ -76,7 +81,9 @@ export function workspacePolicyIssueLabel(issue: WorkspacePolicyIssue): string {
     case "outside_workspace_roots":
       return "Directory is outside administrator-approved workspace roots.";
     case "protected_path_overlap":
-      return "Directory overlaps a protected server or runtime location.";
+      return "Directory or mount overlaps a protected server or runtime location.";
+    case "mount_unavailable":
+      return "An additional filesystem mount is unavailable or inaccessible.";
     case null:
       return "No policy issue";
   }
@@ -84,6 +91,11 @@ export function workspacePolicyIssueLabel(issue: WorkspacePolicyIssue): string {
 
 export function securityDowngradeConfirmation(workspace: WorkspaceSummary): string {
   return `Change “${workspace.name}” from Workspace sandbox to Unrestricted? The model’s tools and commands will run with the full permissions of the ChatWCA server. This reduces protection.`;
+}
+
+export function writableMountConfirmation(workspaceName?: string): string {
+  const target = workspaceName === undefined ? "this workspace" : `“${workspaceName}”`;
+  return `Allow read-write filesystem mounts for ${target}? Sandboxed tools will be able to modify the selected server directories outside the workspace.`;
 }
 
 export function networkPolicyIssueLabel(issue: WorkspaceNetworkPolicyIssue): string {
@@ -98,9 +110,11 @@ export function networkExposureConfirmation(workspaceName?: string): string {
 export function workspaceUpdatePlan(workspace: WorkspaceSummary, values: WorkspaceFormValues): {
   readonly downgrade: boolean;
   readonly addsNetworkExposure: boolean;
+  readonly addsWritableMounts: boolean;
   readonly changes: WorkspaceUpdateValues;
 } {
   const profileChanged = values.securityProfile !== workspace.securityProfile;
+  const mountsChanged = JSON.stringify(values.mounts) !== JSON.stringify(workspace.mounts);
   const networkPolicyChanged = values.networkPolicy !== workspace.networkPolicy;
   const networkPolicySetChanged = values.networkPolicySetId !== workspace.networkPolicySetId;
   const downgrade = profileChanged &&
@@ -115,18 +129,27 @@ export function workspaceUpdatePlan(workspace: WorkspaceSummary, values: Workspa
   const changesManagedSet = networkPolicySetChanged &&
     (workspace.networkPolicy === "managed-egress" || values.networkPolicy === "managed-egress");
   const addsNetworkExposure = enablesManagedEgress || selectsManagedNetwork || changesManagedSet;
+  const previousMounts = new Map(workspace.mounts.map((mount) => [mount.name, mount]));
+  const addsWritableMounts = mountsChanged && values.mounts.some((mount) => {
+    if (mount.access !== "read-write") return false;
+    const previous = previousMounts.get(mount.name);
+    return previous === undefined || previous.access !== "read-write" || previous.source !== mount.source;
+  });
 
   return {
     downgrade,
     addsNetworkExposure,
+    addsWritableMounts,
     changes: {
       name: values.name,
       ...(values.path === workspace.path ? {} : { path: values.path }),
       ...(profileChanged ? { securityProfile: values.securityProfile } : {}),
+      ...(mountsChanged ? { mounts: values.mounts } : {}),
       ...(networkPolicyChanged ? { networkPolicy: values.networkPolicy } : {}),
       ...(networkPolicySetChanged ? { networkPolicySetId: values.networkPolicySetId } : {}),
       ...(downgrade ? { acknowledgeSecurityDowngrade: true } : {}),
       ...(addsNetworkExposure ? { acknowledgeNetworkExposure: true } : {}),
+      ...(addsWritableMounts ? { acknowledgeWritableMounts: true } : {}),
     },
   };
 }
@@ -309,13 +332,21 @@ export function WorkspaceSidebar({
         ) {
           return;
         }
-        await onCreateWorkspace(values);
+        const addsWritableMounts = values.mounts.some(({ access }) => access === "read-write");
+        if (addsWritableMounts && !window.confirm(writableMountConfirmation())) return;
+        await onCreateWorkspace({
+          ...values,
+          ...(addsWritableMounts ? { acknowledgeWritableMounts: true } : {}),
+        });
       } else if (formMode.type === "edit") {
         const plan = workspaceUpdatePlan(formMode.workspace, values);
         if (plan.downgrade && !window.confirm(securityDowngradeConfirmation(formMode.workspace))) {
           return;
         }
         if (plan.addsNetworkExposure && !window.confirm(networkExposureConfirmation(formMode.workspace.name))) {
+          return;
+        }
+        if (plan.addsWritableMounts && !window.confirm(writableMountConfirmation(formMode.workspace.name))) {
           return;
         }
         await onUpdateWorkspace(formMode.workspace.id, plan.changes);
@@ -399,6 +430,7 @@ export function WorkspaceSidebar({
                 path: formMode.workspace.path,
                 sessionStorage: formMode.workspace.sessionStorage,
                 securityProfile: formMode.workspace.securityProfile,
+                mounts: formMode.workspace.mounts,
                 networkPolicy: formMode.workspace.networkPolicy,
                 networkPolicySetId: formMode.workspace.networkPolicySetId,
                 effectiveSecurityProfile: formMode.workspace.effectiveSecurityProfile,
@@ -555,12 +587,22 @@ export function WorkspaceSidebar({
                     : "None — HTTPS remains end-to-end encrypted."}</dd>
               </div>
               <div>
+                <dt>Additional filesystem mounts</dt>
+                <dd className="workspace-info-values">{formMode.workspace.mounts.length === 0
+                  ? "None"
+                  : formMode.workspace.mounts.map((mount) => (
+                      <span key={mount.name}>
+                        <code>/mounts/{mount.name}</code> ← <code>{mount.source}</code> ({mount.access})
+                      </span>
+                    ))}</dd>
+              </div>
+              <div>
                 <dt>Sandbox runtime</dt>
-                <dd><code>/usr</code> and any administrator-approved runtime mounts are read-only when Workspace sandbox is effective. Host mount paths are not disclosed.</dd>
+                <dd><code>/usr</code> and administrator-approved runtime mounts are read-only. Workspace-specific mounts use their configured access.</dd>
               </div>
             </dl>
             <div className="workspace-disclosures" role="note" aria-label="Workspace sandbox limitations">
-              <p><strong>Writable workspace:</strong> The workspace, including <code>.git</code>, is writable. Sandboxing does not prevent harmful project edits, hooks, or build scripts.</p>
+              <p><strong>Writable files:</strong> The workspace, including <code>.git</code>, and every read-write mount can be modified. Sandboxing does not prevent harmful edits, hooks, or build scripts.</p>
               <p><strong>Managed network:</strong> {publicManagedEgressConfig?.disclosureWarning ?? "Tools may transmit workspace content to configured destinations."}</p>
               <p><strong>Remote model:</strong> {publicSandboxConfig?.remoteProviderWarning ?? "Workspace content may be sent to the configured model provider."}</p>
               <p><strong>No resource quotas:</strong> The sandbox does not isolate CPU, memory, or disk denial-of-service.</p>

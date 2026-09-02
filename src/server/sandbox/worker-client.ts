@@ -3,6 +3,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { Readable, Writable } from "node:stream";
 
 import { AppError, ERROR_CODES } from "../../shared/errors.js";
+import type { WorkspaceMount } from "../../shared/protocol.js";
 import {
   SANDBOX_PROTOCOL_VERSION,
   buildSandboxLaunchSpecification,
@@ -89,6 +90,7 @@ export interface SandboxWorkerLaunchOptions {
   readonly host: Readonly<ValidatedSandboxHost>;
   readonly worker: Readonly<SandboxWorkerArtifact>;
   readonly workspace: string;
+  readonly mounts?: readonly WorkspaceMount[];
   readonly hiddenPaths: readonly string[];
   readonly onFatal: (failure: Readonly<SandboxWorkerFatal>) => void;
   readonly networkProfile?: SandboxNetworkLaunchProfile;
@@ -188,6 +190,7 @@ export async function startSandboxWorkerClient(options: SandboxWorkerLaunchOptio
   const nonce = randomBytes(24).toString("hex");
   const probeContext = await buildSandboxProbeContext({
     config: options.config, worker: options.worker, workspace: options.workspace,
+    ...(options.mounts === undefined ? {} : { mounts: options.mounts }),
     hiddenPaths: options.hiddenPaths, nonce, specification,
   });
   return SandboxWorkerClient.start({

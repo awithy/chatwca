@@ -49,6 +49,7 @@ const workspace: WorkspaceSummary = {
   sessionStorage: "pi-default",
   sessionDirectory: null,
   securityProfile: "unrestricted",
+  mounts: [],
   networkPolicy: "isolated",
   effectiveSecurityProfile: "unrestricted",
   effectiveNetworkPolicy: null,
@@ -290,6 +291,7 @@ describe("workspace form", () => {
       path: managed.path,
       sessionStorage: managed.sessionStorage,
       securityProfile: "workspace-sandboxed",
+      mounts: [],
       networkPolicy: "managed-egress",
       networkPolicySetId: "web",
     });
@@ -302,6 +304,31 @@ describe("workspace form", () => {
     });
     expect(plan.changes).not.toHaveProperty("allowedDomains");
     expect(plan.changes).not.toHaveProperty("allowedPorts");
+  });
+
+  it("plans mount updates and acknowledges newly writable host directories", () => {
+    const sandboxed = {
+      ...workspace,
+      securityProfile: "workspace-sandboxed" as const,
+      effectiveSecurityProfile: "workspace-sandboxed" as const,
+      effectiveNetworkPolicy: "isolated" as const,
+      mounts: [{ name: "shared", source: "/srv/shared", access: "read-only" as const }],
+    };
+    const plan = workspaceUpdatePlan(sandboxed, {
+      name: sandboxed.name,
+      path: sandboxed.path,
+      sessionStorage: sandboxed.sessionStorage,
+      securityProfile: sandboxed.securityProfile,
+      mounts: [{ name: "shared", source: "/srv/shared", access: "read-write" }],
+      networkPolicy: sandboxed.networkPolicy,
+      networkPolicySetId: sandboxed.networkPolicySetId,
+    });
+
+    expect(plan.addsWritableMounts).toBe(true);
+    expect(plan.changes).toMatchObject({
+      mounts: [{ name: "shared", source: "/srv/shared", access: "read-write" }],
+      acknowledgeWritableMounts: true,
+    });
   });
 
   it("implements disabled, optional, and required profile semantics", () => {

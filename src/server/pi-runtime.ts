@@ -32,7 +32,12 @@ import type {
   ValidatedSandboxHost,
 } from "./sandbox/bwrap.js";
 import type { SandboxConfig } from "./sandbox/config.js";
-import type { SandboxNetworkPolicy } from "../shared/protocol.js";
+import {
+  WORKSPACE_MOUNT_NAME_PATTERN,
+  WORKSPACE_MOUNT_SOURCE_MAX_LENGTH,
+  type SandboxNetworkPolicy,
+  type WorkspaceMount,
+} from "../shared/protocol.js";
 import {
   DEFAULT_NETWORK_POLICY_SET_ID,
   type CompiledNetworkPolicySet,
@@ -710,6 +715,32 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
     ) {
       throw new AppError(ERROR_CODES.WORKSPACE_UNAVAILABLE);
     }
+    const mounts: readonly WorkspaceMount[] = policy.securityProfile === "workspace-sandboxed"
+      ? Object.freeze(await Promise.all((policy.mounts ?? []).map(async (mount) => {
+          if (
+            !new RegExp(WORKSPACE_MOUNT_NAME_PATTERN, "u").test(mount.name) ||
+            !path.isAbsolute(mount.source) ||
+            mount.source.length > WORKSPACE_MOUNT_SOURCE_MAX_LENGTH ||
+            (mount.access !== "read-only" && mount.access !== "read-write")
+          ) {
+            throw new AppError(ERROR_CODES.SANDBOX_WORKSPACE_REJECTED);
+          }
+          const source = await realpath(mount.source);
+          const metadata = await stat(source);
+          await access(
+            source,
+            fsConstants.R_OK | fsConstants.X_OK |
+              (mount.access === "read-write" ? fsConstants.W_OK : 0),
+          );
+          if (source !== mount.source || !metadata.isDirectory()) {
+            throw new AppError(ERROR_CODES.SANDBOX_WORKSPACE_REJECTED);
+          }
+          return Object.freeze({ ...mount, source });
+        })))
+      : Object.freeze([]);
+    if (policy.securityProfile === "unrestricted" && (policy.mounts?.length ?? 0) > 0) {
+      throw new AppError(ERROR_CODES.SANDBOX_WORKSPACE_REJECTED);
+    }
     const networkPolicySetId = policy.networkPolicySetId ?? DEFAULT_NETWORK_POLICY_SET_ID;
     const effectiveNetworkPolicySetId = networkPolicy === "managed-egress"
       ? policy.effectiveNetworkPolicySetId
@@ -740,6 +771,7 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
         ? null
         : path.resolve(policy.sessionDirectory),
       securityProfile: policy.securityProfile,
+      mounts,
       networkPolicy,
       networkPolicySetId,
       effectiveNetworkPolicySetId,
@@ -818,6 +850,7 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
               host: sandbox.host,
               worker: sandbox.worker,
               workspace: policy.cwd,
+              mounts: policy.mounts ?? [],
               hiddenPaths,
               onFatal,
               ...(managedNetwork === undefined
@@ -857,6 +890,7 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
           const resourceLoader = await SandboxResourceLoader.create(
             policy.cwd,
             policy.networkPolicy ?? "isolated",
+            policy.mounts,
           );
           services = {
             cwd: "/workspace",

@@ -2,10 +2,15 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import type { PublicSandboxConfig, WorkspaceSummary } from "../../src/shared/protocol.js";
+import type {
+  PublicManagedEgressConfig,
+  PublicSandboxConfig,
+  WorkspaceSummary,
+} from "../../src/shared/protocol.js";
 import { WorkspaceForm } from "../../src/web/src/components/WorkspaceForm.js";
 import {
   WorkspaceSidebar,
+  networkPolicyIssueLabel,
   securityDowngradeConfirmation,
   sortWorkspacesByMostRecentlyUsed,
   workspacePolicyIssueLabel,
@@ -19,6 +24,19 @@ const optionalConfig: PublicSandboxConfig = {
   functionalProbeSucceeded: true,
 };
 
+const managedConfig: PublicManagedEgressConfig = {
+  mode: "optional",
+  selectablePolicies: ["isolated", "managed-egress"],
+  allowedDomainPatterns: ["**.example.com"],
+  deniedDomainPatterns: ["blocked.example.com"],
+  allowedPorts: [80, 443],
+  supportedProtocols: ["http", "https-connect", "websocket", "websocket-secure", "socks5-tcp"],
+  denyNonPublicAddresses: true,
+  tlsInterception: false,
+  disclosureWarning: "Tools may transmit workspace content to configured destinations.",
+  functionalProbeSucceeded: true,
+};
+
 const workspace: WorkspaceSummary = {
   id: "workspace-1",
   name: "Deep Project",
@@ -26,7 +44,10 @@ const workspace: WorkspaceSummary = {
   sessionStorage: "pi-default",
   sessionDirectory: null,
   securityProfile: "unrestricted",
+  networkPolicy: "isolated",
   effectiveSecurityProfile: "unrestricted",
+  effectiveNetworkPolicy: null,
+  networkPolicyIssue: null,
   createdAt: 1,
   updatedAt: 2,
   available: true,
@@ -47,6 +68,7 @@ function sidebar(workspaces: readonly WorkspaceSummary[], selectedWorkspaceId: s
     historyError: null,
     actionPending: false,
     publicSandboxConfig: optionalConfig,
+    publicManagedEgressConfig: managedConfig,
     open: false,
     onDismiss: () => undefined,
     onSelectWorkspace: () => undefined,
@@ -65,6 +87,7 @@ function renderForm(
   return renderToStaticMarkup(createElement(WorkspaceForm, {
     mode: "create",
     publicSandboxConfig,
+    publicManagedEgressConfig: managedConfig,
     securityControlsLocked: false,
     submitting: false,
     error: null,
@@ -115,6 +138,7 @@ describe("workspace-first sidebar", () => {
     expect(html).toContain("Workspace blocked by policy");
     expect(html).toContain("New, Open, Fork, and Rewind are disabled");
     expect(workspacePolicyIssueLabel(blocked.policyIssue)).toContain("administrator-approved workspace roots");
+    expect(networkPolicyIssueLabel("managed_egress_disabled")).toContain("disabled by the administrator");
   });
 
   it("sorts workspaces by most recent use without disturbing unseen order", () => {
@@ -163,7 +187,10 @@ describe("workspace form", () => {
         path: workspace.path,
         sessionStorage: workspace.sessionStorage,
         securityProfile: "unrestricted",
+        networkPolicy: "isolated",
         effectiveSecurityProfile: "workspace-sandboxed",
+        effectiveNetworkPolicy: "isolated",
+        networkPolicyIssue: null,
       },
       securityControlsLocked: true,
       submitting: true,
@@ -172,9 +199,41 @@ describe("workspace form", () => {
     expect(html).toContain('aria-label="Edit workspace"');
     expect(html).toContain("Stored profile");
     expect(html).toContain("Effective profile");
+    expect(html).toContain("Stored network policy");
+    expect(html).toContain("Effective network policy");
+    expect(html).toContain("Network policy issue");
+    expect(html).toContain("Sandbox network");
     expect(html).toContain("Close this workspace’s live conversations");
     expect(html).toContain("Workspace sandbox");
     expect(html).not.toContain("Store sessions in this workspace");
+  });
+
+  it("shows stored managed policy and its separate issue while offering only server-selectable recovery", () => {
+    const html = renderForm(optionalConfig, {
+      mode: "edit",
+      initialValues: {
+        name: workspace.name,
+        path: workspace.path,
+        sessionStorage: workspace.sessionStorage,
+        securityProfile: "workspace-sandboxed",
+        networkPolicy: "managed-egress",
+        effectiveSecurityProfile: "workspace-sandboxed",
+        effectiveNetworkPolicy: null,
+        networkPolicyIssue: "managed_egress_disabled",
+      },
+      publicManagedEgressConfig: {
+        ...managedConfig,
+        mode: "disabled",
+        selectablePolicies: ["isolated"],
+        allowedDomainPatterns: [],
+        functionalProbeSucceeded: false,
+      },
+    });
+
+    expect(html).toContain("Managed egress — unavailable");
+    expect(html).toContain("Managed egress is disabled by the administrator");
+    expect(html).toContain('<option value="isolated">Isolated</option>');
+    expect(html).not.toContain('<option value="managed-egress">Managed egress</option>');
   });
 
   it("implements disabled, optional, and required profile semantics", () => {
@@ -194,6 +253,8 @@ describe("workspace form", () => {
     });
     expect(required).toContain("Workspace sandbox");
     expect(required).toContain("server requires Workspace sandbox");
-    expect(required).not.toContain("<select");
+    expect(required).toContain("Sandbox network");
+    expect(required).toContain("Managed egress");
+    expect(required.match(/<select/g)).toHaveLength(1);
   });
 });

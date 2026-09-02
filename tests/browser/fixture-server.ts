@@ -341,6 +341,21 @@ function beginRun(fixture: FixtureConversation, promptText: string): void {
   const secondDelay = slow ? 650 : 100;
   const completionDelay = slow ? 1_050 : 180;
 
+  if (/blocked network/i.test(promptText)) {
+    schedule(fixture, 20, () => {
+      emitEvent(fixture, {
+        type: "network.blocked",
+        payload: {
+          host: "blocked.example.com",
+          port: 443,
+          protocol: "https-connect",
+          reason: "not_allowed",
+          occurrenceCount: 3,
+        },
+      });
+    });
+  }
+
   chunks.forEach((delta, index) => {
     schedule(fixture, index === 0 ? firstDelay : secondDelay, () => {
       const current = fixture.state.messages.find((message) => message.entryId === streamId);
@@ -475,11 +490,15 @@ const registry: ProtocolRegistry = {
 
     conversationSequence += 1;
     const id = `browser-fork-${String(conversationSequence)}`;
+    const workspace = workspaceRows.find((candidate) => candidate.id === source.state.workspaceId);
+    if (workspace?.effectiveSecurityProfile === null || workspace === undefined) {
+      throw new Error("The fixture workspace policy is unavailable");
+    }
     const fork = emptyState(id, `Fork of ${source.state.title}`, {
-      id: source.state.workspaceId,
-      path: source.state.cwd,
-      securityProfile: source.state.securityProfile,
-      effectiveNetworkPolicy: source.state.networkPolicy,
+      id: workspace.id,
+      path: workspace.path,
+      securityProfile: workspace.effectiveSecurityProfile,
+      effectiveNetworkPolicy: workspace.effectiveNetworkPolicy,
     });
     const forkState: ConversationState = {
       ...fork,
@@ -689,6 +708,10 @@ const config = loadConfig(
     CHATWCA_MAX_IMAGE_BYTES: String(IMAGE_LIMITS.maxImageBytes),
     CHATWCA_MAX_TOTAL_IMAGE_BYTES: String(IMAGE_LIMITS.maxTotalImageBytes),
     CHATWCA_SANDBOX_MODE: "optional",
+    CHATWCA_MANAGED_EGRESS_MODE: "optional",
+    CHATWCA_NETWORK_ALLOWED_DOMAINS: '["**.example.com","registry.npmjs.org"]',
+    CHATWCA_NETWORK_DENIED_DOMAINS: '["blocked.example.com"]',
+    CHATWCA_NETWORK_ALLOWED_PORTS: "[80,443]",
   },
   CWD,
 );
@@ -699,6 +722,7 @@ server = createChatWcaServer(config, "browser-fixture", {
   images,
   workspaces,
   sandboxFunctionalProbeSucceeded: true,
+  managedNetworkFunctionalProbeSucceeded: true,
   onInternalError(error) {
     if (error !== null && error !== undefined) {
       console.error("Browser fixture protocol error", error);

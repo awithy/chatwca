@@ -426,6 +426,10 @@ pre {
   overflow-wrap: anywhere;
 }
 
+.workspace-profile-summary .workspace-profile-summary-wide {
+  grid-column: 1 / -1;
+}
+
 .workspace-form-warning {
   margin: 0;
   color: var(--warning-text);
@@ -506,6 +510,12 @@ pre {
   font-size: 0.67rem;
   white-space: normal;
   word-break: break-word;
+}
+
+.workspace-info-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.35rem;
 }
 
 .workspace-disclosures {
@@ -996,9 +1006,14 @@ pre {
   text-transform: none;
 }
 
-.security-sandboxed {
+.security-sandboxed,
+.security-managed {
   color: var(--sandbox-badge-text);
   background: var(--sandbox-badge-bg);
+}
+
+.security-managed {
+  border-style: dashed;
 }
 
 .security-unrestricted {
@@ -1188,6 +1203,45 @@ pre {
   grid-template-rows: minmax(0, 1fr) auto;
   width: 100%;
   height: 100%;
+}
+
+.conversation-workspace.has-network-notices {
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.network-blocked-notices {
+  display: grid;
+  gap: 0.35rem;
+  max-height: 9rem;
+  padding: 0.55rem clamp(1rem, 4vw, 3rem);
+  overflow-y: auto;
+  border-bottom: 1px solid var(--warning);
+  color: var(--warning-text);
+  background: var(--warning-bg);
+}
+
+.network-blocked-notices > strong {
+  font-size: 0.72rem;
+}
+
+.network-blocked-notices ul {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.network-blocked-notices li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.55rem;
+  align-items: baseline;
+  font-size: 0.7rem;
+}
+
+.network-blocked-notices code {
+  color: inherit;
 }
 
 .message-timeline {

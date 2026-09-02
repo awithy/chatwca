@@ -4,19 +4,28 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   ConversationSummary,
   LiveConversationStatus,
+  PublicManagedEgressConfig,
   PublicSandboxConfig,
+  SandboxNetworkPolicy,
+  WorkspaceNetworkPolicyIssue,
   WorkspacePolicyIssue,
   WorkspaceSecurityProfile,
   WorkspaceSummary,
 } from "../../../shared/protocol.js";
 import { ConversationList } from "./ConversationList.js";
-import { WorkspaceForm, type WorkspaceFormValues } from "./WorkspaceForm.js";
+import {
+  WorkspaceForm,
+  networkPolicyLabel,
+  type WorkspaceFormValues,
+} from "./WorkspaceForm.js";
 
 interface WorkspaceUpdateValues {
   readonly name: string;
   readonly path?: string;
   readonly securityProfile?: WorkspaceSecurityProfile;
+  readonly networkPolicy?: SandboxNetworkPolicy;
   readonly acknowledgeSecurityDowngrade?: true;
+  readonly acknowledgeNetworkExposure?: true;
 }
 
 export interface WorkspaceSidebarProps {
@@ -31,6 +40,7 @@ export interface WorkspaceSidebarProps {
   readonly historyError: string | null;
   readonly actionPending: boolean;
   readonly publicSandboxConfig: PublicSandboxConfig | undefined;
+  readonly publicManagedEgressConfig: PublicManagedEgressConfig | undefined;
   readonly open: boolean;
   readonly onDismiss: () => void;
   readonly onSelectWorkspace: (workspaceId: string) => void;
@@ -73,6 +83,17 @@ export function securityDowngradeConfirmation(workspace: WorkspaceSummary): stri
   return `Change “${workspace.name}” from Workspace sandbox to Unrestricted? The model’s tools and commands will run with the full permissions of the ChatWCA server. This reduces protection.`;
 }
 
+export function networkPolicyIssueLabel(issue: WorkspaceNetworkPolicyIssue): string {
+  return issue === "managed_egress_disabled"
+    ? "Managed egress is disabled by the administrator."
+    : "No network policy issue";
+}
+
+export function networkExposureConfirmation(workspaceName?: string): string {
+  const target = workspaceName === undefined ? "this workspace" : `“${workspaceName}”`;
+  return `Enable Managed egress for ${target}? Tools may transmit workspace content to administrator-configured destinations through a filtered proxy. Workspace content may also be sent to the configured model provider.`;
+}
+
 export function workspaceRemovalConfirmation(workspace: WorkspaceSummary): string {
   return `Remove workspace “${workspace.name}”? The directory at ${workspace.path} and all Pi sessions will be retained and will not be deleted.`;
 }
@@ -111,6 +132,7 @@ export function WorkspaceSidebar({
   historyError,
   actionPending,
   publicSandboxConfig,
+  publicManagedEgressConfig,
   open,
   onDismiss,
   onSelectWorkspace,
@@ -204,20 +226,36 @@ export function WorkspaceSidebar({
     setWorkspaceError(null);
     try {
       if (formMode.type === "create") {
+        if (
+          values.securityProfile === "workspace-sandboxed" &&
+          values.networkPolicy === "managed-egress" &&
+          !window.confirm(networkExposureConfirmation())
+        ) {
+          return;
+        }
         await onCreateWorkspace(values);
       } else if (formMode.type === "edit") {
         const profileChanged = values.securityProfile !== formMode.workspace.securityProfile;
+        const networkPolicyChanged = values.networkPolicy !== formMode.workspace.networkPolicy;
         const downgrade = profileChanged &&
           formMode.workspace.securityProfile === "workspace-sandboxed" &&
           values.securityProfile === "unrestricted";
         if (downgrade && !window.confirm(securityDowngradeConfirmation(formMode.workspace))) {
           return;
         }
+        const addsNetworkExposure = networkPolicyChanged &&
+          formMode.workspace.networkPolicy === "isolated" &&
+          values.networkPolicy === "managed-egress";
+        if (addsNetworkExposure && !window.confirm(networkExposureConfirmation(formMode.workspace.name))) {
+          return;
+        }
         await onUpdateWorkspace(formMode.workspace.id, {
           name: values.name,
           ...(values.path === formMode.workspace.path ? {} : { path: values.path }),
           ...(profileChanged ? { securityProfile: values.securityProfile } : {}),
+          ...(networkPolicyChanged ? { networkPolicy: values.networkPolicy } : {}),
           ...(downgrade ? { acknowledgeSecurityDowngrade: true } : {}),
+          ...(addsNetworkExposure ? { acknowledgeNetworkExposure: true } : {}),
         });
       }
       setFormMode(null);
@@ -289,7 +327,7 @@ export function WorkspaceSidebar({
           </button>
         </div>
 
-        {formMode !== null && formMode.type !== "info" && publicSandboxConfig !== undefined && (
+        {formMode !== null && formMode.type !== "info" && publicSandboxConfig !== undefined && publicManagedEgressConfig !== undefined && (
           <WorkspaceForm
             key={formMode.type === "create" ? "create" : formMode.workspace.id}
             mode={formMode.type}
@@ -299,10 +337,14 @@ export function WorkspaceSidebar({
                 path: formMode.workspace.path,
                 sessionStorage: formMode.workspace.sessionStorage,
                 securityProfile: formMode.workspace.securityProfile,
+                networkPolicy: formMode.workspace.networkPolicy,
                 effectiveSecurityProfile: formMode.workspace.effectiveSecurityProfile,
+                effectiveNetworkPolicy: formMode.workspace.effectiveNetworkPolicy,
+                networkPolicyIssue: formMode.workspace.networkPolicyIssue,
               },
             } : {})}
             publicSandboxConfig={publicSandboxConfig}
+            publicManagedEgressConfig={publicManagedEgressConfig}
             securityControlsLocked={formMode.type === "edit" && liveWorkspaceIds.has(formMode.workspace.id)}
             submitting={submitting}
             error={workspaceError}
@@ -335,7 +377,9 @@ export function WorkspaceSidebar({
                   ? "Unavailable directory"
                   : formMode.workspace.usable
                     ? "Usable"
-                    : `Policy blocked — ${workspacePolicyIssueLabel(formMode.workspace.policyIssue)}`}</dd>
+                    : `Policy blocked — ${formMode.workspace.networkPolicyIssue === null
+                      ? workspacePolicyIssueLabel(formMode.workspace.policyIssue)
+                      : networkPolicyIssueLabel(formMode.workspace.networkPolicyIssue)}`}</dd>
               </div>
               <div>
                 <dt>Stored profile</dt>
@@ -360,6 +404,29 @@ export function WorkspaceSidebar({
                       : "Disabled — sandboxing is unavailable"}</dd>
               </div>
               <div>
+                <dt>Stored network policy</dt>
+                <dd>{networkPolicyLabel(formMode.workspace.networkPolicy)}</dd>
+              </div>
+              <div>
+                <dt>Effective network policy</dt>
+                <dd>{formMode.workspace.effectiveNetworkPolicy === null
+                  ? "None — not a usable Workspace sandbox runtime"
+                  : networkPolicyLabel(formMode.workspace.effectiveNetworkPolicy)}</dd>
+              </div>
+              <div>
+                <dt>Network policy issue</dt>
+                <dd>{networkPolicyIssueLabel(formMode.workspace.networkPolicyIssue)}</dd>
+              </div>
+              <div>
+                <dt>Managed egress availability</dt>
+                <dd>{publicManagedEgressConfig === undefined
+                  ? "Configuration unavailable"
+                  : publicManagedEgressConfig.selectablePolicies.includes("managed-egress") &&
+                      publicManagedEgressConfig.functionalProbeSucceeded
+                    ? "Available — startup functional probe passed"
+                    : "Unavailable"}</dd>
+              </div>
+              <div>
                 <dt>Session storage</dt>
                 <dd>{storageLabel(formMode.workspace)}</dd>
               </div>
@@ -370,12 +437,46 @@ export function WorkspaceSidebar({
                   : <code>{formMode.workspace.sessionDirectory}</code>}</dd>
               </div>
               <div>
-                <dt>Sandbox network</dt>
-                <dd>{formMode.workspace.effectiveSecurityProfile === "workspace-sandboxed"
-                  ? "No network access. Model-provider requests still run outside the sandbox."
-                  : formMode.workspace.effectiveSecurityProfile === "unrestricted"
-                    ? "Not isolated — Unrestricted runtimes retain the ChatWCA server’s network access."
-                    : "No runtime can start while policy blocked. Workspace sandbox would have no network access."}</dd>
+                <dt>Allowed domain patterns</dt>
+                <dd className="workspace-info-values">{publicManagedEgressConfig === undefined || publicManagedEgressConfig.allowedDomainPatterns.length === 0
+                  ? "None configured"
+                  : publicManagedEgressConfig.allowedDomainPatterns.map((pattern) => <code key={pattern}>{pattern}</code>)}</dd>
+              </div>
+              <div>
+                <dt>Denied domain patterns</dt>
+                <dd className="workspace-info-values">{publicManagedEgressConfig === undefined || publicManagedEgressConfig.deniedDomainPatterns.length === 0
+                  ? "None configured"
+                  : publicManagedEgressConfig.deniedDomainPatterns.map((pattern) => <code key={pattern}>{pattern}</code>)}</dd>
+              </div>
+              <div>
+                <dt>Allowed TCP ports</dt>
+                <dd>{publicManagedEgressConfig === undefined
+                  ? "Configuration unavailable"
+                  : publicManagedEgressConfig.allowedPorts.join(", ") || "None configured"}</dd>
+              </div>
+              <div>
+                <dt>Supported protocols</dt>
+                <dd>{publicManagedEgressConfig === undefined
+                  ? "Configuration unavailable"
+                  : publicManagedEgressConfig.supportedProtocols.join(", ")}</dd>
+              </div>
+              <div>
+                <dt>Local and private destinations</dt>
+                <dd>{publicManagedEgressConfig?.denyNonPublicAddresses === true
+                  ? "Denied, including loopback, LAN, link-local, metadata, and other non-public addresses."
+                  : "Configuration unavailable"}</dd>
+              </div>
+              <div>
+                <dt>UDP and inbound connections</dt>
+                <dd>Not supported. Managed egress permits outbound TCP through the configured proxies only.</dd>
+              </div>
+              <div>
+                <dt>TLS interception</dt>
+                <dd>{publicManagedEgressConfig === undefined
+                  ? "Configuration unavailable"
+                  : publicManagedEgressConfig.tlsInterception
+                    ? "Enabled"
+                    : "None — HTTPS remains end-to-end encrypted."}</dd>
               </div>
               <div>
                 <dt>Sandbox runtime</dt>
@@ -384,6 +485,7 @@ export function WorkspaceSidebar({
             </dl>
             <div className="workspace-disclosures" role="note" aria-label="Workspace sandbox limitations">
               <p><strong>Writable workspace:</strong> The workspace, including <code>.git</code>, is writable. Sandboxing does not prevent harmful project edits, hooks, or build scripts.</p>
+              <p><strong>Managed network:</strong> {publicManagedEgressConfig?.disclosureWarning ?? "Tools may transmit workspace content to configured destinations."}</p>
               <p><strong>Remote model:</strong> {publicSandboxConfig?.remoteProviderWarning ?? "Workspace content may be sent to the configured model provider."}</p>
               <p><strong>No resource quotas:</strong> The sandbox does not isolate CPU, memory, or disk denial-of-service.</p>
             </div>
@@ -437,7 +539,9 @@ export function WorkspaceSidebar({
                       {!workspace.available ? (
                         <span className="workspace-unavailable">Unavailable</span>
                       ) : !workspace.usable ? (
-                        <span className="workspace-policy-blocked" title={workspacePolicyIssueLabel(workspace.policyIssue)}>Policy blocked</span>
+                        <span className="workspace-policy-blocked" title={workspace.networkPolicyIssue === null
+                          ? workspacePolicyIssueLabel(workspace.policyIssue)
+                          : networkPolicyIssueLabel(workspace.networkPolicyIssue)}>Policy blocked</span>
                       ) : null}
                     </span>
                     <code title={workspace.path}>{workspace.path}</code>
@@ -482,7 +586,7 @@ export function WorkspaceSidebar({
                       </button>
                       <button
                         type="button"
-                        disabled={!connected || publicSandboxConfig === undefined || busy}
+                        disabled={!connected || publicSandboxConfig === undefined || publicManagedEgressConfig === undefined || busy}
                         aria-label={`Edit workspace ${workspace.name}`}
                         onClick={() => {
                           formReturnFocus.current = openMenuTrigger.current;

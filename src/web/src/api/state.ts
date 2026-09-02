@@ -2,6 +2,7 @@ import type {
   ConversationEvent,
   ConversationState,
   ConversationSummary,
+  NetworkBlockedEvent,
   NormalizedMessage,
   StatusNotice,
   ToolCallBlock,
@@ -28,9 +29,13 @@ export interface WorkspaceClientErrorState extends ClientErrorState {
   readonly workspaceId: string;
 }
 
+export const MAX_NETWORK_BLOCKED_NOTICES = 50;
+
 export interface ConversationProjection {
   readonly conversation: ConversationState;
   readonly notices: readonly StatusNotice[];
+  /** Revisioned, browser-safe denials retained across authoritative reconnect snapshots. */
+  readonly networkBlocked: readonly NetworkBlockedEvent[];
 }
 
 export interface ChatClientState {
@@ -187,6 +192,33 @@ function updateToolCallStatus(
       ? { ...block, status }
       : block,
   );
+}
+
+function sameBlockedDestination(
+  left: NetworkBlockedEvent,
+  right: NetworkBlockedEvent,
+): boolean {
+  return left.payload.host === right.payload.host &&
+    left.payload.port === right.payload.port &&
+    left.payload.protocol === right.payload.protocol &&
+    left.payload.reason === right.payload.reason;
+}
+
+function collectNetworkBlocked(
+  current: readonly NetworkBlockedEvent[],
+  event: NetworkBlockedEvent,
+): readonly NetworkBlockedEvent[] {
+  // The server first emits a denial and may later emit its coalesced count.
+  // Replace that latest matching projection rather than showing both notices.
+  if (event.payload.occurrenceCount !== undefined) {
+    const index = current.findLastIndex((candidate) => sameBlockedDestination(candidate, event));
+    if (index >= 0) {
+      const next = [...current];
+      next[index] = event;
+      return next.slice(-MAX_NETWORK_BLOCKED_NOTICES);
+    }
+  }
+  return [...current, event].slice(-MAX_NETWORK_BLOCKED_NOTICES);
 }
 
 function applyConversationEvent(
@@ -439,11 +471,11 @@ export function reduceChatClientState(
       ) {
         return state;
       }
+      const sameWorkspace = current?.conversation.workspaceId === action.conversation.workspaceId;
       return replaceConversation(state, {
         conversation: action.conversation,
-        notices: current?.conversation.workspaceId === action.conversation.workspaceId
-          ? current.notices
-          : [],
+        notices: sameWorkspace ? current.notices : [],
+        networkBlocked: sameWorkspace ? current.networkBlocked : [],
       });
     }
     case "event": {
@@ -464,9 +496,13 @@ export function reduceChatClientState(
       const notices = action.event.type === "conversation.notice"
         ? [...current.notices, action.event.payload.notice].slice(-100)
         : current.notices;
+      const networkBlocked = action.event.type === "network.blocked"
+        ? collectNetworkBlocked(current.networkBlocked, action.event)
+        : current.networkBlocked;
       return replaceConversation(state, {
         conversation: applyConversationEvent(current.conversation, action.event),
         notices,
+        networkBlocked,
       });
     }
     case "select":

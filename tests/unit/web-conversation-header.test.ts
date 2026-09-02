@@ -16,7 +16,10 @@ const workspace: WorkspaceSummary = {
   sessionStorage: "pi-default",
   sessionDirectory: null,
   securityProfile: "unrestricted",
+  networkPolicy: "isolated",
   effectiveSecurityProfile: "unrestricted",
+  effectiveNetworkPolicy: null,
+  networkPolicyIssue: null,
   createdAt: 1,
   updatedAt: 1,
   available: true,
@@ -57,6 +60,7 @@ function conversation(contextUsage: ConversationState["contextUsage"]): Conversa
     messages: [],
     queue: { steering: [], followUp: [] },
     securityProfile: "unrestricted",
+    networkPolicy: null,
   };
 }
 
@@ -78,10 +82,14 @@ describe("conversation header context usage", () => {
   it("shows an always-visible badge sourced from immutable conversation state", () => {
     const unrestricted = renderHeader(null);
     expect(unrestricted).toContain("Unrestricted");
-    expect(unrestricted).toContain('aria-label="Conversation security profile: Unrestricted"');
+    expect(unrestricted).toContain('aria-label="Conversation security: Unrestricted"');
 
     const sandboxed = renderToStaticMarkup(createElement(ConversationHeader, {
-      conversation: { ...conversation(null), securityProfile: "workspace-sandboxed" },
+      conversation: {
+        ...conversation(null),
+        securityProfile: "workspace-sandboxed",
+        networkPolicy: "isolated",
+      },
       summary,
       workspace: { ...workspace, securityProfile: "unrestricted" },
       loading: false,
@@ -91,8 +99,25 @@ describe("conversation header context usage", () => {
       onClose: () => undefined,
       onDelete: () => undefined,
     }));
-    expect(sandboxed).toContain(">Sandboxed</span>");
-    expect(sandboxed).not.toContain("Conversation security profile: Unrestricted");
+    expect(sandboxed).toContain(">Sandboxed · Network isolated</span>");
+    expect(sandboxed).not.toContain("Conversation security: Unrestricted");
+
+    const managed = renderToStaticMarkup(createElement(ConversationHeader, {
+      conversation: {
+        ...conversation(null),
+        securityProfile: "workspace-sandboxed",
+        networkPolicy: "managed-egress",
+      },
+      summary,
+      workspace,
+      loading: false,
+      connected: true,
+      actionPending: null,
+      onRename: async () => undefined,
+      onClose: () => undefined,
+      onDelete: () => undefined,
+    }));
+    expect(managed).toContain(">Sandboxed · Managed egress</span>");
   });
 
   it("shows Pi-style percentage and compact context-window metrics", () => {

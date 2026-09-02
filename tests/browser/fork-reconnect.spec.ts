@@ -56,6 +56,48 @@ test("rewind replaces the source with a fork and prefills the selected prompt", 
   await deleteSelectedConversation(page);
 });
 
+test("managed badges and blocked notices survive reconnect and refresh after fork and rewind", async ({ page }) => {
+  const workspaceName = "Managed lifecycle workspace";
+  const prompt = "Blocked network reconnect while streaming";
+  await waitForConnected(page);
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  const form = page.getByRole("form", { name: "Create workspace" });
+  await form.getByLabel("Name").fill(workspaceName);
+  await form.getByLabel("Directory path").fill("/tmp/chatwca-managed-lifecycle");
+  await form.getByLabel("Security profile", { exact: true }).selectOption("workspace-sandboxed");
+  await form.getByLabel("Sandbox network", { exact: true }).selectOption("managed-egress");
+  page.once("dialog", (dialog) => dialog.accept());
+  await form.getByRole("button", { name: "Add workspace" }).click();
+  await page.getByRole("button", { name: `New conversation in ${workspaceName}` }).click();
+  await submitAndWait(page, prompt);
+
+  await expect(page.locator(".security-badge")).toHaveText("Sandboxed · Managed egress");
+  const blocked = page.getByRole("region", { name: "Blocked network destinations" });
+  await expect(blocked).toContainText("blocked.example.com");
+  await expect(blocked).toContainText("port 443");
+  await expect(blocked).toContainText("https-connect");
+  await expect(blocked).toContainText("not_allowed");
+  await expect(blocked).toContainText("3 occurrences");
+  await expect(blocked.getByRole("button")).toHaveCount(0);
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+
+  const sourceRow = page.locator("button.conversation-row").filter({
+    hasText: prompt,
+    hasNotText: `Fork of ${prompt}`,
+  });
+  await page.getByRole("button", { name: "Fork conversation from this message" }).click();
+  await expect(page.locator(".security-badge")).toHaveText("Sandboxed · Managed egress");
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Delete", exact: true }).click();
+  await sourceRow.click();
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Rewind conversation to this message" }).click();
+  await expect(page.locator(".security-badge")).toHaveText("Sandboxed · Managed egress");
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Delete", exact: true }).click();
+});
+
 test("recovers only the in-memory selected workspace and conversation after a socket interruption", async ({ page }) => {
   const sent: Array<{
     socket: number;

@@ -2,7 +2,10 @@ import * as React from "react";
 import { useId, useState, type FormEvent } from "react";
 
 import type {
+  PublicManagedEgressConfig,
   PublicSandboxConfig,
+  SandboxNetworkPolicy,
+  WorkspaceNetworkPolicyIssue,
   WorkspaceSecurityProfile,
   WorkspaceSessionStorage,
 } from "../../../shared/protocol.js";
@@ -12,17 +15,21 @@ export interface WorkspaceFormValues {
   readonly path: string;
   readonly sessionStorage: WorkspaceSessionStorage;
   readonly securityProfile: WorkspaceSecurityProfile;
+  readonly networkPolicy: SandboxNetworkPolicy;
 }
 
 export interface WorkspaceFormInitialValues extends WorkspaceFormValues {
   readonly effectiveSecurityProfile: WorkspaceSecurityProfile | null;
+  readonly effectiveNetworkPolicy: SandboxNetworkPolicy | null;
+  readonly networkPolicyIssue: WorkspaceNetworkPolicyIssue;
 }
 
 export interface WorkspaceFormProps {
   readonly mode: "create" | "edit";
   readonly initialValues?: WorkspaceFormInitialValues;
   readonly publicSandboxConfig: PublicSandboxConfig;
-  /** A live runtime makes path/profile changes server-invalid; name remains editable. */
+  readonly publicManagedEgressConfig: PublicManagedEgressConfig;
+  /** A live runtime makes path/profile/network changes server-invalid; name remains editable. */
   readonly securityControlsLocked: boolean;
   readonly submitting: boolean;
   readonly error: string | null;
@@ -34,6 +41,10 @@ export function securityProfileLabel(profile: WorkspaceSecurityProfile): string 
   return profile === "workspace-sandboxed" ? "Workspace sandbox" : "Unrestricted";
 }
 
+export function networkPolicyLabel(policy: SandboxNetworkPolicy): string {
+  return policy === "managed-egress" ? "Managed egress" : "Isolated";
+}
+
 function createProfile(config: PublicSandboxConfig): WorkspaceSecurityProfile {
   return config.mode === "required" ? "workspace-sandboxed" : "unrestricted";
 }
@@ -43,6 +54,7 @@ export function WorkspaceForm({
   mode,
   initialValues,
   publicSandboxConfig,
+  publicManagedEgressConfig,
   securityControlsLocked,
   submitting,
   error,
@@ -67,10 +79,17 @@ export function WorkspaceForm({
         ? "workspace-sandboxed"
         : initialProfile,
   );
+  const [networkPolicy, setNetworkPolicy] = useState<SandboxNetworkPolicy>(
+    initialValues?.networkPolicy ?? "isolated",
+  );
   const [validationError, setValidationError] = useState<string | null>(null);
   const visibleError = validationError ?? error;
   const profileSelectable = publicSandboxConfig.mode === "optional";
   const pathLocked = editing && securityControlsLocked;
+  const sandboxNetworkRelevant = securityProfile === "workspace-sandboxed" ||
+    initialValues?.effectiveSecurityProfile === "workspace-sandboxed";
+  const networkPolicySelectable = publicManagedEgressConfig.selectablePolicies.length > 1 ||
+    !publicManagedEgressConfig.selectablePolicies.includes(networkPolicy);
 
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -79,6 +98,7 @@ export function WorkspaceForm({
       path: path.trim(),
       sessionStorage,
       securityProfile,
+      networkPolicy,
     };
     if (values.name.length === 0) {
       setValidationError("Enter a workspace name.");
@@ -142,7 +162,9 @@ export function WorkspaceForm({
             value={securityProfile}
             disabled={submitting || securityControlsLocked}
             onChange={(event) => {
-              setSecurityProfile(event.target.value as WorkspaceSecurityProfile);
+              const profile = event.target.value as WorkspaceSecurityProfile;
+              setSecurityProfile(profile);
+              if (!editing && profile !== "workspace-sandboxed") setNetworkPolicy("isolated");
               setValidationError(null);
             }}
           >
@@ -166,6 +188,44 @@ export function WorkspaceForm({
           </div>
         </>
       )}
+      {sandboxNetworkRelevant && (
+        <>
+          <label htmlFor={`${formId}-network`}>Sandbox network</label>
+          {networkPolicySelectable ? (
+            <select
+              id={`${formId}-network`}
+              value={networkPolicy}
+              disabled={submitting || securityControlsLocked}
+              onChange={(event) => {
+                setNetworkPolicy(event.target.value as SandboxNetworkPolicy);
+                setValidationError(null);
+              }}
+            >
+              {!publicManagedEgressConfig.selectablePolicies.includes(networkPolicy) && (
+                <option value={networkPolicy} disabled>
+                  {networkPolicyLabel(networkPolicy)} — unavailable
+                </option>
+              )}
+              {publicManagedEgressConfig.selectablePolicies.map((policy) => (
+                <option key={policy} value={policy}>{networkPolicyLabel(policy)}</option>
+              ))}
+            </select>
+          ) : (
+            <div
+              id={`${formId}-network`}
+              className="workspace-profile-fixed"
+              aria-label="Sandbox network"
+            >
+              {networkPolicyLabel(networkPolicy)}
+            </div>
+          )}
+          <p className="workspace-form-help">
+            {networkPolicy === "managed-egress"
+              ? "Tools may contact only administrator-configured destinations through a filtered proxy."
+              : "Tools have no network access."}
+          </p>
+        </>
+      )}
       {editing && initialValues !== undefined && (
         <dl className="workspace-profile-summary">
           <div>
@@ -177,6 +237,22 @@ export function WorkspaceForm({
             <dd>{initialValues.effectiveSecurityProfile === null
               ? "None — policy blocked"
               : securityProfileLabel(initialValues.effectiveSecurityProfile)}</dd>
+          </div>
+          <div>
+            <dt>Stored network policy</dt>
+            <dd>{networkPolicyLabel(initialValues.networkPolicy)}</dd>
+          </div>
+          <div>
+            <dt>Effective network policy</dt>
+            <dd>{initialValues.effectiveNetworkPolicy === null
+              ? "None"
+              : networkPolicyLabel(initialValues.effectiveNetworkPolicy)}</dd>
+          </div>
+          <div className="workspace-profile-summary-wide">
+            <dt>Network policy issue</dt>
+            <dd>{initialValues.networkPolicyIssue === "managed_egress_disabled"
+              ? "Managed egress is disabled by the administrator."
+              : "No network policy issue"}</dd>
           </div>
         </dl>
       )}

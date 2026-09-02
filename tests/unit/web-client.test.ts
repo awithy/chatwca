@@ -330,6 +330,8 @@ describe("ChatSocketClient", () => {
       sessionFile: "/sessions/two.jsonl",
       title: "Forked",
       messages: [],
+      securityProfile: "workspace-sandboxed" as const,
+      networkPolicy: "managed-egress" as const,
     };
     socket.server({
       type: "state",
@@ -416,6 +418,8 @@ describe("ChatSocketClient", () => {
       sessionFile: "/sessions/two.jsonl",
       title: "Rewound",
       messages: [],
+      securityProfile: "workspace-sandboxed" as const,
+      networkPolicy: "isolated" as const,
     };
     socket.server({
       type: "state",
@@ -618,9 +622,28 @@ describe("ChatSocketClient", () => {
       }],
     });
     await flush();
-    sockets[0]?.server({ type: "state", conversation: conversation(2) });
+    sockets[0]?.server({
+      type: "state",
+      conversation: {
+        ...conversation(2),
+        securityProfile: "workspace-sandboxed",
+        networkPolicy: "managed-egress",
+      },
+    });
     client.selectConversation("conversation-1");
     client.setDraft("conversation-1", "local draft");
+    sockets[0]?.server({
+      type: "network.blocked",
+      workspaceId: "workspace-1",
+      conversationId: "conversation-1",
+      revision: 3,
+      payload: {
+        host: "blocked.example.com",
+        port: 443,
+        protocol: "https-connect",
+        reason: "not_allowed",
+      },
+    });
 
     sockets[0]?.remoteClose();
     expect(client.getState().connection).toBe("reconnecting");
@@ -658,7 +681,11 @@ describe("ChatSocketClient", () => {
     sockets[1]?.server({
       type: "state",
       requestId: "id-5",
-      conversation: conversation(3),
+      conversation: {
+        ...conversation(4),
+        securityProfile: "workspace-sandboxed",
+        networkPolicy: "managed-egress",
+      },
     });
     await flush();
 
@@ -669,6 +696,12 @@ describe("ChatSocketClient", () => {
       historyWorkspaceId: "workspace-1",
       drafts: { "conversation-1": "local draft" },
     });
+    expect(client.getState().conversations["conversation-1"]?.networkBlocked).toEqual([
+      expect.objectContaining({
+        revision: 3,
+        payload: expect.objectContaining({ host: "blocked.example.com" }),
+      }),
+    ]);
     expect(sockets[1]?.commands()).toHaveLength(3);
     client.disconnect();
   });

@@ -14,6 +14,7 @@ import { ConversationHeader } from "./components/ConversationHeader.js";
 import { WorkspaceSidebar } from "./components/WorkspaceSidebar.js";
 import type { WorkspaceFormValues } from "./components/WorkspaceForm.js";
 import { MessageTimeline } from "./components/MessageTimeline.js";
+import { NetworkBlockedNotices } from "./components/NetworkBlockedNotices.js";
 import type { PromptAction } from "./components/chat-interactions.js";
 import { orderConversations } from "./components/conversation-list.js";
 
@@ -145,6 +146,7 @@ export function App() {
       path: values.path,
       sessionStorage: values.sessionStorage,
       securityProfile: values.securityProfile,
+      networkPolicy: values.networkPolicy,
     }));
     const created = result.workspaces.find((workspace) => !knownIds.has(workspace.id));
     if (created !== undefined) {
@@ -158,7 +160,9 @@ export function App() {
       readonly name: string;
       readonly path?: string;
       readonly securityProfile?: WorkspaceFormValues["securityProfile"];
+      readonly networkPolicy?: WorkspaceFormValues["networkPolicy"];
       readonly acknowledgeSecurityDowngrade?: true;
+      readonly acknowledgeNetworkExposure?: true;
     },
   ): Promise<void> {
     await runExclusive("workspace.update", () => client.send({
@@ -169,8 +173,14 @@ export function App() {
       ...(values.securityProfile === undefined
         ? {}
         : { securityProfile: values.securityProfile }),
+      ...(values.networkPolicy === undefined
+        ? {}
+        : { networkPolicy: values.networkPolicy }),
       ...(values.acknowledgeSecurityDowngrade === true
         ? { acknowledgeSecurityDowngrade: true as const }
+        : {}),
+      ...(values.acknowledgeNetworkExposure === true
+        ? { acknowledgeNetworkExposure: true as const }
         : {}),
     }));
     if (values.path !== undefined && chat.selectedWorkspaceId === workspaceId) {
@@ -437,6 +447,7 @@ export function App() {
           : null}
         actionPending={pendingAction !== null}
         publicSandboxConfig={server.config?.sandbox}
+        publicManagedEgressConfig={server.config?.managedEgress}
         open={sidebarOpen}
         onDismiss={() => setSidebarOpen(false)}
         onSelectWorkspace={(workspaceId) => {
@@ -557,7 +568,10 @@ export function App() {
                   </p>
                 </div>
               ) : (
-                <div className="conversation-workspace">
+                <div className={`conversation-workspace${(selectedProjection?.networkBlocked.length ?? 0) > 0 ? " has-network-notices" : ""}`}>
+                  {(selectedProjection?.networkBlocked.length ?? 0) > 0 && (
+                    <NetworkBlockedNotices notices={selectedProjection?.networkBlocked ?? []} />
+                  )}
                   <MessageTimeline
                     conversationId={selectedConversation.id}
                     messages={selectedConversation.messages}

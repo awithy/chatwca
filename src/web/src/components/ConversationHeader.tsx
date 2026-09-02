@@ -88,10 +88,13 @@ export function ConversationHeader({
   const statusClass = loading ? "opening" : (conversation?.status ?? summary.status);
   const actualStatus = conversation?.status ?? summary.status;
   const securityProfile = conversation?.securityProfile;
+  const networkPolicy = conversation?.networkPolicy;
   const securityLabel = securityProfile === undefined
     ? "Loading security profile…"
     : securityProfile === "workspace-sandboxed"
-      ? "Sandboxed"
+      ? networkPolicy === "managed-egress"
+        ? "Sandboxed · Managed egress"
+        : "Sandboxed · Network isolated"
       : "Unrestricted";
   const closeEnabled = conversation !== undefined && canCloseConversation(conversation.status);
   const deleteEnabled = canDeleteConversation(actualStatus);
@@ -146,8 +149,8 @@ export function ConversationHeader({
             <strong>Workspace blocked by policy</strong>
           ) : null}
           <span
-            className={`security-badge${securityProfile === undefined ? " security-loading" : securityProfile === "workspace-sandboxed" ? " security-sandboxed" : " security-unrestricted"}`}
-            aria-label={`Conversation security profile: ${securityLabel}`}
+            className={`security-badge${securityProfile === undefined ? " security-loading" : securityProfile === "workspace-sandboxed" ? networkPolicy === "managed-egress" ? " security-managed" : " security-sandboxed" : " security-unrestricted"}`}
+            aria-label={`Conversation security: ${securityLabel}`}
           >
             {securityLabel}
           </span>

@@ -26,6 +26,7 @@ function conversation(revision = 0): ConversationState {
     messages: [],
     queue: { steering: [], followUp: [] },
     securityProfile: "unrestricted",
+    networkPolicy: null,
   };
 }
 
@@ -230,6 +231,82 @@ describe("web chat state", () => {
     expect(projection?.notices).toEqual([
       { kind: "runtime", level: "info", message: "Settled" },
     ]);
+  });
+
+  it("collects bounded revisioned network denials, coalesces counts, and preserves them across snapshots", () => {
+    let state = reduceChatClientState(createInitialChatClientState(), {
+      type: "snapshot",
+      conversation: {
+        ...conversation(),
+        securityProfile: "workspace-sandboxed",
+        networkPolicy: "managed-egress",
+      },
+    });
+    state = reduceChatClientState(state, {
+      type: "event",
+      event: {
+        type: "network.blocked",
+        workspaceId: "workspace-1",
+        conversationId: "conversation-1",
+        revision: 1,
+        payload: {
+          host: "blocked.example.com",
+          port: 443,
+          protocol: "https-connect",
+          reason: "explicit_deny",
+        },
+      },
+    });
+    state = reduceChatClientState(state, {
+      type: "event",
+      event: {
+        type: "network.blocked",
+        workspaceId: "workspace-1",
+        conversationId: "conversation-1",
+        revision: 2,
+        payload: {
+          host: "blocked.example.com",
+          port: 443,
+          protocol: "https-connect",
+          reason: "explicit_deny",
+          occurrenceCount: 4,
+        },
+      },
+    });
+
+    expect(state.conversations["conversation-1"]?.networkBlocked).toEqual([
+      expect.objectContaining({ revision: 2, payload: expect.objectContaining({ occurrenceCount: 4 }) }),
+    ]);
+
+    state = reduceChatClientState(state, {
+      type: "snapshot",
+      conversation: {
+        ...conversation(3),
+        securityProfile: "workspace-sandboxed",
+        networkPolicy: "managed-egress",
+      },
+    });
+    expect(state.conversations["conversation-1"]?.networkBlocked).toHaveLength(1);
+
+    for (let revision = 4; revision <= 58; revision += 1) {
+      state = reduceChatClientState(state, {
+        type: "event",
+        event: {
+          type: "network.blocked",
+          workspaceId: "workspace-1",
+          conversationId: "conversation-1",
+          revision,
+          payload: {
+            host: `blocked-${String(revision)}.example.com`,
+            port: 80,
+            protocol: "http",
+            reason: "not_allowed",
+          },
+        },
+      });
+    }
+    expect(state.conversations["conversation-1"]?.networkBlocked).toHaveLength(50);
+    expect(state.conversations["conversation-1"]?.networkBlocked[0]?.revision).toBe(9);
   });
 
   it("updates context usage on completed messages and clears the estimate after compaction", () => {

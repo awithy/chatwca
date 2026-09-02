@@ -19,7 +19,9 @@ interface SentFrame {
   readonly type?: string;
   readonly name?: string;
   readonly securityProfile?: string;
+  readonly networkPolicy?: string;
   readonly acknowledgeSecurityDowngrade?: boolean;
+  readonly acknowledgeNetworkExposure?: boolean;
 }
 
 function captureSent(page: Page): SentFrame[] {
@@ -53,31 +55,89 @@ async function openWorkspaceInfo(page: Page, name: string) {
   return page.getByRole("region", { name: `Workspace info for ${name}` });
 }
 
-test("optional mode defaults to Unrestricted and creates a badged Workspace sandbox", async ({ page }) => {
+test("optional mode defaults to Unrestricted and creates a network-isolated Workspace sandbox", async ({ page }) => {
   await waitForConnected(page);
   const name = "Sandbox profile project";
   await openCreate(page, name, "/tmp/chatwca-browser-sandbox-profile");
   const form = page.getByRole("form", { name: "Create workspace" });
   await expect(form.getByLabel("Security profile", { exact: true })).toHaveValue("unrestricted");
   await form.getByLabel("Security profile", { exact: true }).selectOption("workspace-sandboxed");
+  await expect(form.getByLabel("Sandbox network", { exact: true })).toHaveValue("isolated");
   await page.getByRole("button", { name: "Add workspace", exact: true }).click();
 
   await page.getByRole("button", { name: `New conversation in ${name}` }).click();
   const badge = page.locator(".security-badge");
-  await expect(badge).toHaveText("Sandboxed");
-  await expect(badge).toHaveAttribute("aria-label", "Conversation security profile: Sandboxed");
+  await expect(badge).toHaveText("Sandboxed · Network isolated");
+  await expect(badge).toHaveAttribute("aria-label", "Conversation security: Sandboxed · Network isolated");
 
   const info = await openWorkspaceInfo(page, name);
   await expect(info).toContainText("Stored profile");
   await expect(info).toContainText("Effective profile");
   await expect(info).toContainText("Optional — sandboxing is not required");
-  await expect(info).toContainText("No network access");
+  await expect(info).toContainText("Stored network policy");
+  await expect(info).toContainText("Effective network policy");
+  await expect(info).toContainText("No network policy issue");
+  await expect(info).toContainText("Available — startup functional probe passed");
+  await expect(info).toContainText("**.example.com");
+  await expect(info).toContainText("blocked.example.com");
+  await expect(info).toContainText("80, 443");
+  await expect(info).toContainText("http, https-connect, websocket, websocket-secure, socks5-tcp");
+  await expect(info).toContainText("loopback, LAN, link-local, metadata");
+  await expect(info).toContainText("UDP and inbound connections");
+  await expect(info).toContainText("outbound TCP");
+  await expect(info).toContainText("HTTPS remains end-to-end encrypted");
+  await expect(info).toContainText("Tools may transmit workspace content");
   await expect(info).toContainText(".git");
   await expect(info).toContainText("/usr");
   await expect(info).toContainText("administrator-approved runtime mounts");
   await expect(info).toContainText("Workspace content may still be sent to the configured model provider");
   await expect(info).toContainText("does not isolate CPU, memory, or disk denial-of-service");
   await expect(info).not.toContainText("/administrator/private/mount");
+  await info.getByRole("button", { name: "Close" }).click();
+
+  await page.getByRole("button", { name: `Workspace actions for ${name}` }).click();
+  await page.getByRole("button", { name: `Edit workspace ${name}` }).click();
+  const editForm = page.getByRole("form", { name: "Edit workspace" });
+  await expect(editForm.getByLabel("Directory path")).toBeDisabled();
+  await expect(editForm.getByLabel("Security profile", { exact: true })).toBeDisabled();
+  await expect(editForm.getByLabel("Sandbox network", { exact: true })).toBeDisabled();
+});
+
+test("managed egress creation and isolated-to-managed updates require confirmation", async ({ page }) => {
+  const sent = captureSent(page);
+  await waitForConnected(page);
+  const name = "Managed network project";
+  await openCreate(page, name, "/tmp/chatwca-browser-managed-network");
+  const createForm = page.getByRole("form", { name: "Create workspace" });
+  await createForm.getByLabel("Security profile", { exact: true }).selectOption("workspace-sandboxed");
+  await createForm.getByLabel("Sandbox network", { exact: true }).selectOption("managed-egress");
+
+  page.once("dialog", (dialog) => dialog.dismiss());
+  await page.getByRole("button", { name: "Add workspace", exact: true }).click();
+  await expect(createForm).toBeVisible();
+  expect(sent.filter((frame) => frame.type === "workspace.create" && frame.name === name)).toHaveLength(0);
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Add workspace", exact: true }).click();
+  await expect(createForm).toHaveCount(0);
+  expect(sent.find((frame) => frame.type === "workspace.create" && frame.name === name)).toMatchObject({
+    securityProfile: "workspace-sandboxed",
+    networkPolicy: "managed-egress",
+  });
+
+  const isolatedName = "Network update project";
+  await addSandboxWorkspace(page, isolatedName, "/tmp/chatwca-browser-network-update");
+  await page.getByRole("button", { name: `Workspace actions for ${isolatedName}` }).click();
+  await page.getByRole("button", { name: `Edit workspace ${isolatedName}` }).click();
+  const editForm = page.getByRole("form", { name: "Edit workspace" });
+  await editForm.getByLabel("Sandbox network", { exact: true }).selectOption("managed-egress");
+  page.once("dialog", (dialog) => dialog.accept());
+  await editForm.getByRole("button", { name: "Save changes" }).click();
+  await expect(editForm).toHaveCount(0);
+  expect(sent.find((frame) => frame.type === "workspace.update" && frame.name === isolatedName)).toMatchObject({
+    networkPolicy: "managed-egress",
+    acknowledgeNetworkExposure: true,
+  });
 });
 
 test("downgrade requires confirmation and acknowledges only an accepted warning", async ({ page }) => {
@@ -164,6 +224,7 @@ test("required authoritative mode fixes creation to Workspace sandbox", async ({
   const form = page.getByRole("form", { name: "Create workspace" });
   await expect(form.locator("select")).toHaveCount(0);
   await expect(form.getByLabel("Security profile", { exact: true })).toHaveText("Workspace sandbox");
+  await expect(form.getByLabel("Sandbox network", { exact: true })).toHaveText("Isolated");
   await page.getByRole("button", { name: "Add workspace", exact: true }).click();
   await expect.poll(() => sent.some(
     (frame) => frame.type === "workspace.create" &&
@@ -194,6 +255,7 @@ test("disabled authoritative mode fixes creation to Unrestricted", async ({ page
   await openCreate(page, "Disabled mode project", "/tmp/chatwca-browser-disabled-mode");
   const form = page.getByRole("form", { name: "Create workspace" });
   await expect(form.getByLabel("Security profile", { exact: true })).toHaveText("Unrestricted");
+  await expect(form.getByLabel("Sandbox network", { exact: true })).toHaveCount(0);
   await expect(form.locator("select")).toHaveCount(0);
   await page.getByRole("button", { name: "Add workspace", exact: true }).click();
   await expect.poll(() => sent.some(

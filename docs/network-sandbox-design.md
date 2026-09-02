@@ -222,7 +222,7 @@ New server configuration:
 |---|---:|---|
 | `CHATWCA_MANAGED_EGRESS_MODE` | `disabled` | `disabled` or `optional` |
 | `CHATWCA_NETWORK_HELPER_PATH` | packaged helper path | Canonical native Linux helper executable |
-| `CHATWCA_NETWORK_ALLOWED_DOMAINS` | `[]` | JSON array of exact or scoped wildcard domain patterns |
+| `CHATWCA_NETWORK_ALLOWED_DOMAINS` | `[]` | JSON array of exact hosts, scoped domain wildcards, or the all-public-host `*` pattern |
 | `CHATWCA_NETWORK_DENIED_DOMAINS` | `[]` | JSON array of explicit deny patterns; deny wins |
 | `CHATWCA_NETWORK_ALLOWED_PORTS` | `[80,443]` | JSON array forming the global allowed TCP-port ceiling |
 | `CHATWCA_NETWORK_POLICY_SETS` | unset | Closed JSON array of named exact-subset policies; unset synthesizes `default` from the complete global ceiling |
@@ -255,9 +255,10 @@ Supported patterns are deliberately narrow:
 example.com       exact host only
 *.example.com     subdomains only; does not include example.com
 **.example.com    example.com and all subdomains
+*                 every normalized host, subject to public-address and port checks
 ```
 
-The global `*` pattern, arbitrary mid-label globs, URL strings, schemes, paths, query strings, credentials, and embedded ports are rejected.
+Arbitrary mid-label globs, URL strings, schemes, paths, query strings, credentials, and embedded ports are rejected. The all-host `*` pattern does not bypass explicit denies, DNS validation, non-public-address rejection, or the port ceiling.
 
 Hosts are normalized by:
 
@@ -268,7 +269,7 @@ Hosts are normalized by:
 - normalizing IPv4 and IPv6 literals; and
 - rejecting empty, malformed, scoped, or ambiguous values.
 
-An IP literal is not matched by a domain wildcard. Public IP literals require an exact allow entry and an allowed port. Non-public IP literals are always denied.
+An IP literal is not matched by a scoped domain wildcard. Public IP literals require an exact allow entry or the all-host `*` pattern and an allowed port. Non-public IP literals are always denied.
 
 ## 9. Persistence and protocol
 
@@ -415,7 +416,7 @@ CHATWCA_MANAGED_EGRESS=1
 
 Lowercase aliases and known npm, Yarn, Bundler, pip, and Docker proxy aliases are set to the same controlled endpoints where those tools support them.
 
-The isolated profile receives none of these variables.
+The isolated profile receives none of these variables. The managed profile additionally mounts the host's `/etc/ssl/certs` directory read-only so standard clients can authenticate public HTTPS servers. This is a public trust store, not a ChatWCA CA; the parent proxy still never terminates TLS.
 
 The environment variables are compatibility hints, not the enforcement boundary. Direct traffic remains impossible if they are removed or changed.
 
@@ -792,7 +793,7 @@ The native helper has no network-policy logic and no third-party runtime service
 - JSON configuration parsing and normalized duplicate rejection;
 - exact, subdomain-only, and apex-plus-subdomain pattern semantics;
 - explicit deny precedence;
-- global wildcard and malformed pattern rejection;
+- all-host wildcard semantics, non-public-address fail closure, and malformed pattern rejection;
 - port allowlist validation;
 - IPv4, IPv6, mapped-address, metadata, and special-range classification;
 - DNS failure, timeout, mixed public/private answers, and pinned-address behavior;

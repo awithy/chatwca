@@ -90,8 +90,10 @@ describe("sandbox per-worker probe validation", () => {
     body.capInh = body.capPrm = body.capEff = body.capBnd = body.capAmb = "0000000000000000";
     body.seccomp = "2";
     body.environment = managedSandboxEnvironment(31_001, 31_002);
+    body.etcEntries = ["group", "hosts", "nsswitch.conf", "passwd", "ssl"];
     body.network = {
       profile: "managed-egress", helperVersion: "1.0.0", guestPorts: { http: 31_001, socks: 31_002 },
+      caBundleReadable: true,
       ipv4: { connected: false }, ipv6: { connected: false },
       loopback4: { connected: false }, loopback6: { connected: false }, dns: { resolved: false },
       protocolDescriptors: { "8": "pipe:[1]", "9": "pipe:[2]" },

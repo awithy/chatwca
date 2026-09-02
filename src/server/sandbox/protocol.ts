@@ -207,6 +207,7 @@ const ManagedNetworkProbeSchema = strictObject({
   profile: Type.Literal("managed-egress"),
   helperVersion: Type.String(),
   guestPorts: strictObject({ http: Type.Integer({ minimum: 1, maximum: 65_535 }), socks: Type.Integer({ minimum: 1, maximum: 65_535 }) }),
+  caBundleReadable: Type.Boolean(),
   ...CommonNetworkProbe,
   httpEndpoint: ConnectProbeSchema, socksEndpoint: ConnectProbeSchema,
   httpLocalDenial: strictObject({ connected: Type.Boolean(), denied: Type.Boolean(), error: Type.Union([Type.String(), Type.Null()]) }),

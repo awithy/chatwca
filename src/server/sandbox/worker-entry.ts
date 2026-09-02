@@ -264,6 +264,12 @@ async function collectProbe(hello: ParentFrame, actualHash: string): Promise<obj
       const arbitraryPort = httpPort !== 9 && socksPort !== 9 ? 9 : 7;
       return {
         profile: "managed-egress", helperVersion, guestPorts: { http: httpPort, socks: socksPort },
+        caBundleReadable: (() => {
+          try {
+            fs.accessSync("/etc/ssl/certs/ca-certificates.crt", fs.constants.R_OK);
+            return fs.statSync("/etc/ssl/certs/ca-certificates.crt").isFile();
+          } catch { return false; }
+        })(),
         ipv4: await connect({ host: "1.1.1.1", port: 53 }),
         ipv6: await connect({ host: "2606:4700:4700::1111", port: 53, family: 6 }),
         loopback4: await connect({ host: "127.0.0.1", port: arbitraryPort }),

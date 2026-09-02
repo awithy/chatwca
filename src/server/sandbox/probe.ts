@@ -139,7 +139,10 @@ export function validateSandboxWorkerReady(
   if (!equalJson(probe.devEntries, EXPECTED_DEV_ENTRIES)) {
     throw new Error("minimal /dev differs");
   }
-  if (!equalJson(probe.etcEntries, EXPECTED_ETC_ENTRIES)) {
+  const expectedEtcEntries = context.profile === "managed-egress"
+    ? [...EXPECTED_ETC_ENTRIES, "ssl"].sort()
+    : EXPECTED_ETC_ENTRIES;
+  if (!equalJson(probe.etcEntries, expectedEtcEntries)) {
     throw new Error("minimal /etc differs");
   }
   if (!Array.isArray(probe.hiddenPaths) ||
@@ -195,6 +198,7 @@ export function validateSandboxWorkerReady(
   )) throw new Error("helper bootstrap or artifact descriptor survived");
   if (context.profile === "managed-egress") {
     if (probe.seccomp !== "2") throw new Error("managed seccomp is not active");
+    if (network.caBundleReadable !== true) throw new Error("managed CA certificate bundle is unavailable");
     if (network.helperVersion !== context.helperVersion) throw new Error("managed helper version differs");
     for (const name of ["httpEndpoint", "socksEndpoint"] as const) {
       if (object(network[name]).connected !== true) throw new Error(`${name} did not answer`);

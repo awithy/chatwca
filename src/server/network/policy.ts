@@ -90,9 +90,9 @@ class ImmutableSetView<T> implements ReadonlySet<T> {
 
 interface CompiledPattern {
   readonly normalized: string;
-  readonly mode: "exact" | "subdomains" | "apex_and_subdomains";
+  readonly mode: "all" | "exact" | "subdomains" | "apex_and_subdomains";
   readonly base: string;
-  readonly kind: "domain" | "ip";
+  readonly kind: "all" | "domain" | "ip";
 }
 
 export interface CompiledDestinationPolicy {
@@ -195,7 +195,8 @@ export function normalizeDestinationHost(input: string): NormalizedDestinationHo
 /** Normalize one administrator exact/scoped-wildcard pattern. */
 export function normalizeDestinationPattern(input: string): string {
   const trimmed = input.trim();
-  if (trimmed.length === 0 || trimmed === "*" || trimmed.includes("[") || trimmed.includes("]")) {
+  if (trimmed === "*") return trimmed;
+  if (trimmed.length === 0 || trimmed.includes("[") || trimmed.includes("]")) {
     throw new DestinationPolicyError("invalid_pattern", "invalid destination pattern");
   }
 
@@ -228,6 +229,9 @@ export function normalizeDestinationPattern(input: string): string {
 }
 
 function compilePattern(normalized: string): CompiledPattern {
+  if (normalized === "*") {
+    return Object.freeze({ normalized, mode: "all", base: "", kind: "all" });
+  }
   let mode: CompiledPattern["mode"] = "exact";
   let base = normalized;
   if (normalized.startsWith("**.")) {
@@ -276,6 +280,7 @@ export function compileDestinationPolicy(
 }
 
 function matches(pattern: CompiledPattern, host: NormalizedDestinationHost): boolean {
+  if (pattern.mode === "all") return true;
   if (pattern.kind === "ip" || host.kind === "ip") {
     return pattern.mode === "exact" && pattern.kind === host.kind && pattern.base === host.host;
   }

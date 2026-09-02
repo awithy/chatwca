@@ -139,7 +139,7 @@ Implement:
 - port evaluation; and
 - one shared decision API used by HTTP, CONNECT, and SOCKS.
 
-Reject schemes, paths, credentials, embedded ports, global wildcards, mid-label globs, scoped IPv6, malformed IDNA, ambiguous numeric hosts, and empty labels.
+Reject schemes, paths, credentials, embedded ports, mid-label globs, scoped IPv6, malformed IDNA, ambiguous numeric hosts, and empty labels. Accept `*` only as the complete all-host pattern; it remains subject to explicit denies, allowed ports, and non-public-address rejection.
 
 ### 2.3 `resolver.ts`
 

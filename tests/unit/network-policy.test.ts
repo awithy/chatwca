@@ -69,6 +69,7 @@ describe("managed-network destination normalization", () => {
   });
 
   it.each([
+    [" * ", "*"],
     ["Example.com.", "example.com"],
     ["*.BÜCHER.example", "*.xn--bcher-kva.example"],
     ["**.API.example", "**.api.example"],
@@ -78,7 +79,6 @@ describe("managed-network destination normalization", () => {
   });
 
   it.each([
-    "*",
     "***.example.com",
     "foo.*.example.com",
     "exam*ple.com",
@@ -91,6 +91,28 @@ describe("managed-network destination normalization", () => {
 });
 
 describe("managed-network destination policy", () => {
+  it("allows every normalized public host through the global wildcard while retaining safety checks", () => {
+    const openWeb = policy(["*"], ["blocked.example"]);
+    expect(decideDestination(openWeb, { host: "example.com", port: 443 })).toMatchObject({
+      allowed: true,
+      reason: "allowlist",
+    });
+    expect(decideDestination(openWeb, { host: "8.8.8.8", port: 443 })).toMatchObject({
+      allowed: true,
+      reason: "allowlist",
+    });
+    expect(decideDestination(openWeb, { host: "2001:4860:4860::8888", port: 443 })).toMatchObject({
+      allowed: true,
+      reason: "allowlist",
+    });
+    expect(decideDestination(openWeb, { host: "blocked.example", port: 443 }).reason)
+      .toBe("explicit_deny");
+    expect(decideDestination(openWeb, { host: "127.0.0.1", port: 443 }).reason)
+      .toBe("local_address");
+    expect(decideDestination(openWeb, { host: "example.com", port: 80 }).reason)
+      .toBe("port_not_allowed");
+  });
+
   it("implements exact, subdomain-only, and apex-plus-subdomain matching", () => {
     const exact = policy(["example.com"]);
     expect(decideDestination(exact, { host: "example.com", port: 443 }).allowed).toBe(true);

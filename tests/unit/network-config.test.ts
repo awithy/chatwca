@@ -108,7 +108,6 @@ describe("managed-network configuration", () => {
   });
 
   it.each([
-    "*",
     "foo.*.example",
     "https://example.com",
     "example.com/path",
@@ -122,6 +121,25 @@ describe("managed-network configuration", () => {
     expect(() => optional({
       CHATWCA_NETWORK_ALLOWED_DOMAINS: JSON.stringify([pattern]),
     })).toThrow(/invalid domain pattern/);
+  });
+
+  it("accepts an open-public-web wildcard in the global ceiling and named sets", () => {
+    const config = optional({
+      CHATWCA_NETWORK_ALLOWED_DOMAINS: '["*"]',
+      CHATWCA_NETWORK_ALLOWED_PORTS: "[80,443]",
+      CHATWCA_NETWORK_POLICY_SETS: JSON.stringify([{
+        id: "default",
+        label: "Open public web",
+        allowedDomains: ["*"],
+        allowedPorts: [80, 443],
+      }]),
+    });
+    const selected = config.policySets.get("default")!.destinationPolicy;
+    expect(config.allowedDomainPatterns).toEqual(["*"]);
+    expect(decideDestination(selected, { host: "example.com", port: 443 }).allowed).toBe(true);
+    expect(decideDestination(selected, { host: "8.8.8.8", port: 80 }).allowed).toBe(true);
+    expect(decideDestination(selected, { host: "127.0.0.1", port: 443 }).reason)
+      .toBe("local_address");
   });
 
   it("compiles the normalized startup policy with deny precedence", () => {

@@ -125,6 +125,9 @@ describe("Bubblewrap argument builder", () => {
     expect(descriptor.bwrapArgs).toContain("--unshare-net");
     expect(descriptor.bwrapArgs).toContain("CAP_NET_ADMIN");
     expect(descriptor.bwrapArgs).toContain("CAP_SETPCAP");
+    expect(pairs(descriptor.bwrapArgs, "--ro-bind")).toContainEqual([
+      "/etc/ssl/certs", "/etc/ssl/certs",
+    ]);
     expect(descriptor.bwrapArgs).not.toContain("--setenv");
     expect(descriptor.bwrapArgs).not.toContain("/usr/bin/node");
     expect(built.dataBindings.map(({ fd }) => fd)).toEqual([3, 13, 14, 15, 16, 17]);

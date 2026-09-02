@@ -424,6 +424,13 @@ function baseBwrapArguments(input: SandboxBuildInput, managed: boolean): string[
     "--dir", "/etc",
     "--dir", "/app",
   );
+  // HTTPS remains opaque end-to-end, but common clients still need the host's
+  // public CA trust store to authenticate destination certificates. Keep the
+  // isolated profile unchanged and expose only certificates, read-only, to
+  // managed-egress workers.
+  if (managed) {
+    argv.push("--dir", "/etc/ssl", "--ro-bind", "/etc/ssl/certs", "/etc/ssl/certs");
+  }
   for (const directory of mountParentDirectories(input.config.readOnlyMounts)) argv.push("--dir", directory);
   for (const mount of input.config.readOnlyMounts) argv.push("--ro-bind", mount.source, mount.destination);
   argv.push("--bind", input.workspace, "/workspace");

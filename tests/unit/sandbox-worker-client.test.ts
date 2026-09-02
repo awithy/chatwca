@@ -113,8 +113,10 @@ describe("SandboxWorkerClient hostile transport", () => {
       Object.assign(response.probe, {
         seccomp: "2",
         environment: managedContext.expectedEnvironment,
+        etcEntries: ["group", "hosts", "nsswitch.conf", "passwd", "ssl"],
         network: {
           profile: "managed-egress", helperVersion: "1.0.0", guestPorts: { http: 31_001, socks: 31_002 },
+          caBundleReadable: true,
           ipv4: { connected: false }, ipv6: { connected: false }, loopback4: { connected: false }, loopback6: { connected: false },
           dns: { resolved: false }, protocolDescriptors: { "8": "pipe:[1]", "9": "pipe:[2]" },
           httpEndpoint: { connected: true }, socksEndpoint: { connected: true },

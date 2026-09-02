@@ -43,6 +43,21 @@ export const ERROR_CODES = {
   INVALID_FORK_TARGET: "invalid_fork_target",
   FORK_SOURCE_BUSY: "fork_source_busy",
   LIVE_RUNTIME_LIMIT: "live_runtime_limit",
+  JOB_NOT_FOUND: "job_not_found",
+  JOB_INVALID: "job_invalid",
+  JOB_BUSY: "job_busy",
+  JOB_DISABLED: "job_disabled",
+  JOB_ALREADY_RUNNING: "job_already_running",
+  JOB_SCRIPT_ROOTS_UNAVAILABLE: "job_script_roots_unavailable",
+  JOB_SCRIPT_INVALID: "job_script_invalid",
+  JOB_SCRIPT_UNAVAILABLE: "job_script_unavailable",
+  JOB_PRE_RUN_FAILED: "job_pre_run_failed",
+  JOB_POST_RUN_FAILED: "job_post_run_failed",
+  JOB_HOOK_TIMEOUT: "job_hook_timeout",
+  JOB_HOOK_OUTPUT_LIMIT: "job_hook_output_limit",
+  JOB_PROMPT_FAILED: "job_prompt_failed",
+  JOB_ABORTED: "job_aborted",
+  JOB_INTERRUPTED: "job_interrupted",
   REVISION_GAP: "revision_gap",
   SESSION_FILE_MISSING: "session_file_missing",
   SESSION_UNAVAILABLE: "session_unavailable",
@@ -101,6 +116,21 @@ const DEFAULT_MESSAGES: Readonly<Record<ErrorCode, string>> = {
   invalid_fork_target: "The fork target is not a user message on the active branch.",
   fork_source_busy: "A conversation cannot be forked while it is running.",
   live_runtime_limit: "The live conversation limit has been reached and no idle conversation can be closed.",
+  job_not_found: "The scheduled job was not found.",
+  job_invalid: "The scheduled job configuration is invalid.",
+  job_busy: "The scheduled job cannot be changed while it is running.",
+  job_disabled: "Enable the scheduled job before running it.",
+  job_already_running: "The scheduled job already has an active run.",
+  job_script_roots_unavailable: "Trusted job-script roots are not available.",
+  job_script_invalid: "The job script path is invalid or outside the accepted roots.",
+  job_script_unavailable: "A configured job script is no longer available.",
+  job_pre_run_failed: "The pre-run script failed.",
+  job_post_run_failed: "The post-run script failed.",
+  job_hook_timeout: "The job script exceeded its time limit.",
+  job_hook_output_limit: "The job script exceeded its output limit.",
+  job_prompt_failed: "The scheduled prompt failed.",
+  job_aborted: "The job run was aborted.",
+  job_interrupted: "The job run was interrupted by server shutdown or restart.",
   revision_gap: "Conversation updates were missed; reload the conversation state.",
   session_file_missing: "The session file no longer exists.",
   session_unavailable: "The session file is not accessible.",
@@ -152,6 +182,25 @@ export type ErrorContext =
         | "busy";
     }
   | { readonly source: "database" }
+  | {
+      readonly source: "job";
+      readonly issue:
+        | "missing"
+        | "invalid"
+        | "busy"
+        | "disabled"
+        | "already-running"
+        | "script-roots"
+        | "script-invalid"
+        | "script-unavailable"
+        | "pre-run"
+        | "post-run"
+        | "hook-timeout"
+        | "hook-output"
+        | "prompt"
+        | "aborted"
+        | "interrupted";
+    }
   | {
       readonly source: "sandbox";
       readonly phase:
@@ -257,6 +306,39 @@ function contextCode(error: unknown, context: ErrorContext): ErrorCode {
       }
     case "database":
       return ERROR_CODES.DATABASE_ERROR;
+    case "job":
+      switch (context.issue) {
+        case "missing":
+          return ERROR_CODES.JOB_NOT_FOUND;
+        case "invalid":
+          return ERROR_CODES.JOB_INVALID;
+        case "busy":
+          return ERROR_CODES.JOB_BUSY;
+        case "disabled":
+          return ERROR_CODES.JOB_DISABLED;
+        case "already-running":
+          return ERROR_CODES.JOB_ALREADY_RUNNING;
+        case "script-roots":
+          return ERROR_CODES.JOB_SCRIPT_ROOTS_UNAVAILABLE;
+        case "script-invalid":
+          return ERROR_CODES.JOB_SCRIPT_INVALID;
+        case "script-unavailable":
+          return ERROR_CODES.JOB_SCRIPT_UNAVAILABLE;
+        case "pre-run":
+          return ERROR_CODES.JOB_PRE_RUN_FAILED;
+        case "post-run":
+          return ERROR_CODES.JOB_POST_RUN_FAILED;
+        case "hook-timeout":
+          return ERROR_CODES.JOB_HOOK_TIMEOUT;
+        case "hook-output":
+          return ERROR_CODES.JOB_HOOK_OUTPUT_LIMIT;
+        case "prompt":
+          return ERROR_CODES.JOB_PROMPT_FAILED;
+        case "aborted":
+          return ERROR_CODES.JOB_ABORTED;
+        case "interrupted":
+          return ERROR_CODES.JOB_INTERRUPTED;
+      }
     case "sandbox":
       switch (context.phase) {
         case "configuration":

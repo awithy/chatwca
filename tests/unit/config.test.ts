@@ -17,6 +17,7 @@ import {
 } from "../../src/server/config.js";
 import { loadSandboxConfig } from "../../src/server/sandbox/config.js";
 import { loadManagedNetworkConfig } from "../../src/server/network/config.js";
+import { loadJobConfig } from "../../src/server/job-config.js";
 
 describe("loadConfig", () => {
   it("applies defaults", () => {
@@ -35,6 +36,7 @@ describe("loadConfig", () => {
       piOffline: false,
       sandbox: loadSandboxConfig({}),
       managedNetwork: loadManagedNetworkConfig({}, "disabled", { processCwd: cwd }),
+      jobs: loadJobConfig({}),
     });
   });
 
@@ -69,8 +71,24 @@ describe("loadConfig", () => {
       piOffline: true,
       sandbox: loadSandboxConfig({}),
       managedNetwork: loadManagedNetworkConfig({}, "disabled", { processCwd: cwd }),
+      jobs: loadJobConfig({}),
     });
     expect(Object.isFrozen(config)).toBe(true);
+  });
+
+  it("composes scheduled-job process configuration", () => {
+    const config = loadConfig({
+      CHATWCA_JOB_SCRIPT_ROOTS: JSON.stringify([path.resolve("/tmp")]),
+      CHATWCA_JOB_HOOK_TIMEOUT_MS: "2500",
+      CHATWCA_JOB_HOOK_MAX_OUTPUT_BYTES: "2048",
+    }, "/tmp/base");
+
+    expect(config.jobs).toEqual({
+      scriptRoots: [path.resolve("/tmp")],
+      hookTimeoutMs: 2500,
+      hookMaxOutputBytes: 2048,
+      bashPath: "/usr/bin/bash",
+    });
   });
 
   it("composes managed-network policy with the sandbox ceiling", () => {

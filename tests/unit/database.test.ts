@@ -28,7 +28,7 @@ afterEach(() => {
 });
 
 describe("openDatabase", () => {
-  it("creates nested storage and initializes the version-six schema", () => {
+  it("creates nested storage and initializes the version-seven schema", () => {
     const dataDir = path.join(temporaryDirectory(), "nested", "data");
     const database = openDatabase(dataDir);
 
@@ -64,7 +64,7 @@ describe("openDatabase", () => {
     database.close();
   });
 
-  it("accepts and preserves an existing version-six database", () => {
+  it("accepts and preserves an existing version-seven database", () => {
     const dataDir = temporaryDirectory();
     const first = openDatabase(dataDir);
     first.connection
@@ -333,6 +333,133 @@ describe("openDatabase", () => {
     migrated.close();
   });
 
+  it("migrates version-six databases to empty job tables", () => {
+    const dataDir = temporaryDirectory();
+    const filename = path.join(dataDir, DATABASE_FILENAME);
+    const legacy = new Database(filename);
+    legacy.exec(`
+      CREATE TABLE workspaces (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL UNIQUE,
+        session_storage TEXT NOT NULL DEFAULT 'pi-default',
+        security_profile TEXT NOT NULL DEFAULT 'unrestricted',
+        network_policy TEXT NOT NULL DEFAULT 'isolated',
+        network_policy_set_id TEXT NOT NULL DEFAULT 'default',
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE workspace_mounts (
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        name TEXT NOT NULL, source_path TEXT NOT NULL, access TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, name), UNIQUE (workspace_id, source_path)
+      );
+      INSERT INTO workspaces VALUES
+        ('v6', 'Version 6', '/work/v6', 'pi-default', 'unrestricted', 'isolated', 'default', 1, 2);
+      PRAGMA user_version = 6;
+    `);
+    legacy.close();
+
+    const migrated = openDatabase(dataDir);
+    expect(migrated.connection.prepare("SELECT * FROM jobs").all()).toEqual([]);
+    expect(migrated.connection.prepare("SELECT * FROM job_runs").all()).toEqual([]);
+    expect(migrated.connection.prepare("SELECT id FROM workspaces").all()).toEqual([{ id: "v6" }]);
+    expect(migrated.connection.pragma("user_version", { simple: true })).toBe(7);
+    migrated.close();
+  });
+
+  it("creates constrained job tables, foreign keys, and scheduling indexes", () => {
+    const database = openDatabase(temporaryDirectory(), ":memory:");
+    const connection = database.connection;
+    connection.prepare(`
+      INSERT INTO workspaces (id, name, path, created_at, updated_at)
+      VALUES ('workspace', 'Workspace', '/workspace', 1, 1)
+    `).run();
+    const insertInterval = connection.prepare(`
+      INSERT INTO jobs (
+        id, name, workspace_id, prompt, schedule_kind, interval_minutes,
+        anchor_at, enabled, next_run_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 'interval', ?, ?, ?, ?, 1, 1)
+    `);
+    insertInterval.run("job", "Job", "workspace", "prompt", 60, 10, 1, 20);
+
+    const jobColumns = connection.prepare("PRAGMA table_info(jobs)").all() as Array<{ name: string }>;
+    const runColumns = connection.prepare("PRAGMA table_info(job_runs)").all() as Array<{ name: string }>;
+    expect(jobColumns.map(({ name }) => name)).toContain("next_run_at");
+    expect(runColumns.map(({ name }) => name)).toContain("revision");
+    expect(connection.prepare(`
+      SELECT name FROM sqlite_master WHERE type = 'index'
+        AND name IN ('jobs_due_idx', 'job_runs_job_time_idx', 'job_runs_active_job_idx')
+      ORDER BY name
+    `).all()).toEqual([
+      { name: "job_runs_active_job_idx" },
+      { name: "job_runs_job_time_idx" },
+      { name: "jobs_due_idx" },
+    ]);
+
+    for (const values of [
+      ["bad-interval", "Bad", "workspace", "prompt", 0, 10, 1, 20],
+      ["bad-disabled", "Bad", "workspace", "prompt", 60, 10, 0, 20],
+      ["bad-anchor", "Bad", "workspace", "prompt", 60, 1.5, 1, 20],
+      ["bad-workspace", "Bad", "missing", "prompt", 60, 10, 1, 20],
+    ] as const) {
+      expect(() => insertInterval.run(...values)).toThrow();
+    }
+    expect(() => connection.prepare(`
+      INSERT INTO jobs (
+        id, name, workspace_id, prompt, schedule_kind, daily_time, time_zone,
+        enabled, next_run_at, created_at, updated_at
+      ) VALUES ('bad-daily', 'Bad', 'workspace', 'prompt', 'daily', '24:00', 'UTC', 1, 20, 1, 1)
+    `).run()).toThrow(/CHECK constraint failed/);
+    expect(() => connection.prepare(`
+      INSERT INTO jobs (
+        id, name, workspace_id, prompt, schedule_kind, interval_minutes,
+        anchor_at, enabled, next_run_at, created_at, updated_at
+      ) VALUES ('mixed', 'Mixed', 'workspace', 'prompt', 'interval', 5, 1, 1, 20, 1, 1)
+    `).run()).not.toThrow();
+
+    const insertRun = connection.prepare(`
+      INSERT INTO job_runs
+        (id, job_id, trigger, scheduled_for, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 1, 1)
+    `);
+    insertRun.run("run-1", "job", "scheduled", 20, "queued");
+    expect(() => insertRun.run("run-2", "job", "manual", 21, "running"))
+      .toThrow(/UNIQUE constraint failed/);
+    connection.prepare("UPDATE job_runs SET status = 'succeeded' WHERE id = 'run-1'").run();
+    insertRun.run("run-2", "job", "manual", 21, "running");
+    for (const invalid of [
+      ["run-trigger", "job", "timer", 22, "queued"],
+      ["run-status", "job", "scheduled", 22, "unknown"],
+      ["run-time", "job", "scheduled", 1.5, "queued"],
+      ["run-fk", "missing", "scheduled", 22, "queued"],
+    ] as const) {
+      expect(() => insertRun.run(...invalid)).toThrow();
+    }
+    expect(() => connection.prepare("DELETE FROM workspaces WHERE id = 'workspace'").run())
+      .toThrow(/FOREIGN KEY constraint failed/);
+    connection.prepare("DELETE FROM jobs WHERE id = 'job'").run();
+    expect(connection.prepare("SELECT * FROM job_runs").all()).toEqual([]);
+    database.close();
+  });
+
+  it("rolls back a failed 6-to-7 migration without partial job tables", () => {
+    const dataDir = temporaryDirectory();
+    const filename = path.join(dataDir, DATABASE_FILENAME);
+    const broken = new Database(filename);
+    broken.exec(`
+      CREATE TABLE workspaces (id TEXT PRIMARY KEY);
+      CREATE TABLE jobs (id TEXT PRIMARY KEY);
+      PRAGMA user_version = 6;
+    `);
+    broken.close();
+
+    expect(() => openDatabase(dataDir)).toThrow(/table jobs already exists/);
+    const inspected = new Database(filename);
+    expect(inspected.pragma("user_version", { simple: true })).toBe(6);
+    expect(inspected.prepare(`
+      SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'job_runs'
+    `).get()).toBeUndefined();
+    inspected.close();
+  });
+
   it("rolls back a failed 4-to-5 migration without advancing user_version", () => {
     const dataDir = temporaryDirectory();
     const filename = path.join(dataDir, DATABASE_FILENAME);
@@ -372,14 +499,14 @@ describe("openDatabase", () => {
     const dataDir = temporaryDirectory();
     const filename = path.join(dataDir, DATABASE_FILENAME);
     const unsupported = new Database(filename);
-    unsupported.pragma("user_version = 7");
+    unsupported.pragma("user_version = 8");
     unsupported.close();
 
     expect(() => openDatabase(dataDir)).toThrow(
       UnsupportedDatabaseVersionError,
     );
     expect(() => openDatabase(dataDir)).toThrow(
-      /schema version 7; expected 6/,
+      /schema version 8; expected 7/,
     );
 
     const afterFailure = new Database(filename);

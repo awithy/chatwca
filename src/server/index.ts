@@ -53,6 +53,7 @@ import {
 } from "./sandbox/probe.js";
 import { publicSandboxConfig } from "./sandbox/config.js";
 import { publicManagedEgressConfig } from "./network/config.js";
+import { publicJobConfig } from "./job-config.js";
 import {
   validateNetworkHelper,
   type ValidatedNetworkHelper,
@@ -202,6 +203,7 @@ export function createChatWcaServer(
         config.managedNetwork,
         services?.managedNetworkFunctionalProbeSucceeded ?? false,
       ),
+      jobs: publicJobConfig(config.jobs),
     });
   });
 

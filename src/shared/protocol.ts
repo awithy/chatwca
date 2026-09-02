@@ -1,6 +1,40 @@
 import { type Static, Type, type TSchema } from "@sinclair/typebox";
 
 import { ErrorCodeSchema } from "./errors.js";
+import { PublicJobsConfigSchema } from "./jobs.js";
+
+export {
+  JobConfigurationIssueSchema,
+  JobErrorCodeSchema,
+  JobIdentifierSchema,
+  JobNameSchema,
+  JobPromptSchema,
+  JobRunCursorSchema,
+  JobRunPhaseSchema,
+  JobRunStateSchema,
+  JobRunStatusSchema,
+  JobRunSummarySchema,
+  JobRunTriggerSchema,
+  JobScheduleInputSchema,
+  JobScheduleSchema,
+  JobScriptPathSchema,
+  JobSummarySchema,
+  JobTimestampSchema,
+  PublicJobsConfigSchema,
+} from "./jobs.js";
+export type {
+  JobConfigurationIssue,
+  JobErrorCode,
+  JobRunPhase,
+  JobRunState,
+  JobRunStatus,
+  JobRunSummary,
+  JobRunTrigger,
+  JobSchedule,
+  JobScheduleInput,
+  JobSummary,
+  PublicJobsConfig,
+} from "./jobs.js";
 
 /**
  * ChatWCA's JSON wire contract.
@@ -334,6 +368,7 @@ export const PublicConfigSchema = strictObject({
   maxTotalImageBytes: Type.Integer({ minimum: 1 }),
   sandbox: PublicSandboxConfigSchema,
   managedEgress: PublicManagedEgressConfigSchema,
+  jobs: PublicJobsConfigSchema,
 });
 export type PublicConfig = Static<typeof PublicConfigSchema>;
 

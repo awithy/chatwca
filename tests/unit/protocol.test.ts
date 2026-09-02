@@ -380,6 +380,16 @@ describe("public configuration schema", () => {
         disclosureWarning: "Workspace disclosure",
         functionalProbeSucceeded: false,
       },
+      jobs: {
+        schedulerAvailable: true,
+        hooksAvailable: false,
+        scriptRoots: [],
+        minIntervalMinutes: 1,
+        maxIntervalMinutes: 525_600,
+        supportedTimeZones: ["UTC"],
+        hostAuthorityWarning: "Host authority disclosure",
+        unattendedUsageWarning: "Unattended usage disclosure",
+      },
     } as const;
     expect(Value.Check(PublicConfigSchema, config)).toBe(true);
     expect(Value.Check(PublicConfigSchema, {

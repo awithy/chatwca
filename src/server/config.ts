@@ -9,6 +9,7 @@ import {
   loadManagedNetworkConfig,
   type ManagedNetworkConfig,
 } from "./network/config.js";
+import { loadJobConfig, type JobConfig } from "./job-config.js";
 
 export { ConfigurationError } from "./sandbox/config.js";
 
@@ -41,6 +42,8 @@ export interface ServerConfig {
   readonly sandbox: Readonly<SandboxConfig>;
   /** Complete server-only managed-network policy and resource limits. */
   readonly managedNetwork: Readonly<ManagedNetworkConfig>;
+  /** Complete server-only scheduled-job and trusted-hook configuration. */
+  readonly jobs: Readonly<JobConfig>;
 }
 
 function optionalNonEmpty(
@@ -116,6 +119,7 @@ export function loadConfig(
   const managedNetwork = loadManagedNetworkConfig(environment, sandbox.mode, {
     processCwd,
   });
+  const jobs = loadJobConfig(environment);
 
   return Object.freeze({
     host,
@@ -146,5 +150,6 @@ export function loadConfig(
     piOffline: environment.PI_OFFLINE !== undefined,
     sandbox,
     managedNetwork,
+    jobs,
   });
 }

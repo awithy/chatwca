@@ -216,6 +216,13 @@ describe("production startup wiring", () => {
         allowedDomainPatterns: ["example.com"],
         functionalProbeSucceeded: true,
       },
+      jobs: {
+        schedulerAvailable: true,
+        hooksAvailable: false,
+        scriptRoots: [],
+        minIntervalMinutes: 1,
+        maxIntervalMinutes: 525_600,
+      },
     });
     await server.shutdown();
     expect(database?.closed).toBe(true);

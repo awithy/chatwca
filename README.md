@@ -1,6 +1,6 @@
 # ChatWCA
 
-ChatWCA is a single-user, dark-only web interface for the [Pi coding agent](https://pi.dev/). A Node.js server runs the pinned `@earendil-works/pi-coding-agent` SDK in-process and serves a React client over HTTP and WebSocket.
+ChatWCA is a single-user local agent platform built upon the [Pi coding agent](https://pi.dev/) SDK.
 
 ![ChatWCA web interface showing workspaces, conversations, and a Pi coding session](docs/assets/chatwca-interface.png)
 

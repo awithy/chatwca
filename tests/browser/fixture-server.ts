@@ -1,3 +1,4 @@
+import { mkdirSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 
 import { loadConfig } from "../../src/server/config.js";
@@ -8,6 +9,7 @@ import {
   createChatWcaServer,
   type ChatWcaServer,
 } from "../../src/server/index.js";
+import type { JobServiceListener } from "../../src/server/job-service.js";
 import type {
   ProtocolHistory,
   ProtocolJobs,
@@ -19,6 +21,10 @@ import type {
   ConversationEvent,
   ConversationState,
   ConversationSummary,
+  JobRunState,
+  JobRunSummary,
+  JobSchedule,
+  JobSummary,
   NormalizedMessage,
   UiImage,
   UserMessage,
@@ -37,6 +43,8 @@ const PORT = Number(process.env.CHATWCA_BROWSER_TEST_PORT ?? 28787);
 const CWD = "/tmp/chatwca-browser-workspace";
 const WORKSPACE_ID = "browser-workspace";
 const SESSION_ROOT = "/tmp/chatwca-browser-sessions";
+const JOB_HOOK_ROOT = "/tmp/chatwca-browser-hooks";
+mkdirSync(JOB_HOOK_ROOT, { recursive: true });
 const WORKSPACE: WorkspaceSummary = {
   id: WORKSPACE_ID,
   name: "Browser workspace",
@@ -208,6 +216,7 @@ function summary(
         ? "streaming"
         : state.status,
     runnable: true,
+    ...(state.owner === undefined ? {} : { owner: state.owner }),
   };
 }
 
@@ -560,6 +569,9 @@ const registry: ProtocolRegistry = {
     fixture.state = { ...fixture.state, status: "idle", queue: { steering: [], followUp: [] } };
     emitEvent(fixture, { type: "conversation.status", payload: { status: "idle" } });
   },
+  getActiveOwner(conversationId) {
+    return conversations.get(conversationId)?.state.owner;
+  },
   hasLiveWorkspace(workspaceId) {
     return [...conversations.values()].some(
       (fixture) => !fixture.closed && fixture.state.workspaceId === workspaceId,
@@ -752,21 +764,247 @@ const config = loadConfig(
     CHATWCA_NETWORK_DENIED_DOMAINS: '["blocked.example.com"]',
     CHATWCA_NETWORK_ALLOWED_PORTS: "[80,443]",
     CHATWCA_NETWORK_POLICY_SETS: '[{"id":"default","label":"Package registries","allowedDomains":["registry.npmjs.org"],"allowedPorts":[443]},{"id":"web","label":"Example web","allowedDomains":["**.example.com"],"allowedPorts":[80,443]}]',
+    CHATWCA_JOB_SCRIPT_ROOTS: JSON.stringify([JOB_HOOK_ROOT]),
   },
   CWD,
 );
 
+let jobSequence = 0;
+let runSequence = 0;
+let jobRows: JobSummary[] = [];
+const runRows = new Map<string, JobRunState[]>();
+const jobListeners = new Set<JobServiceListener>();
+const jobTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function emitJobs(): void {
+  const snapshot = [...jobRows];
+  for (const listener of jobListeners) listener({ type: "jobs", jobs: snapshot });
+}
+
+function summaryRun(run: JobRunState): JobRunSummary {
+  const {
+    preExitCode: _preExitCode,
+    preStdout: _preStdout,
+    preStderr: _preStderr,
+    postExitCode: _postExitCode,
+    postStdout: _postStdout,
+    postStderr: _postStderr,
+    conversationAvailable: _conversationAvailable,
+    ...summary
+  } = run;
+  return summary;
+}
+
+function emitRun(run: JobRunState): void {
+  for (const listener of jobListeners) listener({ type: "job.run.updated", run: summaryRun(run) });
+}
+
+function findJob(jobId: string): JobSummary {
+  const job = jobRows.find((candidate) => candidate.id === jobId);
+  if (job === undefined) throw new Error("Unknown fixture job");
+  return job;
+}
+
+function updateRun(run: JobRunState): void {
+  const rows = runRows.get(run.jobId) ?? [];
+  runRows.set(run.jobId, rows.map((candidate) => candidate.id === run.id ? run : candidate));
+  jobRows = jobRows.map((job) => job.id === run.jobId ? {
+    ...job,
+    activeRun: run.status === "queued" || run.status === "running" ? summaryRun(run) : null,
+    lastRun: summaryRun(run),
+    updatedAt: nextTime(),
+  } : job);
+  emitRun(run);
+  emitJobs();
+}
+
+function newRun(job: JobSummary): JobRunState {
+  runSequence += 1;
+  const now = nextTime();
+  const run: JobRunState = {
+    id: `browser-run-${String(runSequence)}`,
+    jobId: job.id,
+    trigger: "manual",
+    scheduledFor: now,
+    startedAt: now,
+    finishedAt: null,
+    status: "running",
+    phase: job.preRunScript === null ? "prompt" : "pre-hook",
+    errorCode: null,
+    errorMessage: null,
+    conversationId: null,
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+    preExitCode: null,
+    preStdout: null,
+    preStderr: null,
+    postExitCode: null,
+    postStdout: null,
+    postStderr: null,
+    conversationAvailable: false,
+  };
+  runRows.set(job.id, [run, ...(runRows.get(job.id) ?? [])]);
+  updateRun(run);
+  const missing = /missing/i.test(job.name);
+  const conversationId = missing ? `browser-missing-${String(runSequence)}` : `browser-job-conversation-${String(runSequence)}`;
+  if (!missing) {
+    const fixture = addFixture({
+      ...emptyState(conversationId, `[Job] ${job.name}`),
+      status: "streaming",
+      owner: { kind: "scheduled-job", jobId: job.id, runId: run.id },
+    });
+    fixture.state = { ...fixture.state, workspaceId: job.workspaceId };
+    for (const listener of listeners) listener({ type: "conversation.state-changed", record: fixture.state as never });
+  }
+  const attached: JobRunState = {
+    ...run,
+    phase: "prompt",
+    conversationId,
+    conversationAvailable: !missing,
+    revision: 2,
+    updatedAt: nextTime(),
+    ...(job.preRunScript === null ? {} : {
+      preExitCode: 0,
+      preStdout: "<script>alert('not html')</script>\nfixture pre output",
+      preStderr: "",
+    }),
+  };
+  updateRun(attached);
+  const timer = setTimeout(() => {
+    jobTimers.delete(run.id);
+    const current = (runRows.get(job.id) ?? []).find((candidate) => candidate.id === run.id);
+    if (current === undefined || current.status !== "running") return;
+    if (!missing) {
+      const fixture = fixtureById(conversationId);
+      fixture.closed = true;
+      const { owner: _owner, ...withoutOwner } = fixture.state;
+      fixture.state = { ...withoutOwner, status: "idle", lastActiveAt: nextTime() };
+      for (const listener of listeners) listener({ type: "conversation.state-changed", record: fixture.state as never });
+    }
+    updateRun({
+      ...current,
+      status: "succeeded",
+      phase: job.postRunScript === null ? "prompt" : "post-hook",
+      finishedAt: nextTime() + 2_000,
+      revision: current.revision + 1,
+      updatedAt: nextTime(),
+      ...(job.postRunScript === null ? {} : {
+        postExitCode: 0,
+        postStdout: "bounded fixture post output",
+        postStderr: "",
+      }),
+    });
+  }, 10_000);
+  jobTimers.set(run.id, timer);
+  return attached;
+}
+
 const jobs: ProtocolJobs = {
-  list: () => [],
-  create: () => [],
-  update: () => [],
-  delete: () => [],
-  referencesWorkspace: () => false,
-  run: () => { throw new Error("Browser fixture has no configured jobs"); },
-  abort: async () => undefined,
-  runs: () => ({ runs: [] }),
-  runState: () => { throw new Error("Browser fixture has no configured jobs"); },
-  subscribe: () => () => undefined,
+  list: () => [...jobRows],
+  create: (input) => {
+    jobSequence += 1;
+    const now = nextTime();
+    const workspace = workspaceRows.find((candidate) => candidate.id === input.workspaceId);
+    if (workspace === undefined) throw new Error("Unknown fixture workspace");
+    const schedule: JobSchedule = input.schedule.kind === "interval"
+      ? { ...input.schedule, anchorAt: now }
+      : input.schedule;
+    const job: JobSummary = {
+      id: `browser-job-${String(jobSequence)}`,
+      name: input.name.trim(),
+      workspaceId: input.workspaceId,
+      workspaceName: workspace.name,
+      workspaceAvailable: workspace.available,
+      prompt: input.prompt,
+      schedule,
+      preRunScript: input.preRunScript ?? null,
+      postRunScript: input.postRunScript ?? null,
+      enabled: input.enabled,
+      nextRunAt: input.enabled ? now + 3_600_000 : null,
+      createdAt: now,
+      updatedAt: now,
+      activeRun: null,
+      lastRun: null,
+      configurationIssue: null,
+    };
+    jobRows = [...jobRows, job];
+    runRows.set(job.id, []);
+    emitJobs();
+    return [...jobRows];
+  },
+  update: (jobId, input) => {
+    const current = findJob(jobId);
+    const workspaceId = input.workspaceId ?? current.workspaceId;
+    const workspace = workspaceRows.find((candidate) => candidate.id === workspaceId);
+    if (workspace === undefined) throw new Error("Unknown fixture workspace");
+    const schedule: JobSchedule = input.schedule === undefined
+      ? current.schedule
+      : input.schedule.kind === "interval"
+        ? { ...input.schedule, anchorAt: nextTime() }
+        : input.schedule;
+    const enabled = input.enabled ?? current.enabled;
+    jobRows = jobRows.map((job) => job.id === jobId ? {
+      ...job,
+      ...(input.name === undefined ? {} : { name: input.name.trim() }),
+      ...(input.prompt === undefined ? {} : { prompt: input.prompt }),
+      workspaceId,
+      workspaceName: workspace.name,
+      workspaceAvailable: workspace.available,
+      schedule,
+      preRunScript: input.preRunScript === undefined ? current.preRunScript : input.preRunScript,
+      postRunScript: input.postRunScript === undefined ? current.postRunScript : input.postRunScript,
+      enabled,
+      nextRunAt: enabled ? current.nextRunAt ?? nextTime() + 3_600_000 : null,
+      updatedAt: nextTime(),
+    } : job);
+    emitJobs();
+    return [...jobRows];
+  },
+  delete: (jobId) => {
+    if (findJob(jobId).activeRun !== null) throw new Error("Active fixture job cannot be deleted");
+    jobRows = jobRows.filter((job) => job.id !== jobId);
+    runRows.delete(jobId);
+    emitJobs();
+    return [...jobRows];
+  },
+  referencesWorkspace: (workspaceId) => jobRows.some((job) => job.workspaceId === workspaceId),
+  run: (jobId) => {
+    const job = findJob(jobId);
+    if (!job.enabled) throw new Error("The fixture job is disabled");
+    if (job.activeRun !== null) throw new Error("The fixture job is already running");
+    return newRun(job);
+  },
+  abort: async (jobId, runId) => {
+    const run = (runRows.get(jobId) ?? []).find((candidate) => candidate.id === runId);
+    if (run === undefined) throw new Error("Unknown fixture run");
+    const timer = jobTimers.get(runId);
+    if (timer !== undefined) clearTimeout(timer);
+    jobTimers.delete(runId);
+    if (run.conversationId !== null && conversations.has(run.conversationId)) {
+      const fixture = fixtureById(run.conversationId);
+      fixture.closed = true;
+      const { owner: _owner, ...withoutOwner } = fixture.state;
+      fixture.state = { ...withoutOwner, status: "idle" };
+    }
+    updateRun({ ...run, status: "aborted", errorCode: "job_aborted", errorMessage: "The job run was aborted.", finishedAt: nextTime(), revision: run.revision + 1, updatedAt: nextTime() });
+  },
+  runs: (jobId, cursor) => {
+    findJob(jobId);
+    const offset = cursor === undefined ? 0 : Number(cursor);
+    const all = runRows.get(jobId) ?? [];
+    const page = all.slice(offset, offset + 3).map(summaryRun);
+    return { runs: page, ...(offset + page.length < all.length ? { nextCursor: String(offset + page.length) } : {}) };
+  },
+  runState: (jobId, runId) => {
+    const run = (runRows.get(jobId) ?? []).find((candidate) => candidate.id === runId);
+    if (run === undefined) throw new Error("Unknown fixture run");
+    return run;
+  },
+  subscribe: (listener) => {
+    jobListeners.add(listener);
+    return () => jobListeners.delete(listener);
+  },
 };
 
 server = createChatWcaServer(config, "browser-fixture", {
@@ -795,6 +1033,7 @@ async function stop(): Promise<void> {
   for (const fixture of conversations.values()) {
     for (const timer of fixture.timers) clearTimeout(timer);
   }
+  for (const timer of jobTimers.values()) clearTimeout(timer);
   for (const client of server.webSocketServer.clients) client.terminate();
   await new Promise<void>((resolve) => server.webSocketServer.close(() => resolve()));
   await new Promise<void>((resolve) => server.httpServer.close(() => resolve()));

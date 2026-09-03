@@ -24,6 +24,7 @@ export interface ConversationHeaderProps {
   readonly onCreate: () => void;
   readonly onClose: () => void;
   readonly onDelete: () => void;
+  readonly onOpenJobRun: (jobId: string, runId: string) => void;
 }
 
 function formatTokens(count: number): string {
@@ -64,6 +65,7 @@ export function ConversationHeader({
   onCreate,
   onClose,
   onDelete,
+  onOpenJobRun,
 }: ConversationHeaderProps) {
   const displayTitle = conversation?.title.trim() || conversationTitle(summary);
   const [editingTitle, setEditingTitle] = useState(false);
@@ -98,10 +100,12 @@ export function ConversationHeader({
         ? "Sandboxed · Managed egress"
         : "Sandboxed · Network isolated"
       : "Unrestricted";
+  const owner = conversation?.owner ?? summary.owner;
+  const mutationLocked = owner?.kind === "scheduled-job";
   const createEnabled = workspace.available && workspace.usable;
-  const closeEnabled = conversation !== undefined && canCloseConversation(conversation.status);
-  const deleteEnabled = canDeleteConversation(actualStatus);
-  const renameEnabled = conversation !== undefined && connected && !loading && actionPending === null;
+  const closeEnabled = !mutationLocked && conversation !== undefined && canCloseConversation(conversation.status);
+  const deleteEnabled = !mutationLocked && canDeleteConversation(actualStatus);
+  const renameEnabled = !mutationLocked && conversation !== undefined && connected && !loading && actionPending === null;
   const normalizedDraft = titleDraft.trim();
   const saveEnabled = renameEnabled && normalizedDraft.length > 0 && normalizedDraft !== displayTitle;
 
@@ -151,6 +155,15 @@ export function ConversationHeader({
           ) : !workspace.usable ? (
             <strong>Workspace blocked by policy</strong>
           ) : null}
+          {owner?.kind === "scheduled-job" && (
+            <button
+              type="button"
+              className="job-owner-badge"
+              onClick={() => onOpenJobRun(owner.jobId, owner.runId)}
+            >
+              Scheduled job · View run
+            </button>
+          )}
           <span
             className={`security-badge${securityProfile === undefined ? " security-loading" : securityProfile === "workspace-sandboxed" ? networkPolicy === "managed-egress" ? " security-managed" : " security-sandboxed" : " security-unrestricted"}`}
             aria-label={`Conversation security: ${securityLabel}`}

@@ -253,6 +253,52 @@ export class ChatSocketClient {
     await this.#requestHistory(workspaceId, selectionRevision);
   }
 
+  selectJob(jobId: string | null): void {
+    this.#dispatch({ type: "job.select", jobId });
+  }
+
+  selectJobRun(runId: string | null): void {
+    this.#dispatch({ type: "job.run.select", runId });
+  }
+
+  async loadJobRuns(jobId: string, cursor?: string): Promise<void> {
+    this.#dispatch({ type: "job.runs.pending", jobId });
+    try {
+      await this.send({ type: "job.runs", jobId, ...(cursor === undefined ? {} : { cursor }) });
+    } catch (error) {
+      this.#dispatch({ type: "job.runs.failed", jobId });
+      throw error;
+    }
+  }
+
+  async loadJobRun(jobId: string, runId: string): Promise<void> {
+    await this.send({ type: "job.run.state", jobId, runId });
+  }
+
+  /** Resolve a generated session through authoritative workspace history. */
+  async openGeneratedConversation(workspaceId: string, conversationId: string): Promise<boolean> {
+    try {
+      await this.selectWorkspace(workspaceId);
+      const projection = this.#state.conversations[conversationId];
+      const summary = this.#state.history.find((item) => item.id === conversationId);
+      if (summary?.status !== "closed" && (summary !== undefined || projection !== undefined)) {
+        await this.send({ type: "conversation.state", conversationId });
+      } else if (summary?.runnable === true) {
+        await this.send({
+          type: "conversation.open",
+          workspaceId,
+          conversationId,
+        });
+      } else {
+        return false;
+      }
+      this.selectConversation(conversationId);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   selectConversation(conversationId: string | null): void {
     if (conversationId !== null) {
       const summary = this.#state.history.find((item) => item.id === conversationId);
@@ -441,7 +487,7 @@ export class ChatSocketClient {
           );
           return;
         }
-        this.#projectMessage(message);
+        this.#projectMessage(message, pending.command);
         this.#applyCommandSuccess(pending.command);
         pending.resolve(message);
         return;
@@ -453,7 +499,7 @@ export class ChatSocketClient {
     this.#projectMessage(message);
   }
 
-  #projectMessage(message: ServerMessage): void {
+  #projectMessage(message: ServerMessage, command?: ClientCommand): void {
     if (message.type === "workspaces") {
       this.#dispatch({ type: "workspaces", workspaces: message.workspaces });
     } else if (message.type === "history") {
@@ -467,7 +513,13 @@ export class ChatSocketClient {
     } else if (message.type === "jobs") {
       this.#dispatch({ type: "jobs", jobs: message.jobs });
     } else if (message.type === "job.runs") {
-      this.#dispatch({ type: "job.runs", runs: message.runs });
+      this.#dispatch({
+        type: "job.runs",
+        jobId: message.jobId,
+        runs: message.runs,
+        ...(message.nextCursor === undefined ? {} : { nextCursor: message.nextCursor }),
+        append: command?.type === "job.runs" && command.cursor !== undefined,
+      });
     } else if (message.type === "job.run.state") {
       this.#dispatch({ type: "job.run.state", run: message.run });
     } else if (message.type === "job.run.updated") {
@@ -537,18 +589,24 @@ export class ChatSocketClient {
     const selectionRevision = this.#workspaceSelectionRevision;
     const selectedWorkspaceId = this.#state.selectedWorkspaceId;
     const selectedConversationId = this.#state.selectedConversationId;
+    const selectedJobId = this.#state.selectedJobId;
+    const selectedJobRunId = this.#state.selectedJobRunId;
     try {
-      // A full page load starts with no selection, so this is the only initial
-      // command. Reconnect retains browser memory and restores only that scope.
+      // Definitions are always recovered first. Reconnect then restores only
+      // the selected conversation and run-history scopes held in browser memory.
       await this.send({ type: "workspace.list" });
       if (generation !== this.#generation || this.#state.connection !== "connected") return;
-      // Job recovery is independent from the selected conversation scope. Do
-      // not let a slow job listing delay history recovery, but retain normal
-      // correlation and error handling for the request.
-      void this.#sendWithRequestId(
+      await this.#sendWithRequestId(
         { type: "job.list" },
         `recovery-jobs-${String(generation)}`,
-      ).catch((error: unknown) => this.#setTransportError(error));
+      );
+      if (generation !== this.#generation || this.#state.connection !== "connected") return;
+      if (selectedJobId !== null && this.#state.jobs.some((job) => job.id === selectedJobId)) {
+        await this.loadJobRuns(selectedJobId);
+        if (selectedJobRunId !== null) {
+          await this.loadJobRun(selectedJobId, selectedJobRunId);
+        }
+      }
       if (
         generation !== this.#generation ||
         selectionRevision !== this.#workspaceSelectionRevision ||

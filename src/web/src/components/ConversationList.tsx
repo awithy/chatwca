@@ -131,6 +131,7 @@ export function ConversationList({
                         <span>{conversation.messageCount} {conversation.messageCount === 1 ? "message" : "messages"}</span>
                         <time dateTime={new Date(conversation.modifiedAt).toISOString()}>{formatModified(conversation.modifiedAt)}</time>
                       </span>
+                      {conversation.owner?.kind === "scheduled-job" && <span className="scheduled-job-label">Scheduled job</span>}
                       {!conversation.runnable && <span className="unavailable-label">Conversation unavailable</span>}
                     </button>
                   </li>

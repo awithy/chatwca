@@ -45,6 +45,28 @@ describe("browser scheduled-job protocol state", () => {
     expect(state.jobRunDetails).toEqual({});
   });
 
+  it("stores cursor pages and browser-local job selections deterministically", () => {
+    let state = reduceChatClientState(createInitialChatClientState(), { type: "jobs", jobs: [job] });
+    state = reduceChatClientState(state, { type: "job.select", jobId: job.id });
+    state = reduceChatClientState(state, { type: "job.run.select", runId: detail.id });
+    state = reduceChatClientState(state, {
+      type: "job.runs", jobId: job.id, runs: [summaryOnly(detail)], nextCursor: "older",
+    });
+    state = reduceChatClientState(state, {
+      type: "job.runs", jobId: job.id, runs: [{ ...summaryOnly(detail), id: "run-2" }], append: true,
+    });
+    expect(state.jobRunPages[job.id]).toEqual({
+      runIds: [detail.id, "run-2"], nextCursor: null, loading: false,
+    });
+    expect(state.selectedJobId).toBe(job.id);
+    expect(state.selectedJobRunId).toBe(detail.id);
+
+    state = reduceChatClientState(state, { type: "jobs", jobs: [] });
+    expect(state.selectedJobId).toBeNull();
+    expect(state.selectedJobRunId).toBeNull();
+    expect(state.jobRunPages).toEqual({});
+  });
+
   it("ignores stale revisions and requests detail when a known run has a gap", () => {
     let state = reduceChatClientState(createInitialChatClientState(), {
       type: "job.runs", runs: [summaryOnly(detail)],

@@ -41,6 +41,12 @@ export interface ConversationProjection {
   readonly networkBlocked: readonly NetworkBlockedEvent[];
 }
 
+export interface JobRunPageState {
+  readonly runIds: readonly string[];
+  readonly nextCursor: string | null;
+  readonly loading: boolean;
+}
+
 export interface ChatClientState {
   readonly connection: ConnectionStatus;
   readonly serverVersion: string | null;
@@ -52,8 +58,11 @@ export interface ChatClientState {
   readonly jobRuns: Readonly<Record<string, JobRunSummary>>;
   /** Diagnostics are populated only by correlated explicit state responses. */
   readonly jobRunDetails: Readonly<Record<string, JobRunState>>;
+  readonly jobRunPages: Readonly<Record<string, JobRunPageState>>;
   readonly resyncJobRunIds: readonly string[];
-  /** Browser-local, in-memory selection. */
+  /** Browser-local, in-memory selections. */
+  readonly selectedJobId: string | null;
+  readonly selectedJobRunId: string | null;
   readonly selectedWorkspaceId: string | null;
   /** Identifies the workspace which produced the current history projection. */
   readonly historyWorkspaceId: string | null;
@@ -73,7 +82,17 @@ export type ChatClientAction =
   | { readonly type: "ready"; readonly serverVersion: string }
   | { readonly type: "workspaces"; readonly workspaces: readonly WorkspaceSummary[] }
   | { readonly type: "jobs"; readonly jobs: readonly JobSummary[] }
-  | { readonly type: "job.runs"; readonly runs: readonly JobRunSummary[] }
+  | {
+      readonly type: "job.runs";
+      readonly jobId?: string;
+      readonly runs: readonly JobRunSummary[];
+      readonly nextCursor?: string;
+      readonly append?: boolean;
+    }
+  | { readonly type: "job.runs.pending"; readonly jobId: string }
+  | { readonly type: "job.runs.failed"; readonly jobId: string }
+  | { readonly type: "job.select"; readonly jobId: string | null }
+  | { readonly type: "job.run.select"; readonly runId: string | null }
   | { readonly type: "job.run.state"; readonly run: JobRunState }
   | { readonly type: "job.run.updated"; readonly run: JobRunSummary }
   | { readonly type: "workspace.select"; readonly workspaceId: string | null }
@@ -101,7 +120,10 @@ export function createInitialChatClientState(): ChatClientState {
     jobs: [],
     jobRuns: {},
     jobRunDetails: {},
+    jobRunPages: {},
     resyncJobRunIds: [],
+    selectedJobId: null,
+    selectedJobRunId: null,
     selectedWorkspaceId: null,
     historyWorkspaceId: null,
     history: [],
@@ -389,11 +411,19 @@ export function reduceChatClientState(
       const jobRunDetails = Object.fromEntries(
         Object.entries(state.jobRunDetails).filter(([, run]) => retainedJobIds.has(run.jobId)),
       );
+      const selectedJobId = state.selectedJobId !== null && retainedJobIds.has(state.selectedJobId)
+        ? state.selectedJobId
+        : null;
       return {
         ...state,
         jobs: [...action.jobs],
         jobRuns,
         jobRunDetails,
+        jobRunPages: Object.fromEntries(
+          Object.entries(state.jobRunPages).filter(([jobId]) => retainedJobIds.has(jobId)),
+        ),
+        selectedJobId,
+        selectedJobRunId: selectedJobId === null ? null : state.selectedJobRunId,
         resyncJobRunIds: state.resyncJobRunIds.filter((key) => {
           const separator = key.indexOf("\0");
           return separator >= 0 && retainedJobIds.has(key.slice(0, separator));
@@ -406,8 +436,58 @@ export function reduceChatClientState(
         const current = jobRuns[run.id];
         if (current === undefined || run.revision >= current.revision) jobRuns[run.id] = run;
       }
-      return { ...state, jobRuns };
+      const jobId = action.jobId ?? action.runs[0]?.jobId;
+      if (jobId === undefined) return { ...state, jobRuns };
+      const prior = state.jobRunPages[jobId];
+      const runIds = action.append
+        ? [...new Set([...(prior?.runIds ?? []), ...action.runs.map((run) => run.id)])]
+        : action.runs.map((run) => run.id);
+      return {
+        ...state,
+        jobRuns,
+        jobRunPages: {
+          ...state.jobRunPages,
+          [jobId]: {
+            runIds,
+            nextCursor: action.nextCursor ?? null,
+            loading: false,
+          },
+        },
+      };
     }
+    case "job.runs.pending": {
+      const current = state.jobRunPages[action.jobId];
+      return {
+        ...state,
+        jobRunPages: {
+          ...state.jobRunPages,
+          [action.jobId]: {
+            runIds: current?.runIds ?? [],
+            nextCursor: current?.nextCursor ?? null,
+            loading: true,
+          },
+        },
+      };
+    }
+    case "job.runs.failed": {
+      const current = state.jobRunPages[action.jobId];
+      if (current === undefined || !current.loading) return state;
+      return {
+        ...state,
+        jobRunPages: {
+          ...state.jobRunPages,
+          [action.jobId]: { ...current, loading: false },
+        },
+      };
+    }
+    case "job.select":
+      return {
+        ...state,
+        selectedJobId: action.jobId,
+        selectedJobRunId: action.jobId === state.selectedJobId ? state.selectedJobRunId : null,
+      };
+    case "job.run.select":
+      return { ...state, selectedJobRunId: action.runId };
     case "job.run.state": {
       const key = `${action.run.jobId}\0${action.run.id}`;
       const current = state.jobRuns[action.run.id];

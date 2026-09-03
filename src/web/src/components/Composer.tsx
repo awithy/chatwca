@@ -32,6 +32,8 @@ export interface ComposerProps {
   readonly draft: string;
   readonly queue: QueueState;
   readonly connected: boolean;
+  /** Scheduled-job ownership blocks prompt mutations but deliberately not Abort. */
+  readonly mutationLocked?: boolean;
   readonly imageLimits?: BrowserImageLimits;
   readonly onDraftChange: (text: string) => void;
   readonly onPrompt: (
@@ -130,6 +132,7 @@ export function Composer({
   draft,
   queue,
   connected,
+  mutationLocked = false,
   imageLimits = DEFAULT_BROWSER_IMAGE_LIMITS,
   onDraftChange,
   onPrompt,
@@ -145,7 +148,7 @@ export function Composer({
   const processingImagesRef = useRef(false);
   const mountedRef = useRef(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const canEdit = connected && status !== "aborting" && status !== "error";
+  const canEdit = connected && !mutationLocked && status !== "aborting" && status !== "error";
   const canSendPrompt =
     canEdit && pendingAction === null && !processingImages &&
     (draft.trim().length > 0 || images.length > 0);
@@ -279,8 +282,9 @@ export function Composer({
   }
 
   const queued = queue.steering.length + queue.followUp.length;
-  const disabled = !connected || pendingAction !== null || processingImages;
-  const previewControlsDisabled = pendingAction !== null || processingImages;
+  const disabled = !connected || mutationLocked || pendingAction !== null || processingImages;
+  const abortDisabled = !connected || pendingAction !== null;
+  const previewControlsDisabled = mutationLocked || pendingAction !== null || processingImages;
   const attachmentsDisabled = disabled || status === "aborting" || status === "error";
 
   return (
@@ -363,7 +367,16 @@ export function Composer({
                 {processingImages ? "Preparing…" : "Image"}
               </span>
             </button>
-            {status === "idle" && (
+            {status === "idle" && (mutationLocked ? (
+              <button
+                className="danger-button"
+                type="button"
+                disabled={abortDisabled}
+                onClick={() => void abort()}
+              >
+                {pendingAction === "abort" ? "Stopping…" : "Abort"}
+              </button>
+            ) : (
               <button
                 className="primary-button composer-submit"
                 type="button"
@@ -373,7 +386,7 @@ export function Composer({
                 {pendingAction === "prompt.submit" ? "Sending…" : actionLabel("prompt.submit")}
                 <span aria-hidden="true">↗</span>
               </button>
-            )}
+            ))}
             {status === "streaming" && (
               <>
                 <button
@@ -395,7 +408,7 @@ export function Composer({
                 <button
                   className="danger-button"
                   type="button"
-                  disabled={disabled}
+                  disabled={abortDisabled}
                   onClick={() => void abort()}
                 >
                   {pendingAction === "abort" ? "Stopping…" : "Abort"}

@@ -18,6 +18,10 @@ import {
 import { loadSandboxConfig } from "../../src/server/sandbox/config.js";
 import { loadManagedNetworkConfig } from "../../src/server/network/config.js";
 import { loadJobConfig } from "../../src/server/job-config.js";
+import {
+  DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+  loadWebSearchConfig,
+} from "../../src/server/web-search.js";
 
 describe("loadConfig", () => {
   it("applies defaults", () => {
@@ -37,6 +41,7 @@ describe("loadConfig", () => {
       sandbox: loadSandboxConfig({}),
       managedNetwork: loadManagedNetworkConfig({}, "disabled", { processCwd: cwd }),
       jobs: loadJobConfig({}),
+      webSearch: loadWebSearchConfig({}),
     });
   });
 
@@ -54,6 +59,8 @@ describe("loadConfig", () => {
         CHATWCA_SHUTDOWN_GRACE_MS: "2500",
         PI_CODING_AGENT_DIR: "/tmp/pi-agent",
         PI_OFFLINE: "1",
+        BRAVE_SEARCH_API_KEY: "brave-secret",
+        CHATWCA_WEB_SEARCH_TIMEOUT_MS: "3500",
       },
       cwd,
     );
@@ -72,6 +79,10 @@ describe("loadConfig", () => {
       sandbox: loadSandboxConfig({}),
       managedNetwork: loadManagedNetworkConfig({}, "disabled", { processCwd: cwd }),
       jobs: loadJobConfig({}),
+      webSearch: {
+        apiKey: "brave-secret",
+        timeoutMs: 3500,
+      },
     });
     expect(Object.isFrozen(config)).toBe(true);
   });
@@ -137,6 +148,7 @@ describe("loadConfig", () => {
     "CHATWCA_MAX_IMAGE_BYTES",
     "CHATWCA_MAX_TOTAL_IMAGE_BYTES",
     "CHATWCA_SHUTDOWN_GRACE_MS",
+    "CHATWCA_WEB_SEARCH_TIMEOUT_MS",
   ] as const)("rejects non-positive or non-integer %s", (variable) => {
     for (const value of ["", "0", "-2", "2.5", "invalid"]) {
       expect(() => loadConfig({ [variable]: value }, "/tmp")).toThrow(
@@ -164,6 +176,9 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ PI_CODING_AGENT_DIR: " " }, "/tmp")).toThrow(
       /PI_CODING_AGENT_DIR must not be empty/,
     );
+    expect(() => loadConfig({ BRAVE_SEARCH_API_KEY: " " }, "/tmp")).toThrow(
+      /BRAVE_SEARCH_API_KEY must not be empty/,
+    );
   });
 
   it("does not copy provider credentials into application configuration", () => {
@@ -175,5 +190,9 @@ describe("loadConfig", () => {
     expect(JSON.stringify(config)).not.toContain("secret");
     expect(config).not.toHaveProperty("OPENAI_API_KEY");
     expect(config).not.toHaveProperty("ANTHROPIC_API_KEY");
+    expect(config.webSearch).toEqual({
+      apiKey: null,
+      timeoutMs: DEFAULT_WEB_SEARCH_TIMEOUT_MS,
+    });
   });
 });

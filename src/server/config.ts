@@ -10,6 +10,7 @@ import {
   type ManagedNetworkConfig,
 } from "./network/config.js";
 import { loadJobConfig, type JobConfig } from "./job-config.js";
+import { loadWebSearchConfig, type WebSearchConfig } from "./web-search.js";
 
 export { ConfigurationError } from "./sandbox/config.js";
 
@@ -44,6 +45,8 @@ export interface ServerConfig {
   readonly managedNetwork: Readonly<ManagedNetworkConfig>;
   /** Complete server-only scheduled-job and trusted-hook configuration. */
   readonly jobs: Readonly<JobConfig>;
+  /** Optional parent-owned Brave Search tool configuration; the key is never public. */
+  readonly webSearch: Readonly<WebSearchConfig>;
 }
 
 function optionalNonEmpty(
@@ -120,6 +123,7 @@ export function loadConfig(
     processCwd,
   });
   const jobs = loadJobConfig(environment);
+  const webSearch = loadWebSearchConfig(environment);
 
   return Object.freeze({
     host,
@@ -151,5 +155,6 @@ export function loadConfig(
     sandbox,
     managedNetwork,
     jobs,
+    webSearch,
   });
 }

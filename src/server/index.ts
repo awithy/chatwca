@@ -610,6 +610,7 @@ export async function startChatWcaServer(
         ...(loadedConfig.piCodingAgentDir === undefined
           ? {}
           : { agentDir: loadedConfig.piCodingAgentDir }),
+        webSearch: loadedConfig.webSearch,
         ...(sandboxWorker === undefined || sandboxHost === undefined
           ? {}
           : {

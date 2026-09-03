@@ -7,6 +7,7 @@ import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import {
   fauxAssistantMessage,
   fauxProvider,
+  fauxToolCall,
 } from "@earendil-works/pi-ai/providers/faux";
 import {
   ModelRuntime,
@@ -36,7 +37,14 @@ afterEach(async () => {
   );
 });
 
-async function isolatedFactory() {
+async function isolatedFactory(options: {
+  readonly webSearch?: {
+    readonly apiKey: string;
+    readonly timeoutMs: number;
+    readonly fetch: typeof globalThis.fetch;
+  };
+  readonly enableTools?: boolean;
+} = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "chatwca-runtime-"));
   temporaryRoots.push(root);
   const cwd = path.join(root, "workspace");
@@ -73,7 +81,11 @@ async function isolatedFactory() {
         }),
       };
     },
-    sessionOptions: () => ({ model: faux.getModel(), noTools: "all" }),
+    sessionOptions: () => ({
+      model: faux.getModel(),
+      ...(options.enableTools === true ? {} : { noTools: "all" as const }),
+    }),
+    ...(options.webSearch === undefined ? {} : { webSearch: options.webSearch }),
   });
 
   return { root, cwd, agentDir, sessionDir, factory, faux, strictFaux, serviceCwds };
@@ -195,6 +207,44 @@ describe("PiRuntimeFactory", () => {
       policySet: selected,
     }));
     expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("adds the parent-owned web_search tool when Brave is configured", async () => {
+    const fetch = vi.fn(async () => Response.json({
+      web: {
+        results: [{
+          title: "Current result",
+          url: "https://example.com/current",
+          description: "A current snippet",
+        }],
+      },
+    }));
+    const { cwd, factory, faux } = await isolatedFactory({
+      enableTools: true,
+      webSearch: {
+        apiKey: "server-secret",
+        timeoutMs: 1_000,
+        fetch: fetch as typeof globalThis.fetch,
+      },
+    });
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("web_search", { query: "current topic" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage("Search complete"),
+    ]);
+    const runtime = await factory.createPersistent(policy(cwd));
+
+    try {
+      expect(runtime.session.getActiveToolNames()).toContain("web_search");
+      await runtime.prompt("Search for the current topic.");
+      expect(fetch).toHaveBeenCalledOnce();
+      expect(runtime.session.messages).toContainEqual(expect.objectContaining({
+        role: "toolResult",
+        toolName: "web_search",
+        content: [expect.objectContaining({ text: expect.stringContaining("Current result") })],
+      }));
+    } finally {
+      await runtime.dispose();
+    }
   });
 
   it("selects the isolated model catalog by effective profile", async () => {

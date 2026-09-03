@@ -67,6 +67,16 @@ describe("SandboxResourceLoader", () => {
     expect(managed.getSystemPrompt()).toContain("Do not work around blocked access");
   });
 
+  it("discloses parent-owned web search without describing it as sandbox egress", async () => {
+    const { cwd } = await workspace();
+    const loader = await SandboxResourceLoader.create(cwd, "isolated", [], true);
+
+    expect(loader.getSystemPrompt()).toContain("web_search");
+    expect(loader.getSystemPrompt()).toContain("outside the workspace network namespace");
+    expect(loader.getSystemPrompt()).toContain("disclose");
+    expect(loader.getSystemPrompt()).toContain("Brave");
+  });
+
   it("rejects a noncanonical workspace and ignores symlink context files", async () => {
     const { root, cwd } = await workspace();
     const outside = path.join(root, "outside.md");

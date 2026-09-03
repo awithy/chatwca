@@ -159,6 +159,7 @@ export class SandboxResourceLoader implements ResourceLoader {
     canonicalWorkspace: string,
     private readonly networkPolicy: SandboxNetworkPolicy,
     private readonly mounts: readonly WorkspaceMount[],
+    private readonly webSearchEnabled: boolean,
   ) {
     this.#canonicalWorkspace = canonicalWorkspace;
   }
@@ -167,8 +168,14 @@ export class SandboxResourceLoader implements ResourceLoader {
     canonicalWorkspace: string,
     networkPolicy: SandboxNetworkPolicy = "isolated",
     mounts: readonly WorkspaceMount[] = [],
+    webSearchEnabled = false,
   ): Promise<SandboxResourceLoader> {
-    const loader = new SandboxResourceLoader(canonicalWorkspace, networkPolicy, mounts);
+    const loader = new SandboxResourceLoader(
+      canonicalWorkspace,
+      networkPolicy,
+      mounts,
+      webSearchEnabled,
+    );
     await loader.reload();
     return loader;
   }
@@ -182,11 +189,20 @@ export class SandboxResourceLoader implements ResourceLoader {
     const base = this.networkPolicy === "managed-egress"
       ? MANAGED_EGRESS_SANDBOX_SYSTEM_PROMPT
       : ISOLATED_SANDBOX_SYSTEM_PROMPT;
-    if (this.mounts.length === 0) return base;
-    const descriptions = this.mounts.map((mount) =>
-      `- ${workspaceMountGuestPath(mount.name)} is ${mount.access}.`
-    );
-    return `${base}\n\nAdditional workspace mounts:\n${descriptions.join("\n")}`;
+    const sections = [base];
+    if (this.webSearchEnabled) {
+      sections.push(`Parent-owned web search:
+- web_search queries the public Brave Search API and returns snippets; it does not fetch result pages.
+- The Brave request runs outside the workspace network namespace, even when sandbox networking is isolated.
+- Search queries may disclose text derived from readable workspace content to Brave.`);
+    }
+    if (this.mounts.length > 0) {
+      const descriptions = this.mounts.map((mount) =>
+        `- ${workspaceMountGuestPath(mount.name)} is ${mount.access}.`
+      );
+      sections.push(`Additional workspace mounts:\n${descriptions.join("\n")}`);
+    }
+    return sections.join("\n\n");
   }
   getSystemPromptSource(): undefined { return undefined; }
   getAppendSystemPrompt(): string[] { return []; }

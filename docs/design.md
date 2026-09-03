@@ -47,6 +47,7 @@ Each conversation:
 - Persist per-workspace directory mounts with read-only or read-write access at named `/mounts/<name>` guest paths.
 - Keep sandboxed tools network-isolated by default, with optional administrator-filtered managed egress.
 - Select managed-egress destinations through immutable, administrator-defined per-workspace policy sets.
+- Optionally expose a parent-owned Brave `web_search` tool without disclosing its credential to browsers, models, workspaces, or sandbox workers.
 
 ## 3. Non-goals
 
@@ -69,7 +70,7 @@ The implemented design does not include:
 - Protection against harmful changes within a writable workspace
 - Per-conversation cgroup CPU, memory, process, disk, or bandwidth quotas
 
-Pi resources already configured on the host remain available to unrestricted runtimes through the SDK. Strict sandboxed runtimes share administrator-controlled credentials and model configuration through a separate model runtime, but disable extensions, skills, prompt templates, unapproved tools, project/global packages, and context discovery outside the workspace.
+Pi resources already configured on the host remain available to unrestricted runtimes through the SDK. Strict sandboxed runtimes share administrator-controlled credentials and model configuration through a separate model runtime, but disable extensions, skills, prompt templates, unapproved tools, project/global packages, and context discovery outside the workspace. When explicitly configured, the app-owned `web_search` tool is approved for both profiles and sends only its model-authored query to Brave from the parent process.
 
 ## 4. Deployment assumptions
 
@@ -116,6 +117,7 @@ flowchart LR
     BW -. managed only .-> BR[Guest-loopback native bridges]
     BR --> NP[Parent HTTP and SOCKS5 policy proxies]
     NP --> NET[Allowed public destinations]
+    W --> BS[Optional parent-owned Brave web_search]
     W --> M[Profile-separated ModelRuntimes]
     A --> M
     C --> M
@@ -589,7 +591,9 @@ There is no application login, token, cookie, API key, role, or authorization ch
 
 The server serves the frontend and WebSocket endpoint from the same authority. It does not enable broad CORS. Browser WebSocket upgrades must have an `Origin` whose authority matches the request `Host`; this prevents unrelated web pages from driving the socket and does not add user authentication. Direct non-browser clients without `Origin` are accepted. A proxy must preserve the browser-facing `Host` header and WebSocket upgrade headers.
 
-Bubblewrap's network namespace applies only to workspace tools. Parent model-provider traffic and accepted browser traffic remain outside it. Isolated workers have no usable IPv4, IPv6, DNS, or loopback path. Managed-egress workers still have no direct external route: only two designated guest-loopback endpoints are bridged to conversation-owned parent HTTP and SOCKS5 proxies. Those proxies enforce the immutable named policy set beneath global deny, domain, port, DNS-pinning, non-public-address, protocol, and resource controls.
+Bubblewrap's network namespace applies only to worker-executed workspace tools. Parent model-provider traffic and accepted browser traffic remain outside it. Isolated workers have no usable IPv4, IPv6, DNS, or loopback path. Managed-egress workers still have no direct external route: only two designated guest-loopback endpoints are bridged to conversation-owned parent HTTP and SOCKS5 proxies. Those proxies enforce the immutable named policy set beneath global deny, domain, port, DNS-pinning, non-public-address, protocol, and resource controls.
+
+If `BRAVE_SEARCH_API_KEY` is configured, `web_search` is an additional app-owned parent operation available to unrestricted and sandboxed sessions. It calls only Brave's fixed HTTPS search endpoint, keeps the credential in the parent, returns bounded titles/URLs/snippets, and never fetches result pages. It is intentionally independent of a workspace's isolated/managed tool-network policy, so queries can disclose model-selected text derived from readable workspace content to Brave. Search results are untrusted input.
 
 ## 15. Frontend design
 
@@ -696,6 +700,8 @@ An accepted prompt's later model failure is represented in the message/event str
 | `CHATWCA_SHUTDOWN_GRACE_MS` | `10000` | Bounded graceful shutdown period (maximum 300000 ms) |
 | `PI_CODING_AGENT_DIR` | Pi default | Pi configuration and session root |
 | `PI_OFFLINE` | unset | Use Pi's existing offline behavior |
+| `BRAVE_SEARCH_API_KEY` | unset | Server-only credential whose presence enables parent-owned `web_search` |
+| `CHATWCA_WEB_SEARCH_TIMEOUT_MS` | `10000` | Aggregate deadline for one Brave search tool call |
 
 ### 17.2 Bubblewrap sandbox
 
@@ -742,6 +748,7 @@ src/
 │   ├── session-history.ts       # workspace-scoped Pi listing/deletion
 │   ├── serialize.ts             # SDK messages to UI messages
 │   ├── images.ts                # image validation/conversion
+│   ├── web-search.ts            # optional parent-owned Brave Search tool
 │   ├── sandbox/                 # Bubblewrap config, worker, IPC, probes, and tools
 │   └── network/                 # policies, proxies, DNS, audit, helper integration
 ├── shared/
@@ -834,6 +841,7 @@ Use temporary SQLite databases, temporary Pi sessions, and a fake model/provider
 11. **Bubblewrap workspace sandbox** — schema v3, admission policy, synthetic root, worker IPC, app-owned tools, probes, lifecycle integration, and strict resource path.
 12. **Managed egress** — schemas v4/v5, destination policies and named sets, HTTP/SOCKS5 proxies, native bridges, DNS pinning, audit events, probes, and fail-closed lifecycle.
 13. **Workspace policy UI** — responsive accessible modal, acknowledgements, stored/effective policy details, immutable badges, and network-blocked notices.
+14. **Brave web search** — optional server credential, bounded parent-owned custom tool, strict-profile disclosure, and abort/timeout handling.
 
 ## 21. Acceptance criteria
 
@@ -865,6 +873,7 @@ The current implemented design is complete when:
 - browser commands cannot submit destinations or policy documents, and a missing set policy-blocks the workspace without silent substitution;
 - abort, close, eviction, crash, rewind replacement, and shutdown clean up workers, descendants, bridges, proxies, connections, and socket files;
 - unrestricted, isolated, and differently scoped managed conversations can coexist without sharing workers, extension-mutated model runtimes, network policy, or routes;
+- when configured, `web_search` is active in both runtime profiles, keeps its credential parent-only, bounds output and deadlines, and clearly discloses that queries bypass workspace network isolation on their fixed path to Brave;
 - the workspace modal is keyboard-accessible and responsive, and live headers show immutable effective security/network state and required disclosure warnings;
 - the UI is dark-only and works at common laptop resolutions; and
 - sessions remain readable by the Pi CLI.

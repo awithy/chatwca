@@ -11,6 +11,7 @@ import {
   type CreateAgentSessionServicesOptions,
   type ModelRuntime,
   type PromptOptions,
+  type ToolDefinition,
   SettingsManager,
   SessionManager,
   createAgentSessionFromServices,
@@ -53,6 +54,11 @@ import {
 import { createSandboxTools, SANDBOX_TOOL_NAMES } from "./sandbox/tools.js";
 import { startSandboxWorkerClient } from "./sandbox/worker-client.js";
 import { SandboxController } from "./sandbox/worker-controller.js";
+import {
+  WEB_SEARCH_TOOL_NAME,
+  createWebSearchTool,
+  type WebSearchToolOptions,
+} from "./web-search.js";
 
 export interface PiModelCapability {
   readonly provider: string;
@@ -197,6 +203,8 @@ export interface PiRuntimeFactoryOptions {
   readonly sessionOptions?: (
     services: AgentSessionServices,
   ) => PiSessionOptions | Promise<PiSessionOptions>;
+  /** Optional parent-owned Brave Search integration shared by every profile. */
+  readonly webSearch?: Readonly<WebSearchToolOptions>;
 }
 
 let sharedModelRuntimePromise: Promise<ModelRuntime> | undefined;
@@ -595,6 +603,7 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
   readonly #serviceOptions: PiRuntimeFactoryOptions["serviceOptions"];
   readonly #sessionOptions: PiRuntimeFactoryOptions["sessionOptions"];
   readonly #sandbox: Readonly<PiSandboxRuntimeOptions> | undefined;
+  readonly #webSearchTool: ToolDefinition<any, any> | undefined;
   readonly #globalSettings: ReturnType<SettingsManager["getGlobalSettings"]>;
 
   private constructor(
@@ -610,6 +619,9 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
     this.#serviceOptions = options.serviceOptions;
     this.#sessionOptions = options.sessionOptions;
     this.#sandbox = options.sandbox;
+    this.#webSearchTool = options.webSearch?.apiKey == null
+      ? undefined
+      : createWebSearchTool(options.webSearch);
     this.#globalSettings = structuredClone(globalSettings);
   }
 
@@ -891,6 +903,7 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
             policy.cwd,
             policy.networkPolicy ?? "isolated",
             policy.mounts,
+            this.#webSearchTool !== undefined,
           );
           services = {
             cwd: "/workspace",
@@ -905,8 +918,14 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
             ...(requested.model === undefined ? {} : { model: requested.model }),
             ...(requested.thinkingLevel === undefined ? {} : { thinkingLevel: requested.thinkingLevel }),
             ...(requested.scopedModels === undefined ? {} : { scopedModels: requested.scopedModels }),
-            tools: [...SANDBOX_TOOL_NAMES],
-            customTools: [...createSandboxTools(sandboxController)],
+            tools: [
+              ...SANDBOX_TOOL_NAMES,
+              ...(this.#webSearchTool === undefined ? [] : [WEB_SEARCH_TOOL_NAME]),
+            ],
+            customTools: [
+              ...createSandboxTools(sandboxController),
+              ...(this.#webSearchTool === undefined ? [] : [this.#webSearchTool]),
+            ],
           };
         } else {
           const configurableServiceOptions = (await this.#serviceOptions?.(runtimeCwd)) ?? {};
@@ -916,7 +935,16 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
             agentDir: this.#agentDir,
             modelRuntime: this.#modelRuntime,
           });
-          configurableSessionOptions = (await this.#sessionOptions?.(services)) ?? {};
+          const requested = (await this.#sessionOptions?.(services)) ?? {};
+          configurableSessionOptions = this.#webSearchTool === undefined
+            ? requested
+            : {
+                ...requested,
+                customTools: [
+                  ...(requested.customTools ?? []),
+                  this.#webSearchTool,
+                ],
+              };
         }
         const sessionCreationOptions: CreateAgentSessionFromServicesOptions = {
           ...configurableSessionOptions,
@@ -925,6 +953,19 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
           ...(sessionStartEvent === undefined ? {} : { sessionStartEvent }),
         };
         const created = await createAgentSessionFromServices(sessionCreationOptions);
+        if (
+          policy.securityProfile === "unrestricted" &&
+          this.#webSearchTool !== undefined &&
+          configurableSessionOptions.noTools !== "all" &&
+          !configurableSessionOptions.excludeTools?.includes(WEB_SEARCH_TOOL_NAME)
+        ) {
+          created.session.setActiveToolsByName([
+            ...new Set([
+              ...created.session.getActiveToolNames(),
+              WEB_SEARCH_TOOL_NAME,
+            ]),
+          ]);
+        }
         // A sandboxed AgentSession must see only the guest CWD so Pi appends
         // `/workspace` to the model-facing system prompt. AgentSessionRuntime,
         // however, owns host-side session replacement and must retain the

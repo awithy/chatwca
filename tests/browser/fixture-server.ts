@@ -10,6 +10,7 @@ import {
 } from "../../src/server/index.js";
 import type {
   ProtocolHistory,
+  ProtocolJobs,
   ProtocolRegistry,
   ProtocolWorkspaceRepository,
 } from "../../src/server/protocol.js";
@@ -755,11 +756,25 @@ const config = loadConfig(
   CWD,
 );
 
+const jobs: ProtocolJobs = {
+  list: () => [],
+  create: () => [],
+  update: () => [],
+  delete: () => [],
+  referencesWorkspace: () => false,
+  run: () => { throw new Error("Browser fixture has no configured jobs"); },
+  abort: async () => undefined,
+  runs: () => ({ runs: [] }),
+  runState: () => { throw new Error("Browser fixture has no configured jobs"); },
+  subscribe: () => () => undefined,
+};
+
 server = createChatWcaServer(config, "browser-fixture", {
   registry,
   history,
   images,
   workspaces,
+  jobs,
   sandboxFunctionalProbeSucceeded: true,
   managedNetworkFunctionalProbeSucceeded: true,
   onInternalError(error) {

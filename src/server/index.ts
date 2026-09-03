@@ -28,6 +28,7 @@ import {
   DEFAULT_MAX_INBOUND_MESSAGE_BYTES,
   WebSocketProtocol,
   type ProtocolHistory,
+  type ProtocolJobs,
   type ProtocolRegistry,
   type ProtocolWorkspaceRepository,
 } from "./protocol.js";
@@ -59,6 +60,7 @@ import { JobHookRunner } from "./job-hook-runner.js";
 import { JobRepository } from "./job-repository.js";
 import { JobRunner } from "./job-runner.js";
 import { JobScheduler } from "./job-scheduler.js";
+import { JobService } from "./job-service.js";
 import { RuntimeCoordinator } from "./runtime-coordinator.js";
 import {
   validateNetworkHelper,
@@ -87,6 +89,7 @@ export interface ChatWcaProtocolServices {
   readonly images?: ConversationImageOwner;
   /** Required authority for every browser workspace and conversation lifecycle command. */
   readonly workspaces: ProtocolWorkspaceRepository;
+  readonly jobs?: ProtocolJobs;
   readonly maxInboundMessageBytes?: number;
   readonly outboundFlow?: OutboundFlowOptions;
   /** Production supplies the registry here so transport and Pi teardown share one bound. */
@@ -314,6 +317,7 @@ export function createChatWcaServer(
           registry: services.registry,
           history: services.history,
           workspaces: services.workspaces,
+          ...(services.jobs === undefined ? {} : { jobs: services.jobs }),
           maxInboundMessageBytes,
           ...(services.outboundFlow === undefined
             ? {}
@@ -663,18 +667,29 @@ export async function startChatWcaServer(
     });
 
     const hookRunner = new JobHookRunner({ config: config.jobs });
+    let jobService: JobService | undefined;
     const jobRunner = (options.createJobRunner ?? ((runnerOptions) => new JobRunner(runnerOptions)))({
       repository: jobs,
       workspaces,
       hookPaths,
       hooks: hookRunner,
       registry,
+      onRunUpdated: (run) => jobService?.publishRunUpdated(run),
+      onJobsChanged: () => jobService?.publishJobsChanged(),
       onInternalError: reportError,
     });
     const scheduler = (options.createJobScheduler ?? ((schedulerOptions) => new JobScheduler(schedulerOptions)))({
       repository: jobs,
       runner: jobRunner,
       onInternalError: reportError,
+    });
+    jobService = new JobService({
+      repository: jobs,
+      scheduler,
+      runner: jobRunner,
+      workspaces,
+      history,
+      onListenerError: reportError,
     });
     coordinator = new RuntimeCoordinator({
       scheduler,
@@ -697,6 +712,7 @@ export async function startChatWcaServer(
         history,
         images: registry,
         workspaces,
+        jobs: jobService,
         shutdown: coordinator,
         closeStorage: () => database?.close(),
         sandboxFunctionalProbeSucceeded: functionalProbeSucceeded,

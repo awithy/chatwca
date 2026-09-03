@@ -6,12 +6,17 @@ import { AppError, ERROR_CODES, toErrorResponse } from "../shared/errors.js";
 import {
   ClientCommandSchema,
   type ClientCommand,
+  type ConversationOwner,
   type ConversationState,
   type ConversationSummary,
+  type JobRunState,
+  type JobSummary,
   type ServerMessage,
   type UiImage,
   type WorkspaceSummary,
 } from "../shared/protocol.js";
+import type { CreateJobInput, JobRunPage, UpdateJobInput } from "./job-repository.js";
+import type { JobServiceListener } from "./job-service.js";
 import type {
   ConversationRegistryEvent,
   ConversationRegistryListener,
@@ -54,6 +59,7 @@ export interface ProtocolRegistry {
   ): Promise<void>;
   abort(conversationId: string): Promise<void>;
   hasLiveWorkspace(workspaceId: string): boolean;
+  getActiveOwner?(conversationId: string): ConversationOwner | undefined;
   subscribe(listener: ConversationRegistryListener): () => void;
 }
 
@@ -88,12 +94,26 @@ export interface ProtocolWorkspaceRepository {
   delete(workspaceId: string): void;
 }
 
+export interface ProtocolJobs {
+  list(): readonly JobSummary[];
+  create(input: CreateJobInput): readonly JobSummary[];
+  update(jobId: string, input: UpdateJobInput): readonly JobSummary[];
+  delete(jobId: string): readonly JobSummary[];
+  referencesWorkspace(workspaceId: string): boolean;
+  run(jobId: string): JobRunState | Promise<JobRunState>;
+  abort(jobId: string, runId: string): Promise<void>;
+  runs(jobId: string, cursor?: string): JobRunPage;
+  runState(jobId: string, runId: string): JobRunState | Promise<JobRunState>;
+  subscribe(listener: JobServiceListener): () => void;
+}
+
 export interface WebSocketProtocolOptions {
   readonly webSocketServer: WebSocketServer;
   readonly serverVersion: string;
   readonly registry: ProtocolRegistry;
   readonly history: ProtocolHistory;
   readonly workspaces: ProtocolWorkspaceRepository;
+  readonly jobs?: ProtocolJobs;
   readonly maxInboundMessageBytes?: number;
   readonly outboundFlow?: OutboundFlowOptions;
   readonly onInternalError?: (error: unknown) => void;
@@ -105,6 +125,8 @@ export interface DispatchResult {
   readonly history?: readonly ConversationSummary[];
   readonly workspaces?: readonly WorkspaceSummary[];
   readonly workspaceBroadcastIncludesSender?: boolean;
+  readonly jobs?: readonly JobSummary[];
+  readonly jobsBroadcastIncludesSender?: boolean;
 }
 
 class CommandDecodeError extends AppError {
@@ -137,6 +159,19 @@ function requestIdOf(value: unknown): string | undefined {
     : undefined;
 }
 
+/** Hook diagnostics are returned only by the explicit job.run.state command. */
+function withoutJobDiagnostics(run: JobRunState): JobRunState {
+  return {
+    ...run,
+    preExitCode: null,
+    preStdout: null,
+    preStderr: null,
+    postExitCode: null,
+    postStdout: null,
+    postStderr: null,
+  };
+}
+
 export function decodeClientCommand(
   data: RawData,
   isBinary: boolean,
@@ -163,8 +198,19 @@ export async function dispatchClientCommand(
   history: ProtocolHistory,
   workspaces: ProtocolWorkspaceRepository,
   shuttingDown = false,
+  jobs?: ProtocolJobs,
 ): Promise<DispatchResult> {
   if (shuttingDown) throw new AppError(ERROR_CODES.SHUTTING_DOWN);
+
+  const requireJobs = (): ProtocolJobs => {
+    if (jobs === undefined) throw new AppError(ERROR_CODES.INTERNAL_ERROR);
+    return jobs;
+  };
+  const rejectJobOwnedMutation = (conversationId: string): void => {
+    if (registry.getActiveOwner?.(conversationId) !== undefined) {
+      throw new AppError(ERROR_CODES.CONVERSATION_BUSY);
+    }
+  };
 
   switch (command.type) {
     case "workspace.list": {
@@ -243,7 +289,10 @@ export async function dispatchClientCommand(
       };
     }
     case "workspace.delete": {
-      if (registry.hasLiveWorkspace(command.workspaceId)) {
+      if (
+        registry.hasLiveWorkspace(command.workspaceId) ||
+        jobs?.referencesWorkspace(command.workspaceId) === true
+      ) {
         throw new AppError(ERROR_CODES.WORKSPACE_BUSY);
       }
       workspaces.delete(command.workspaceId);
@@ -299,6 +348,7 @@ export async function dispatchClientCommand(
         },
       };
     case "conversation.rename": {
+      rejectJobOwnedMutation(command.conversationId);
       const conversation = await registry.rename(
         command.conversationId,
         command.title,
@@ -313,6 +363,7 @@ export async function dispatchClientCommand(
       };
     }
     case "conversation.close": {
+      rejectJobOwnedMutation(command.conversationId);
       const workspaceId = (await registry.getState(command.conversationId)).workspaceId;
       await registry.close(command.conversationId);
       return {
@@ -321,6 +372,7 @@ export async function dispatchClientCommand(
       };
     }
     case "conversation.delete": {
+      rejectJobOwnedMutation(command.conversationId);
       const workspace = workspaces.requireAvailable(command.workspaceId);
       const conversations = await history.delete(workspace, command.conversationId);
       return {
@@ -330,10 +382,12 @@ export async function dispatchClientCommand(
       };
     }
     case "prompt.submit":
+      rejectJobOwnedMutation(command.conversationId);
       await registry.prompt(command.conversationId, command.text, command.images);
       return { response: { type: "ack", requestId: command.requestId, command: command.type } };
     case "prompt.steer":
     case "prompt.followUp":
+      rejectJobOwnedMutation(command.conversationId);
       await registry.prompt(
         command.conversationId,
         command.text,
@@ -341,10 +395,14 @@ export async function dispatchClientCommand(
         command.type === "prompt.steer" ? "steer" : "followUp",
       );
       return { response: { type: "ack", requestId: command.requestId, command: command.type } };
-    case "conversation.abort":
-      await registry.abort(command.conversationId);
+    case "conversation.abort": {
+      const owner = registry.getActiveOwner?.(command.conversationId);
+      if (owner === undefined) await registry.abort(command.conversationId);
+      else await requireJobs().abort(owner.jobId, owner.runId);
       return { response: { type: "ack", requestId: command.requestId, command: command.type } };
+    }
     case "conversation.fork": {
+      rejectJobOwnedMutation(command.conversationId);
       const source = await registry.getState(command.conversationId);
       const policy = await workspaces.requireUsable(source.workspaceId);
       const fork = await registry.fork(command.conversationId, command.entryId, policy);
@@ -359,6 +417,7 @@ export async function dispatchClientCommand(
       };
     }
     case "conversation.rewind": {
+      rejectJobOwnedMutation(command.conversationId);
       // Rewind is deliberately server-orchestrated: the source is retained if
       // fork construction fails, and is closed/deleted only after the distinct
       // fork snapshot is available.
@@ -380,6 +439,86 @@ export async function dispatchClientCommand(
         history: conversations,
       };
     }
+    case "job.list": {
+      const authoritative = [...requireJobs().list()];
+      return { response: { type: "jobs", requestId: command.requestId, jobs: authoritative } };
+    }
+    case "job.create": {
+      const authoritative = [...requireJobs().create({
+        name: command.name,
+        workspaceId: command.workspaceId,
+        prompt: command.prompt,
+        schedule: command.schedule,
+        enabled: command.enabled,
+        ...(command.preRunScript === undefined ? {} : { preRunScript: command.preRunScript }),
+        ...(command.postRunScript === undefined ? {} : { postRunScript: command.postRunScript }),
+        ...(command.acknowledgeHostHooks === undefined
+          ? {}
+          : { acknowledgeHostHooks: command.acknowledgeHostHooks }),
+      })];
+      return {
+        response: { type: "jobs", requestId: command.requestId, jobs: authoritative },
+        jobs: authoritative,
+      };
+    }
+    case "job.update": {
+      const changes: UpdateJobInput = {
+        ...(command.name === undefined ? {} : { name: command.name }),
+        ...(command.workspaceId === undefined ? {} : { workspaceId: command.workspaceId }),
+        ...(command.prompt === undefined ? {} : { prompt: command.prompt }),
+        ...(command.schedule === undefined ? {} : { schedule: command.schedule }),
+        ...(command.preRunScript === undefined ? {} : { preRunScript: command.preRunScript }),
+        ...(command.postRunScript === undefined ? {} : { postRunScript: command.postRunScript }),
+        ...(command.enabled === undefined ? {} : { enabled: command.enabled }),
+        ...(command.acknowledgeHostHooks === undefined
+          ? {}
+          : { acknowledgeHostHooks: command.acknowledgeHostHooks }),
+      };
+      const authoritative = [...requireJobs().update(command.jobId, changes)];
+      return {
+        response: { type: "jobs", requestId: command.requestId, jobs: authoritative },
+        jobs: authoritative,
+      };
+    }
+    case "job.delete": {
+      const authoritative = [...requireJobs().delete(command.jobId)];
+      return {
+        response: { type: "ack", requestId: command.requestId, command: command.type },
+        jobs: authoritative,
+        jobsBroadcastIncludesSender: true,
+      };
+    }
+    case "job.run":
+      return {
+        response: {
+          type: "job.run.state",
+          requestId: command.requestId,
+          run: withoutJobDiagnostics(await requireJobs().run(command.jobId)),
+        },
+      };
+    case "job.abort":
+      await requireJobs().abort(command.jobId, command.runId);
+      return { response: { type: "ack", requestId: command.requestId, command: command.type } };
+    case "job.runs": {
+      const page = requireJobs().runs(command.jobId, command.cursor);
+      return {
+        response: {
+          type: "job.runs",
+          requestId: command.requestId,
+          jobId: command.jobId,
+          runs: [...page.runs],
+          ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
+        },
+      };
+    }
+    case "job.run.state":
+      return {
+        response: {
+          type: "job.run.state",
+          requestId: command.requestId,
+          run: await requireJobs().runState(command.jobId, command.runId),
+        },
+      };
   }
 }
 
@@ -394,6 +533,7 @@ export class WebSocketProtocol {
   readonly #registry: ProtocolRegistry;
   readonly #history: ProtocolHistory;
   readonly #workspaces: ProtocolWorkspaceRepository;
+  readonly #jobs: ProtocolJobs | undefined;
   readonly #maxInboundMessageBytes: number;
   readonly #outboundFlowOptions: OutboundFlowOptions;
   readonly #onInternalError: (error: unknown) => void;
@@ -401,6 +541,7 @@ export class WebSocketProtocol {
   readonly #historySubscriptions = new Map<WebSocket, string>();
   readonly #historyRefreshes = new Map<string, WorkspaceRefreshState>();
   readonly #unsubscribeRegistry: () => void;
+  readonly #unsubscribeJobs: (() => void) | undefined;
   readonly #onConnection: (socket: WebSocket) => void;
   #shuttingDown = false;
   #shutdownGraceMs = 1;
@@ -412,6 +553,7 @@ export class WebSocketProtocol {
     this.#registry = options.registry;
     this.#history = options.history;
     this.#workspaces = options.workspaces;
+    this.#jobs = options.jobs;
     this.#maxInboundMessageBytes = options.maxInboundMessageBytes ?? DEFAULT_MAX_INBOUND_MESSAGE_BYTES;
     if (!Number.isSafeInteger(this.#maxInboundMessageBytes) || this.#maxInboundMessageBytes <= 0) {
       throw new RangeError("maxInboundMessageBytes must be a positive integer");
@@ -421,6 +563,19 @@ export class WebSocketProtocol {
     this.#onConnection = (socket) => this.#handleConnection(socket);
     this.#webSocketServer.on("connection", this.#onConnection);
     this.#unsubscribeRegistry = this.#registry.subscribe((event) => this.#handleRegistryEvent(event));
+    this.#unsubscribeJobs = this.#jobs?.subscribe((event) => {
+      if (event.type === "jobs") {
+        this.#broadcast({ type: "jobs", jobs: [...event.jobs] });
+      } else {
+        this.#broadcast({
+          type: "job.run.updated",
+          jobId: event.run.jobId,
+          runId: event.run.id,
+          revision: event.run.revision,
+          run: event.run,
+        });
+      }
+    });
   }
 
   beginShutdown(gracePeriodMs: number): void {
@@ -441,6 +596,7 @@ export class WebSocketProtocol {
     this.#disposed = true;
     this.#webSocketServer.off("connection", this.#onConnection);
     this.#unsubscribeRegistry();
+    this.#unsubscribeJobs?.();
     for (const flow of this.#flows.values()) flow.dispose();
     this.#flows.clear();
     this.#historySubscriptions.clear();
@@ -494,6 +650,7 @@ export class WebSocketProtocol {
         this.#history,
         this.#workspaces,
         this.#shuttingDown,
+        this.#jobs,
       );
       this.#send(socket, result.response);
       if (command.type === "history.list") {
@@ -504,6 +661,12 @@ export class WebSocketProtocol {
         this.#broadcast(
           { type: "workspaces", workspaces: [...result.workspaces] },
           result.workspaceBroadcastIncludesSender === true ? undefined : socket,
+        );
+      }
+      if (result.jobs !== undefined) {
+        this.#broadcast(
+          { type: "jobs", jobs: [...result.jobs] },
+          result.jobsBroadcastIncludesSender === true ? undefined : socket,
         );
       }
       if (result.affectedWorkspaceId !== undefined) {

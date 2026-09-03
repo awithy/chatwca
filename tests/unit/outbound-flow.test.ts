@@ -185,6 +185,39 @@ describe("outbound WebSocket flow control", () => {
     flow.dispose();
   });
 
+  it("coalesces adjacent uncorrelated job snapshots but never run updates", () => {
+    vi.useFakeTimers();
+    const socket = new FakeSocket();
+    socket.bufferedAmount = 100;
+    const flow = new OutboundFlowController(socket, {
+      highWaterBytes: 100,
+      maxQueueBytes: 4_096,
+      slowClientTimeoutMs: 1_000,
+      pollIntervalMs: 10,
+    });
+    const first: ServerMessage = { type: "jobs", jobs: [] };
+    const latest: ServerMessage = { type: "jobs", jobs: [] };
+    const summary = {
+      id: "run-1", jobId: "job-1", trigger: "manual" as const, scheduledFor: 1,
+      startedAt: 1, finishedAt: 2, status: "succeeded" as const, phase: "prompt" as const,
+      errorCode: null, errorMessage: null, conversationId: "conversation-1", revision: 2,
+      createdAt: 1, updatedAt: 2,
+    };
+    const terminal: ServerMessage = {
+      type: "job.run.updated", jobId: "job-1", runId: "run-1", revision: 2, run: summary,
+    };
+
+    flow.send(first);
+    flow.send(latest);
+    flow.send(terminal);
+    socket.bufferedAmount = 0;
+    vi.advanceTimersByTime(10);
+    socket.flush();
+
+    expect(socket.sent).toEqual([latest, terminal]);
+    flow.dispose();
+  });
+
   it("keeps queued history coalescing isolated by workspace", () => {
     vi.useFakeTimers();
     const socket = new FakeSocket();

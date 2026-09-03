@@ -149,6 +149,18 @@ export class JobScheduler {
     return result;
   }
 
+  /**
+   * Protocol admission returns the durable queued attempt immediately. Runner
+   * ownership is detached from the requesting socket, so a disconnect cannot
+   * cancel execution or withhold the correlated acknowledgement.
+   */
+  runNowAccepted(jobId: string): JobRunState {
+    this.#assertAccepting();
+    const claim = this.#repository.claimManual(jobId, safeNow(this.#clock));
+    setImmediate(() => this.#dispatch(claim));
+    return claim.run;
+  }
+
   /** Permanently close occurrence and manual admission and cancel the timer. */
   beginShutdown(): void {
     if (this.#closed) return;

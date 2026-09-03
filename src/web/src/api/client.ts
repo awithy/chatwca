@@ -78,6 +78,19 @@ function isExpectedResponse(
     case "workspace.create":
     case "workspace.update":
       return message.type === "workspaces";
+    case "job.list":
+    case "job.create":
+    case "job.update":
+      return message.type === "jobs";
+    case "job.run":
+      return message.type === "job.run.state" && message.run.jobId === command.jobId;
+    case "job.runs":
+      return message.type === "job.runs" &&
+        message.jobId === command.jobId &&
+        message.runs.every((run) => run.jobId === command.jobId);
+    case "job.run.state":
+      return message.type === "job.run.state" &&
+        message.run.jobId === command.jobId && message.run.id === command.runId;
     case "history.list":
       return message.type === "history" &&
         message.workspaceId === command.workspaceId &&
@@ -105,6 +118,8 @@ function isExpectedResponse(
     case "prompt.steer":
     case "prompt.followUp":
     case "conversation.abort":
+    case "job.delete":
+    case "job.abort":
       return message.type === "ack" && message.command === command.type;
   }
 }
@@ -124,6 +139,7 @@ export class ChatSocketClient {
   readonly #listeners = new Set<() => void>();
   readonly #pending = new Map<string, PendingCommand>();
   readonly #resyncing = new Set<string>();
+  readonly #resyncingJobRuns = new Set<string>();
   #state = createInitialChatClientState();
   #socket: WebSocket | null = null;
   #reconnectTimer: ReturnType<typeof setTimeout> | undefined;
@@ -185,6 +201,13 @@ export class ChatSocketClient {
   send<T extends ClientCommandType>(
     input: ClientCommandInput<T>,
   ): Promise<CommandSuccessByType[T]> {
+    return this.#sendWithRequestId(input, this.#requestId());
+  }
+
+  #sendWithRequestId<T extends ClientCommandType>(
+    input: ClientCommandInput<T>,
+    requestId: string,
+  ): Promise<CommandSuccessByType[T]> {
     const socket = this.#socket;
     if (
       socket === null ||
@@ -196,7 +219,6 @@ export class ChatSocketClient {
       );
     }
 
-    const requestId = this.#requestId();
     const command = { ...(input as object), requestId } as CommandFor<T>;
     return new Promise<CommandSuccessByType[T]>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -368,6 +390,14 @@ export class ChatSocketClient {
       this.#setTransportError(new Error("The server sent an invalid message."));
       return;
     }
+    if (
+      message.type === "job.run.updated" &&
+      (message.jobId !== message.run.jobId || message.runId !== message.run.id ||
+        message.revision !== message.run.revision)
+    ) {
+      this.#setTransportError(new Error("The server sent an inconsistent job revision."));
+      return;
+    }
     this.#acceptMessage(message);
   }
 
@@ -434,6 +464,14 @@ export class ChatSocketClient {
       });
     } else if (message.type === "state") {
       this.#dispatch({ type: "snapshot", conversation: message.conversation });
+    } else if (message.type === "jobs") {
+      this.#dispatch({ type: "jobs", jobs: message.jobs });
+    } else if (message.type === "job.runs") {
+      this.#dispatch({ type: "job.runs", runs: message.runs });
+    } else if (message.type === "job.run.state") {
+      this.#dispatch({ type: "job.run.state", run: message.run });
+    } else if (message.type === "job.run.updated") {
+      this.#dispatch({ type: "job.run.updated", run: message.run });
     } else if (isConversationEvent(message)) {
       this.#dispatch({ type: "event", event: message });
     } else if (message.type === "error") {
@@ -503,6 +541,14 @@ export class ChatSocketClient {
       // A full page load starts with no selection, so this is the only initial
       // command. Reconnect retains browser memory and restores only that scope.
       await this.send({ type: "workspace.list" });
+      if (generation !== this.#generation || this.#state.connection !== "connected") return;
+      // Job recovery is independent from the selected conversation scope. Do
+      // not let a slow job listing delay history recovery, but retain normal
+      // correlation and error handling for the request.
+      void this.#sendWithRequestId(
+        { type: "job.list" },
+        `recovery-jobs-${String(generation)}`,
+      ).catch((error: unknown) => this.#setTransportError(error));
       if (
         generation !== this.#generation ||
         selectionRevision !== this.#workspaceSelectionRevision ||
@@ -565,6 +611,21 @@ export class ChatSocketClient {
     }
   }
 
+  #syncJobRunRevisionGaps(): void {
+    if (this.#state.connection !== "connected") return;
+    for (const key of this.#state.resyncJobRunIds) {
+      if (this.#resyncingJobRuns.has(key)) continue;
+      const separator = key.indexOf("\0");
+      if (separator < 1 || separator === key.length - 1) continue;
+      const jobId = key.slice(0, separator);
+      const runId = key.slice(separator + 1);
+      this.#resyncingJobRuns.add(key);
+      void this.send({ type: "job.run.state", jobId, runId })
+        .catch((error: unknown) => this.#setTransportError(error))
+        .finally(() => this.#resyncingJobRuns.delete(key));
+    }
+  }
+
   #setTransportError(error: unknown): void {
     this.#dispatch({
       type: "error",
@@ -582,6 +643,7 @@ export class ChatSocketClient {
     }
     this.#pending.clear();
     this.#resyncing.clear();
+    this.#resyncingJobRuns.clear();
   }
 
   #dispatch(action: ChatClientAction): void {
@@ -590,5 +652,6 @@ export class ChatSocketClient {
     this.#state = next;
     for (const listener of this.#listeners) listener();
     this.#syncRevisionGaps();
+    this.#syncJobRunRevisionGaps();
   }
 }

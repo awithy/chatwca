@@ -1,7 +1,18 @@
 import { type Static, Type, type TSchema } from "@sinclair/typebox";
 
 import { ErrorCodeSchema } from "./errors.js";
-import { PublicJobsConfigSchema } from "./jobs.js";
+import {
+  JobIdentifierSchema,
+  JobNameSchema,
+  JobPromptSchema,
+  JobRunCursorSchema,
+  JobRunStateSchema,
+  JobRunSummarySchema,
+  JobScheduleInputSchema,
+  JobScriptPathSchema,
+  JobSummarySchema,
+  PublicJobsConfigSchema,
+} from "./jobs.js";
 
 export {
   JobConfigurationIssueSchema,
@@ -597,6 +608,64 @@ export const ConversationAbortCommandSchema = strictObject({
   conversationId: IdentifierSchema,
 });
 
+export const JobListCommandSchema = strictObject({
+  type: Type.Literal("job.list"),
+  requestId: RequestIdSchema,
+});
+export const JobCreateCommandSchema = strictObject({
+  type: Type.Literal("job.create"),
+  requestId: RequestIdSchema,
+  name: JobNameSchema,
+  workspaceId: JobIdentifierSchema,
+  prompt: JobPromptSchema,
+  schedule: JobScheduleInputSchema,
+  preRunScript: Type.Optional(JobScriptPathSchema),
+  postRunScript: Type.Optional(JobScriptPathSchema),
+  enabled: Type.Boolean(),
+  acknowledgeHostHooks: Type.Optional(Type.Literal(true)),
+});
+export const JobUpdateCommandSchema = strictObject({
+  type: Type.Literal("job.update"),
+  requestId: RequestIdSchema,
+  jobId: JobIdentifierSchema,
+  name: Type.Optional(JobNameSchema),
+  workspaceId: Type.Optional(JobIdentifierSchema),
+  prompt: Type.Optional(JobPromptSchema),
+  schedule: Type.Optional(JobScheduleInputSchema),
+  preRunScript: Type.Optional(Type.Union([JobScriptPathSchema, Type.Null()])),
+  postRunScript: Type.Optional(Type.Union([JobScriptPathSchema, Type.Null()])),
+  enabled: Type.Optional(Type.Boolean()),
+  acknowledgeHostHooks: Type.Optional(Type.Literal(true)),
+});
+export const JobDeleteCommandSchema = strictObject({
+  type: Type.Literal("job.delete"),
+  requestId: RequestIdSchema,
+  jobId: JobIdentifierSchema,
+});
+export const JobRunCommandSchema = strictObject({
+  type: Type.Literal("job.run"),
+  requestId: RequestIdSchema,
+  jobId: JobIdentifierSchema,
+});
+export const JobAbortCommandSchema = strictObject({
+  type: Type.Literal("job.abort"),
+  requestId: RequestIdSchema,
+  jobId: JobIdentifierSchema,
+  runId: JobIdentifierSchema,
+});
+export const JobRunsCommandSchema = strictObject({
+  type: Type.Literal("job.runs"),
+  requestId: RequestIdSchema,
+  jobId: JobIdentifierSchema,
+  cursor: Type.Optional(JobRunCursorSchema),
+});
+export const JobRunStateCommandSchema = strictObject({
+  type: Type.Literal("job.run.state"),
+  requestId: RequestIdSchema,
+  jobId: JobIdentifierSchema,
+  runId: JobIdentifierSchema,
+});
+
 export type WorkspaceListCommand = Static<typeof WorkspaceListCommandSchema>;
 export type WorkspaceCreateCommand = Static<typeof WorkspaceCreateCommandSchema>;
 export type WorkspaceUpdateCommand = Static<typeof WorkspaceUpdateCommandSchema>;
@@ -632,6 +701,14 @@ export type PromptFollowUpCommand = Static<typeof PromptFollowUpCommandSchema>;
 export type ConversationAbortCommand = Static<
   typeof ConversationAbortCommandSchema
 >;
+export type JobListCommand = Static<typeof JobListCommandSchema>;
+export type JobCreateCommand = Static<typeof JobCreateCommandSchema>;
+export type JobUpdateCommand = Static<typeof JobUpdateCommandSchema>;
+export type JobDeleteCommand = Static<typeof JobDeleteCommandSchema>;
+export type JobRunCommand = Static<typeof JobRunCommandSchema>;
+export type JobAbortCommand = Static<typeof JobAbortCommandSchema>;
+export type JobRunsCommand = Static<typeof JobRunsCommandSchema>;
+export type JobRunStateCommand = Static<typeof JobRunStateCommandSchema>;
 
 export const ClientCommandSchema = Type.Union([
   WorkspaceListCommandSchema,
@@ -651,6 +728,14 @@ export const ClientCommandSchema = Type.Union([
   PromptSteerCommandSchema,
   PromptFollowUpCommandSchema,
   ConversationAbortCommandSchema,
+  JobListCommandSchema,
+  JobCreateCommandSchema,
+  JobUpdateCommandSchema,
+  JobDeleteCommandSchema,
+  JobRunCommandSchema,
+  JobAbortCommandSchema,
+  JobRunsCommandSchema,
+  JobRunStateCommandSchema,
 ]);
 export type ClientCommand = Static<typeof ClientCommandSchema>;
 export type ClientCommandType = ClientCommand["type"];
@@ -678,6 +763,8 @@ export const AcknowledgedCommandTypeSchema = Type.Union([
   Type.Literal("prompt.steer"),
   Type.Literal("prompt.followUp"),
   Type.Literal("conversation.abort"),
+  Type.Literal("job.delete"),
+  Type.Literal("job.abort"),
 ]);
 export type AcknowledgedCommandType = Static<
   typeof AcknowledgedCommandTypeSchema
@@ -728,6 +815,39 @@ export const StateMessageSchema = strictObject({
 });
 export type StateMessage = Static<typeof StateMessageSchema>;
 
+/** Full definition snapshot. Correlated for commands and uncorrelated for broadcasts. */
+export const JobsMessageSchema = strictObject({
+  type: Type.Literal("jobs"),
+  requestId: Type.Optional(RequestIdSchema),
+  jobs: Type.Array(JobSummarySchema),
+});
+export type JobsMessage = Static<typeof JobsMessageSchema>;
+
+export const JobRunsMessageSchema = strictObject({
+  type: Type.Literal("job.runs"),
+  requestId: RequestIdSchema,
+  jobId: JobIdentifierSchema,
+  runs: Type.Array(JobRunSummarySchema),
+  nextCursor: Type.Optional(JobRunCursorSchema),
+});
+export type JobRunsMessage = Static<typeof JobRunsMessageSchema>;
+
+export const JobRunStateMessageSchema = strictObject({
+  type: Type.Literal("job.run.state"),
+  requestId: RequestIdSchema,
+  run: JobRunStateSchema,
+});
+export type JobRunStateMessage = Static<typeof JobRunStateMessageSchema>;
+
+export const JobRunUpdatedMessageSchema = strictObject({
+  type: Type.Literal("job.run.updated"),
+  jobId: JobIdentifierSchema,
+  runId: JobIdentifierSchema,
+  revision: RevisionSchema,
+  run: JobRunSummarySchema,
+});
+export type JobRunUpdatedMessage = Static<typeof JobRunUpdatedMessageSchema>;
+
 /** A correlated successful response, selected by the originating command. */
 type Correlated<T extends { requestId?: string }> = Omit<T, "requestId"> & {
   requestId: string;
@@ -764,6 +884,14 @@ export type CommandSuccessByType = {
   "prompt.steer": AckFor<"prompt.steer">;
   "prompt.followUp": AckFor<"prompt.followUp">;
   "conversation.abort": AckFor<"conversation.abort">;
+  "job.list": Correlated<JobsMessage>;
+  "job.create": Correlated<JobsMessage>;
+  "job.update": Correlated<JobsMessage>;
+  "job.delete": AckFor<"job.delete">;
+  "job.run": JobRunStateMessage;
+  "job.abort": AckFor<"job.abort">;
+  "job.runs": JobRunsMessage;
+  "job.run.state": JobRunStateMessage;
 };
 export type CommandSuccess<
   TCommand extends ClientCommandType = ClientCommandType,
@@ -973,6 +1101,10 @@ export const ServerMessageSchema = Type.Union([
   WorkspacesMessageSchema,
   HistoryMessageSchema,
   StateMessageSchema,
+  JobsMessageSchema,
+  JobRunsMessageSchema,
+  JobRunStateMessageSchema,
+  JobRunUpdatedMessageSchema,
   ConversationEventSchema,
 ]);
 export type ServerMessage = Static<typeof ServerMessageSchema>;

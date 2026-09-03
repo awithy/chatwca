@@ -20,6 +20,14 @@ class FakeSocket {
 
   send(data: string): void {
     this.sent.push(data);
+    const command = JSON.parse(data) as Record<string, unknown>;
+    if (command.type === "job.list" && typeof command.requestId === "string") {
+      queueMicrotask(() => this.server({
+        type: "jobs",
+        requestId: command.requestId as string,
+        jobs: [],
+      }));
+    }
   }
 
   close(): void {
@@ -42,6 +50,10 @@ class FakeSocket {
   }
 
   commands(): Array<Record<string, unknown>> {
+    return this.allCommands().filter((command) => command.type !== "job.list");
+  }
+
+  allCommands(): Array<Record<string, unknown>> {
     return this.sent.map((data) => JSON.parse(data) as Record<string, unknown>);
   }
 
@@ -575,6 +587,10 @@ describe("ChatSocketClient", () => {
     expect(sockets[1]?.commands()).toEqual([
       { type: "workspace.list", requestId: "unselected-2" },
     ]);
+    expect(sockets[1]?.allCommands()).toContainEqual({
+      type: "job.list",
+      requestId: expect.stringMatching(/^recovery-jobs-/),
+    });
     expect(client.getState()).toMatchObject({
       connection: "connected",
       selectedWorkspaceId: null,
@@ -751,6 +767,56 @@ describe("ChatSocketClient", () => {
       conversationId: "conversation-1",
     });
     expect(client.getState().resyncConversationIds).toEqual(["conversation-1"]);
+    client.disconnect();
+  });
+
+  it("correlates job pages and resynchronizes known run revision gaps", async () => {
+    const socket = new FakeSocket();
+    let request = 0;
+    const client = new ChatSocketClient({
+      url: "ws://test/ws",
+      webSocketFactory: () => socket as unknown as WebSocket,
+      requestId: () => `jobs-${++request}`,
+    });
+    const run = {
+      id: "run-1", jobId: "job-1", trigger: "manual" as const, scheduledFor: 1,
+      startedAt: null, finishedAt: null, status: "queued" as const, phase: null,
+      errorCode: null, errorMessage: null, conversationId: null, revision: 0,
+      createdAt: 1, updatedAt: 1,
+    };
+    client.connect();
+    socket.server({ type: "ready", serverVersion: "1" });
+    socket.server({ type: "workspaces", requestId: "jobs-1", workspaces: [] });
+    await flush();
+
+    const listing = client.send({ type: "job.runs", jobId: "job-1" });
+    socket.server({
+      type: "job.runs", requestId: "jobs-2", jobId: "job-1", runs: [run],
+    });
+    await expect(listing).resolves.toMatchObject({ type: "job.runs" });
+    expect(client.getState().jobRuns[run.id]).toEqual(run);
+
+    socket.server({
+      type: "job.run.updated", jobId: "job-1", runId: run.id, revision: 2,
+      run: { ...run, revision: 2, status: "running", startedAt: 2, updatedAt: 2 },
+    });
+    expect(socket.allCommands().at(-1)).toEqual({
+      type: "job.run.state", requestId: "jobs-3", jobId: "job-1", runId: run.id,
+    });
+    expect(client.getState().resyncJobRunIds).toEqual(["job-1\0run-1"]);
+
+    socket.server({
+      type: "job.run.state", requestId: "jobs-3",
+      run: {
+        ...run, revision: 2, status: "running", startedAt: 2, updatedAt: 2,
+        preExitCode: null, preStdout: null, preStderr: null,
+        postExitCode: null, postStdout: null, postStderr: null,
+        conversationAvailable: false,
+      },
+    });
+    await flush();
+    expect(client.getState().resyncJobRunIds).toEqual([]);
+    expect(client.getState().jobRuns[run.id]?.revision).toBe(2);
     client.disconnect();
   });
 

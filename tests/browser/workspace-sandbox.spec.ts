@@ -2,6 +2,17 @@ import { expect, test, type Page, type WebSocket as PlaywrightWebSocket } from "
 
 import { waitForConnected } from "./helpers.js";
 
+const publicJobsConfig = {
+  schedulerAvailable: true,
+  hooksAvailable: false,
+  scriptRoots: [],
+  minIntervalMinutes: 1,
+  maxIntervalMinutes: 525_600,
+  supportedTimeZones: ["UTC"],
+  hostAuthorityWarning: "Hooks run with host authority.",
+  unattendedUsageWarning: "Scheduled prompts can incur unattended usage.",
+} as const;
+
 const disabledManagedEgressConfig = {
   mode: "disabled",
   selectablePolicies: ["isolated"],
@@ -229,6 +240,7 @@ test("required authoritative mode fixes creation to Workspace sandbox", async ({
         functionalProbeSucceeded: true,
       },
       managedEgress: disabledManagedEgressConfig,
+      jobs: publicJobsConfig,
     }),
   }));
   await waitForConnected(page);
@@ -262,6 +274,7 @@ test("disabled authoritative mode fixes creation to Unrestricted", async ({ page
         functionalProbeSucceeded: false,
       },
       managedEgress: disabledManagedEgressConfig,
+      jobs: publicJobsConfig,
     }),
   }));
   await waitForConnected(page);

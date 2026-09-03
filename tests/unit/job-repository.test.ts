@@ -290,6 +290,24 @@ describe("JobRepository claims and transitions", () => {
 });
 
 describe("JobRepository history and deletion", () => {
+  it("never serializes persisted diagnostic error text", () => {
+    const created = createInterval();
+    const claim = repository.claimManual(created.id);
+    const running = repository.startRun(created.id, claim.run.id);
+    const failed = repository.finishRun(created.id, running.id, {
+      status: "failed",
+      phase: "prompt",
+      errorCode: ERROR_CODES.JOB_PROMPT_FAILED,
+      errorMessage: "provider token at /private/host/path",
+      expectedRevision: running.revision,
+    });
+
+    expect(failed.errorMessage).toBe("The scheduled prompt failed.");
+    expect(repository.listRuns(created.id).runs[0]?.errorMessage).toBe(
+      "The scheduled prompt failed.",
+    );
+    expect(repository.getRun(created.id, running.id).errorMessage).not.toContain("/private");
+  });
   it("uses opaque keyset cursors with deterministic tie ordering", () => {
     const job = createInterval();
     for (let index = 0; index < 5; index += 1) {

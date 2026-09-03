@@ -50,12 +50,16 @@ function coalesceKey(message: ServerMessage): string | undefined {
   if (message.type === "history" && message.requestId === undefined) {
     return `history:${message.workspaceId}`;
   }
+  if (message.type === "jobs" && message.requestId === undefined) {
+    return "jobs";
+  }
   return undefined;
 }
 
 function isDroppable(message: ServerMessage): boolean {
   return message.type === "tool.updated" ||
-    (message.type === "history" && message.requestId === undefined);
+    (message.type === "history" && message.requestId === undefined) ||
+    (message.type === "jobs" && message.requestId === undefined);
 }
 
 /**

@@ -2,6 +2,9 @@ import type {
   ConversationEvent,
   ConversationState,
   ConversationSummary,
+  JobRunState,
+  JobRunSummary,
+  JobSummary,
   NetworkBlockedEvent,
   NormalizedMessage,
   StatusNotice,
@@ -43,6 +46,13 @@ export interface ChatClientState {
   readonly serverVersion: string | null;
   /** The latest authoritative SQLite-backed workspace list. */
   readonly workspaces: readonly WorkspaceSummary[];
+  /** Latest authoritative SQLite-backed scheduled-job definitions. */
+  readonly jobs: readonly JobSummary[];
+  /** Latest full summary observed for each run, independent of pagination. */
+  readonly jobRuns: Readonly<Record<string, JobRunSummary>>;
+  /** Diagnostics are populated only by correlated explicit state responses. */
+  readonly jobRunDetails: Readonly<Record<string, JobRunState>>;
+  readonly resyncJobRunIds: readonly string[];
   /** Browser-local, in-memory selection. */
   readonly selectedWorkspaceId: string | null;
   /** Identifies the workspace which produced the current history projection. */
@@ -62,6 +72,10 @@ export type ChatClientAction =
   | { readonly type: "connection"; readonly status: ConnectionStatus }
   | { readonly type: "ready"; readonly serverVersion: string }
   | { readonly type: "workspaces"; readonly workspaces: readonly WorkspaceSummary[] }
+  | { readonly type: "jobs"; readonly jobs: readonly JobSummary[] }
+  | { readonly type: "job.runs"; readonly runs: readonly JobRunSummary[] }
+  | { readonly type: "job.run.state"; readonly run: JobRunState }
+  | { readonly type: "job.run.updated"; readonly run: JobRunSummary }
   | { readonly type: "workspace.select"; readonly workspaceId: string | null }
   | { readonly type: "history.pending"; readonly workspaceId: string }
   | { readonly type: "history.failed"; readonly error: WorkspaceClientErrorState }
@@ -84,6 +98,10 @@ export function createInitialChatClientState(): ChatClientState {
     connection: "disconnected",
     serverVersion: null,
     workspaces: [],
+    jobs: [],
+    jobRuns: {},
+    jobRunDetails: {},
+    resyncJobRunIds: [],
     selectedWorkspaceId: null,
     historyWorkspaceId: null,
     history: [],
@@ -363,6 +381,61 @@ export function reduceChatClientState(
         serverVersion: action.serverVersion,
         lastError: null,
       };
+    case "jobs": {
+      const retainedJobIds = new Set(action.jobs.map((job) => job.id));
+      const jobRuns = Object.fromEntries(
+        Object.entries(state.jobRuns).filter(([, run]) => retainedJobIds.has(run.jobId)),
+      );
+      const jobRunDetails = Object.fromEntries(
+        Object.entries(state.jobRunDetails).filter(([, run]) => retainedJobIds.has(run.jobId)),
+      );
+      return {
+        ...state,
+        jobs: [...action.jobs],
+        jobRuns,
+        jobRunDetails,
+        resyncJobRunIds: state.resyncJobRunIds.filter((key) => {
+          const separator = key.indexOf("\0");
+          return separator >= 0 && retainedJobIds.has(key.slice(0, separator));
+        }),
+      };
+    }
+    case "job.runs": {
+      const jobRuns = { ...state.jobRuns };
+      for (const run of action.runs) {
+        const current = jobRuns[run.id];
+        if (current === undefined || run.revision >= current.revision) jobRuns[run.id] = run;
+      }
+      return { ...state, jobRuns };
+    }
+    case "job.run.state": {
+      const key = `${action.run.jobId}\0${action.run.id}`;
+      const current = state.jobRuns[action.run.id];
+      if (current !== undefined && action.run.revision < current.revision) return state;
+      return {
+        ...state,
+        jobRuns: { ...state.jobRuns, [action.run.id]: action.run },
+        jobRunDetails: { ...state.jobRunDetails, [action.run.id]: action.run },
+        resyncJobRunIds: state.resyncJobRunIds.filter((candidate) => candidate !== key),
+      };
+    }
+    case "job.run.updated": {
+      const current = state.jobRuns[action.run.id];
+      if (current !== undefined && action.run.revision <= current.revision) return state;
+      if (current !== undefined && action.run.revision !== current.revision + 1) {
+        const key = `${action.run.jobId}\0${action.run.id}`;
+        if (state.resyncJobRunIds.includes(key)) return state;
+        return { ...state, resyncJobRunIds: [...state.resyncJobRunIds, key] };
+      }
+      const detail = state.jobRunDetails[action.run.id];
+      return {
+        ...state,
+        jobRuns: { ...state.jobRuns, [action.run.id]: action.run },
+        ...(detail === undefined
+          ? {}
+          : { jobRunDetails: { ...state.jobRunDetails, [action.run.id]: { ...detail, ...action.run } } }),
+      };
+    }
     case "workspaces": {
       const selectedStillExists = state.selectedWorkspaceId === null ||
         action.workspaces.some((workspace) => workspace.id === state.selectedWorkspaceId);

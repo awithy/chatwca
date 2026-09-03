@@ -929,7 +929,11 @@ export class JobRepository {
       status: row.status as JobRunStatus,
       phase: row.phase as JobRunPhase | null,
       errorCode: row.error_code as ErrorCode | null,
-      errorMessage: row.error_message,
+      // Persisted text is diagnostic storage, not a wire authority. Public
+      // summaries always derive the stable client-safe message from the code.
+      errorMessage: row.error_code === null
+        ? null
+        : new AppError(row.error_code as ErrorCode).message,
       conversationId: row.conversation_id,
       revision: row.revision,
       createdAt: row.created_at,

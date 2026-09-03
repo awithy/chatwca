@@ -1,7 +1,7 @@
 import type { AddressInfo } from "node:net";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import WebSocket from "ws";
+import WebSocket, { type RawData } from "ws";
 
 import { loadConfig } from "../../src/server/config.js";
 import type { ConversationRegistryListener } from "../../src/server/conversation-registry.js";
@@ -106,6 +106,32 @@ function nextMessage(socket: WebSocket): Promise<ServerMessage> {
       }
     });
     socket.once("error", reject);
+  });
+}
+
+function nextMessages(socket: WebSocket, count: number): Promise<ServerMessage[]> {
+  return new Promise((resolve, reject) => {
+    const messages: ServerMessage[] = [];
+    const onMessage = (data: RawData) => {
+      try {
+        messages.push(JSON.parse(data.toString()) as ServerMessage);
+        if (messages.length === count) {
+          socket.off("message", onMessage);
+          socket.off("error", onError);
+          resolve(messages);
+        }
+      } catch (error) {
+        socket.off("message", onMessage);
+        socket.off("error", onError);
+        reject(error);
+      }
+    };
+    const onError = (error: Error) => {
+      socket.off("message", onMessage);
+      reject(error);
+    };
+    socket.on("message", onMessage);
+    socket.once("error", onError);
   });
 }
 
@@ -320,10 +346,34 @@ describe("WebSocket command server", () => {
     const second = new WebSocket(`ws://127.0.0.1:${String(port)}/ws`);
     await Promise.all([nextMessage(first), nextMessage(second)]);
 
+    const initialMetadata = Promise.all([nextMessage(first), nextMessage(second)]);
     registryListener?.({
       type: "conversation.state-changed",
-      record: { id: state.id, workspaceId: WORKSPACE_ID } as never,
+      record: {
+        id: state.id,
+        workspaceId: WORKSPACE_ID,
+        revision: 1,
+        title: state.title,
+        durable: state.durable,
+        status: state.status,
+      } as never,
     });
+    await expect(initialMetadata).resolves.toEqual([
+      {
+        type: "conversation.metadata",
+        workspaceId: WORKSPACE_ID,
+        conversationId: state.id,
+        revision: 1,
+        payload: { title: state.title, durable: true, status: "idle" },
+      },
+      {
+        type: "conversation.metadata",
+        workspaceId: WORKSPACE_ID,
+        conversationId: state.id,
+        revision: 1,
+        payload: { title: state.title, durable: true, status: "idle" },
+      },
+    ]);
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(history.list).not.toHaveBeenCalled();
 
@@ -394,18 +444,50 @@ describe("WebSocket command server", () => {
       },
     ]);
 
-    const firstHistory = nextMessage(first);
-    const secondHistory = nextMessage(second);
+    const changedMetadata = Promise.all([nextMessage(first), nextMessage(second)]);
     registryListener?.({
       type: "conversation.state-changed",
-      record: { id: "other", workspaceId: "workspace-2" } as never,
+      record: {
+        id: "other",
+        workspaceId: "workspace-2",
+        revision: 2,
+        title: "Other conversation",
+        durable: false,
+        status: "streaming",
+      } as never,
     });
+    await expect(changedMetadata).resolves.toEqual([
+      {
+        type: "conversation.metadata",
+        workspaceId: "workspace-2",
+        conversationId: "other",
+        revision: 2,
+        payload: {
+          title: "Other conversation",
+          durable: false,
+          status: "streaming",
+        },
+      },
+      {
+        type: "conversation.metadata",
+        workspaceId: "workspace-2",
+        conversationId: "other",
+        revision: 2,
+        payload: {
+          title: "Other conversation",
+          durable: false,
+          status: "streaming",
+        },
+      },
+    ]);
     await vi.waitFor(() => {
       expect(history.list).toHaveBeenCalledWith(defaultWorkspace);
       expect(history.list).toHaveBeenCalledWith(
         expect.objectContaining({ id: "workspace-2", path: "/other" }),
       );
     });
+    const firstHistory = nextMessage(first);
+    const secondHistory = nextMessage(second);
     releaseBroadcastHistory?.();
     await expect(Promise.all([firstHistory, secondHistory])).resolves.toEqual([
       {
@@ -508,24 +590,53 @@ describe("WebSocket command server", () => {
     expect(history.list).toHaveBeenNthCalledWith(2, workspaceB);
     vi.mocked(history.list).mockClear();
 
+    const unscopedMetadata = nextMessage(socket);
     registryListener?.({
       type: "conversation.state-changed",
-      record: { id: "conversation-a", workspaceId: workspaceA.id } as never,
+      record: {
+        id: "conversation-a",
+        workspaceId: workspaceA.id,
+        revision: 1,
+        title: "Conversation A",
+        durable: true,
+        status: "idle",
+      } as never,
+    });
+    await expect(unscopedMetadata).resolves.toMatchObject({
+      type: "conversation.metadata",
+      conversationId: "conversation-a",
+      revision: 1,
     });
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(history.list).not.toHaveBeenCalled();
 
-    const scopedRefresh = nextMessage(socket);
+    const scopedRefresh = nextMessages(socket, 2);
     registryListener?.({
       type: "conversation.state-changed",
-      record: { id: "conversation-b", workspaceId: workspaceB.id } as never,
+      record: {
+        id: "conversation-b",
+        workspaceId: workspaceB.id,
+        revision: 1,
+        title: "Conversation B",
+        durable: false,
+        status: "streaming",
+      } as never,
     });
     await vi.waitFor(() => expect(history.list).toHaveBeenCalledExactlyOnceWith(workspaceB));
-    await expect(scopedRefresh).resolves.toEqual({
-      type: "history",
-      workspaceId: workspaceB.id,
-      conversations: [],
-    });
+    await expect(scopedRefresh).resolves.toEqual([
+      {
+        type: "conversation.metadata",
+        workspaceId: workspaceB.id,
+        conversationId: "conversation-b",
+        revision: 1,
+        payload: { title: "Conversation B", durable: false, status: "streaming" },
+      },
+      {
+        type: "history",
+        workspaceId: workspaceB.id,
+        conversations: [],
+      },
+    ]);
     socket.close();
   });
 

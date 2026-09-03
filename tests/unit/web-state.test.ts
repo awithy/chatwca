@@ -113,6 +113,66 @@ describe("web chat state", () => {
     expect(state.resyncConversationIds).toEqual(["conversation-1"]);
   });
 
+  it("keeps first-response deltas contiguous across title and durability metadata", () => {
+    let state = reduceChatClientState(createInitialChatClientState(), {
+      type: "snapshot",
+      conversation: { ...conversation(3), title: "Untitled conversation", durable: false },
+    });
+    const events: ConversationEvent[] = [
+      {
+        type: "conversation.metadata",
+        workspaceId: "workspace-1",
+        conversationId: "conversation-1",
+        revision: 4,
+        payload: { title: "First prompt", durable: false, status: "streaming" },
+      },
+      {
+        type: "message.started",
+        workspaceId: "workspace-1",
+        conversationId: "conversation-1",
+        revision: 5,
+        payload: {
+          message: {
+            entryId: "stream:one:1",
+            role: "assistant",
+            blocks: [],
+          },
+        },
+      },
+      {
+        type: "message.delta",
+        workspaceId: "workspace-1",
+        conversationId: "conversation-1",
+        revision: 6,
+        payload: {
+          entryId: "stream:one:1",
+          blockIndex: 0,
+          blockType: "thinking",
+          delta: "Working",
+        },
+      },
+      {
+        type: "conversation.metadata",
+        workspaceId: "workspace-1",
+        conversationId: "conversation-1",
+        revision: 7,
+        payload: { title: "First prompt", durable: true, status: "streaming" },
+      },
+    ];
+    for (const item of events) {
+      state = reduceChatClientState(state, { type: "event", event: item });
+    }
+
+    expect(state.conversations["conversation-1"]?.conversation).toMatchObject({
+      title: "First prompt",
+      durable: true,
+      status: "streaming",
+      revision: 7,
+      messages: [{ blocks: [{ type: "thinking", text: "Working" }] }],
+    });
+    expect(state.resyncConversationIds).toEqual([]);
+  });
+
   it("reconciles temporary message IDs and projects tools, notices, queue, and status", () => {
     let state = reduceChatClientState(createInitialChatClientState(), {
       type: "snapshot",

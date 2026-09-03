@@ -689,6 +689,22 @@ export class WebSocketProtocol {
       }
       return;
     }
+    if (event.type === "conversation.state-changed") {
+      // State-only metadata/status changes participate in the same revision
+      // stream as message/tool events. Broadcast the revision so clients do not
+      // mistake the next incremental event for a delivery gap.
+      this.#broadcast({
+        type: "conversation.metadata",
+        workspaceId: event.record.workspaceId,
+        conversationId: event.record.id,
+        revision: event.record.revision,
+        payload: {
+          title: event.record.title,
+          durable: event.record.durable,
+          status: event.record.status,
+        },
+      });
+    }
     this.#scheduleHistoryBroadcast(event.record.workspaceId);
   }
 

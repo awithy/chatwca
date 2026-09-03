@@ -502,6 +502,7 @@ Important mappings:
 | `tool_execution_update` | `tool.updated` |
 | `tool_execution_end` | `tool.completed` |
 | `queue_update` | `conversation.queue` |
+| session title, durability, or state-only status change | `conversation.metadata` |
 | `agent_start` | `conversation.status` = streaming |
 | `agent_end` | `conversation.status` = idle |
 | retry/compaction events | typed status notices |
@@ -519,7 +520,7 @@ interface EventEnvelope<T> {
 }
 ```
 
-Revisions are monotonic per conversation. If the browser detects a gap, reconnects, or switches conversations, it requests `conversation.state` and replaces its local projection.
+Revisions are monotonic per conversation. Every revision consumed by an authoritative snapshot is also represented by a browser event, including title/durability metadata changes, so an internal state update cannot create a false delivery gap between streaming events. If the browser detects a genuine gap, reconnects, or switches conversations, it requests `conversation.state` and replaces its local projection.
 
 Streaming text deltas are high-priority messages. Workspace-scoped history is sent only on workspace selection, reconnect, fork, or explicit resynchronization. A `history.list` command establishes that socket's current workspace-history subscription; subsequent history updates are sent only for that workspace and include its `workspaceId`. The server does not serialize the complete conversation on every token and never performs a global history scan to produce an update.
 

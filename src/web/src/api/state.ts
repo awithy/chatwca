@@ -268,6 +268,8 @@ function applyConversationEvent(
   let messages = [...conversation.messages];
   let queue = conversation.queue;
   let status = conversation.status;
+  let title = conversation.title;
+  let durable = conversation.durable;
   let contextUsage = conversation.contextUsage;
 
   switch (event.type) {
@@ -364,6 +366,11 @@ function applyConversationEvent(
     case "conversation.status":
       status = event.payload.status;
       break;
+    case "conversation.metadata":
+      title = event.payload.title;
+      durable = event.payload.durable;
+      status = event.payload.status;
+      break;
     case "conversation.notice":
       if (
         event.payload.notice.kind === "compaction" &&
@@ -384,6 +391,8 @@ function applyConversationEvent(
     messages,
     queue,
     status,
+    title,
+    durable,
     contextUsage,
     revision: event.revision,
   };

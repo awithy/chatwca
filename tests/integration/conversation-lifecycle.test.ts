@@ -37,6 +37,7 @@ import { ERROR_CODES } from "../../src/shared/errors.js";
 import type {
   ConversationState,
   NormalizedMessage,
+  ServerMessage,
 } from "../../src/shared/protocol.js";
 import { ChatSocketClient } from "../../src/web/src/api/client.js";
 
@@ -195,6 +196,19 @@ async function waitForIdle(record: ConversationRecord): Promise<void> {
   );
 }
 
+function nextSocketMessage(socket: NodeWebSocket): Promise<ServerMessage> {
+  return new Promise((resolve, reject) => {
+    socket.once("message", (data) => {
+      try {
+        resolve(JSON.parse(data.toString()) as ServerMessage);
+      } catch (error) {
+        reject(error);
+      }
+    });
+    socket.once("error", reject);
+  });
+}
+
 async function closeServer(server: ChatWcaServer): Promise<void> {
   await server.shutdown();
 }
@@ -323,6 +337,103 @@ describe("complete conversation lifecycle integration", () => {
     ).rejects.toMatchObject({ code: ERROR_CODES.SESSION_NOT_LISTED });
     expect(existsSync(firstFile)).toBe(true);
     expect(existsSync(secondFile)).toBe(true);
+  });
+
+  it("keeps a fresh conversation's WebSocket revisions contiguous while its first response streams", async () => {
+    const { cwd, sessionDir, factory, faux } = await isolatedPi(40);
+    faux.setResponses([
+      fauxAssistantMessage("Incremental first response. ".repeat(12)),
+    ]);
+    const services = createServices(factory, sessionDir);
+    const record = await services.registry.create(historyWorkspace(cwd));
+    const config = loadConfig(
+      { CHATWCA_DATA_DIR: cwd, CHATWCA_SHUTDOWN_GRACE_MS: "100" },
+      cwd,
+    );
+    const server = createChatWcaServer(config, "first-stream-integration", {
+      registry: services.registry,
+      history: services.history,
+      workspaces: fixedWorkspaceRepository(cwd),
+      shutdown: services.registry,
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) =>
+      server.httpServer.listen(0, "127.0.0.1", resolve),
+    );
+    const { port } = server.httpServer.address() as AddressInfo;
+    const socket = new NodeWebSocket(`ws://127.0.0.1:${String(port)}/ws`);
+    await expect(nextSocketMessage(socket)).resolves.toMatchObject({ type: "ready" });
+
+    const stateResponse = nextSocketMessage(socket);
+    socket.send(JSON.stringify({
+      type: "conversation.state",
+      requestId: "initial-state",
+      conversationId: record.id,
+    }));
+    await expect(stateResponse).resolves.toMatchObject({
+      type: "state",
+      conversation: { id: record.id, revision: 0 },
+    });
+
+    const received: ServerMessage[] = [];
+    const firstRun = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("Timed out waiting for the first streamed response")),
+        5_000,
+      );
+      socket.on("message", (data) => {
+        try {
+          const message = JSON.parse(data.toString()) as ServerMessage;
+          received.push(message);
+          if (
+            message.type === "conversation.status" &&
+            message.conversationId === record.id &&
+            message.payload.status === "idle"
+          ) {
+            clearTimeout(timeout);
+            resolve();
+          }
+        } catch (error) {
+          clearTimeout(timeout);
+          reject(error);
+        }
+      });
+    });
+    socket.send(JSON.stringify({
+      type: "prompt.submit",
+      requestId: "first-prompt",
+      conversationId: record.id,
+      text: "First prompt title",
+      images: [],
+    }));
+    await firstRun;
+
+    const events = received.filter(
+      (message): message is Extract<ServerMessage, { conversationId: string }> =>
+        "conversationId" in message && message.conversationId === record.id,
+    );
+    expect(events.map(({ revision }) => revision)).toEqual(
+      Array.from({ length: events.at(-1)!.revision }, (_, index) => index + 1),
+    );
+    const metadataIndex = events.findIndex(
+      (event) => event.type === "conversation.metadata" &&
+        event.payload.title === "First prompt title",
+    );
+    const assistantStartIndex = events.findIndex(
+      (event) => event.type === "message.started" &&
+        event.payload.message.role === "assistant",
+    );
+    const assistantCompleteIndex = events.findIndex(
+      (event) => event.type === "message.completed" &&
+        event.payload.message.role === "assistant",
+    );
+    expect(metadataIndex).toBeGreaterThanOrEqual(0);
+    expect(assistantStartIndex).toBeGreaterThan(metadataIndex);
+    expect(assistantCompleteIndex).toBeGreaterThan(assistantStartIndex);
+    expect(events.slice(assistantStartIndex + 1, assistantCompleteIndex)).toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: "message.delta" })]),
+    );
+    socket.close();
   });
 
   it("runs independent conversations concurrently while switching away from a background stream", async () => {

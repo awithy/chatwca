@@ -925,6 +925,11 @@ export const ToolCompletedPayloadSchema = strictObject({
 export const StatusUpdatePayloadSchema = strictObject({
   status: LiveConversationStatusSchema,
 });
+export const ConversationMetadataPayloadSchema = strictObject({
+  title: Type.String(),
+  durable: Type.Boolean(),
+  status: LiveConversationStatusSchema,
+});
 export type MessageStartedPayload = Static<
   typeof MessageStartedPayloadSchema
 >;
@@ -936,6 +941,9 @@ export type ToolStartedPayload = Static<typeof ToolStartedPayloadSchema>;
 export type ToolUpdatedPayload = Static<typeof ToolUpdatedPayloadSchema>;
 export type ToolCompletedPayload = Static<typeof ToolCompletedPayloadSchema>;
 export type StatusUpdatePayload = Static<typeof StatusUpdatePayloadSchema>;
+export type ConversationMetadataPayload = Static<
+  typeof ConversationMetadataPayloadSchema
+>;
 
 export const RetryNoticeSchema = strictObject({
   kind: Type.Literal("retry"),
@@ -1059,6 +1067,10 @@ export const StatusEventSchema = eventEnvelope(
   "conversation.status",
   StatusUpdatePayloadSchema,
 );
+export const ConversationMetadataEventSchema = eventEnvelope(
+  "conversation.metadata",
+  ConversationMetadataPayloadSchema,
+);
 export const NoticeEventSchema = eventEnvelope(
   "conversation.notice",
   NoticePayloadSchema,
@@ -1076,6 +1088,9 @@ export type ToolUpdatedEvent = Static<typeof ToolUpdatedEventSchema>;
 export type ToolCompletedEvent = Static<typeof ToolCompletedEventSchema>;
 export type QueueEvent = Static<typeof QueueEventSchema>;
 export type StatusEvent = Static<typeof StatusEventSchema>;
+export type ConversationMetadataEvent = Static<
+  typeof ConversationMetadataEventSchema
+>;
 export type NoticeEvent = Static<typeof NoticeEventSchema>;
 export type NetworkBlockedEvent = Static<typeof NetworkBlockedEventSchema>;
 
@@ -1088,6 +1103,7 @@ export const ConversationEventSchema = Type.Union([
   ToolCompletedEventSchema,
   QueueEventSchema,
   StatusEventSchema,
+  ConversationMetadataEventSchema,
   NoticeEventSchema,
   NetworkBlockedEventSchema,
 ]);

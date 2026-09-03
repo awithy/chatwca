@@ -854,7 +854,11 @@ function newRun(job: JobSummary): JobRunState {
       status: "streaming",
       owner: { kind: "scheduled-job", jobId: job.id, runId: run.id },
     });
-    fixture.state = { ...fixture.state, workspaceId: job.workspaceId };
+    fixture.state = {
+      ...fixture.state,
+      workspaceId: job.workspaceId,
+      revision: fixture.state.revision + 1,
+    };
     for (const listener of listeners) listener({ type: "conversation.state-changed", record: fixture.state as never });
   }
   const attached: JobRunState = {
@@ -879,7 +883,12 @@ function newRun(job: JobSummary): JobRunState {
       const fixture = fixtureById(conversationId);
       fixture.closed = true;
       const { owner: _owner, ...withoutOwner } = fixture.state;
-      fixture.state = { ...withoutOwner, status: "idle", lastActiveAt: nextTime() };
+      fixture.state = {
+        ...withoutOwner,
+        status: "idle",
+        revision: fixture.state.revision + 1,
+        lastActiveAt: nextTime(),
+      };
       for (const listener of listeners) listener({ type: "conversation.state-changed", record: fixture.state as never });
     }
     updateRun({

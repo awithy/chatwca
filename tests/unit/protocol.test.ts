@@ -612,10 +612,21 @@ describe("ServerMessageSchema", () => {
         },
       },
       {
-        type: "network.blocked",
+        type: "conversation.metadata",
         workspaceId: "workspace-1",
         conversationId: "session-1",
         revision: 3,
+        payload: {
+          title: "Renamed",
+          durable: true,
+          status: "streaming",
+        },
+      },
+      {
+        type: "network.blocked",
+        workspaceId: "workspace-1",
+        conversationId: "session-1",
+        revision: 4,
         payload: {
           host: "example.com",
           port: 443,

@@ -42,6 +42,14 @@ test("rail navigation is accessible and jobs adapt to a narrow viewport", async 
   await expect(navigation.getByRole("button", { name: "Conversations" })).toBeFocused();
 });
 
+test("new daily jobs default to Pacific time", async ({ page }) => {
+  await openJobs(page);
+  await page.getByRole("button", { name: "New job" }).click();
+  const form = page.getByRole("form", { name: "Create job" });
+  await form.getByRole("button", { name: "Daily", exact: true }).click();
+  await expect(form.getByLabel("Timezone")).toHaveValue("America/Los_Angeles");
+});
+
 test("creates interval and daily jobs, discloses hooks, and filters authoritative rows", async ({ page }) => {
   await openJobs(page);
   const suffix = Date.now().toString();

@@ -468,7 +468,6 @@ export function ConversationsPage({ client, chat, server, onOpenJobRun }: Conver
 
         {selectedWorkspace === undefined ? (
           <section className="welcome-panel">
-            <div className="welcome-mark" aria-hidden="true">W</div>
             <p className="eyebrow">Local agent platform</p>
             <h1>{chat.workspaces.length === 0 ? "Add your first workspace" : "Select a workspace"}</h1>
             <p>

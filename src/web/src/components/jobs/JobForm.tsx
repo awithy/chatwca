@@ -37,9 +37,17 @@ export interface JobFormProps {
   readonly onCancel: () => void;
 }
 
+const DEFAULT_JOB_TIME_ZONE = "America/Los_Angeles";
+
 function scheduleInput(job: JobSummary | undefined): JobScheduleInput {
   if (job?.schedule.kind === "daily") return job.schedule;
   return { kind: "interval", intervalMinutes: job?.schedule.intervalMinutes ?? 60 };
+}
+
+function defaultTimeZone(supportedTimeZones: readonly string[]): string {
+  if (supportedTimeZones.includes(DEFAULT_JOB_TIME_ZONE)) return DEFAULT_JOB_TIME_ZONE;
+  if (supportedTimeZones.includes("UTC")) return "UTC";
+  return supportedTimeZones[0] ?? "";
 }
 
 export function JobForm({ job, workspaces, config, managedEgressConfig, submitting, error, titleId, onSubmit, onCancel }: JobFormProps) {
@@ -47,13 +55,14 @@ export function JobForm({ job, workspaces, config, managedEgressConfig, submitti
   const nameRef = useRef<HTMLInputElement>(null);
   const editing = job !== undefined;
   const initialSchedule = scheduleInput(job);
+  const initialTimeZone = defaultTimeZone(config.supportedTimeZones);
   const [name, setName] = useState(job?.name ?? "");
   const [workspaceId, setWorkspaceId] = useState(job?.workspaceId ?? workspaces[0]?.id ?? "");
   const [prompt, setPrompt] = useState(job?.prompt ?? "");
   const [scheduleKind, setScheduleKind] = useState<JobScheduleInput["kind"]>(initialSchedule.kind);
   const [intervalMinutes, setIntervalMinutes] = useState(initialSchedule.kind === "interval" ? String(initialSchedule.intervalMinutes) : "60");
   const [localTime, setLocalTime] = useState(initialSchedule.kind === "daily" ? initialSchedule.localTime : "09:00");
-  const [timeZone, setTimeZone] = useState(initialSchedule.kind === "daily" ? initialSchedule.timeZone : "UTC");
+  const [timeZone, setTimeZone] = useState(initialSchedule.kind === "daily" ? initialSchedule.timeZone : initialTimeZone);
   const [preRunScript, setPreRunScript] = useState(job?.preRunScript ?? "");
   const [postRunScript, setPostRunScript] = useState(job?.postRunScript ?? "");
   const [enabled, setEnabled] = useState(job?.enabled ?? true);
@@ -136,7 +145,7 @@ export function JobForm({ job, workspaces, config, managedEgressConfig, submitti
           </dl>
         )}
         <label htmlFor={`${id}-prompt`}>Saved prompt</label>
-        <textarea id={`${id}-prompt`} rows={7} value={prompt} maxLength={JOB_PROMPT_MAX_LENGTH} disabled={submitting} onChange={(event) => setPrompt(event.target.value)} />
+        <textarea id={`${id}-prompt`} rows={3} value={prompt} maxLength={JOB_PROMPT_MAX_LENGTH} disabled={submitting} onChange={(event) => setPrompt(event.target.value)} />
         <fieldset className="schedule-fields"><legend>Schedule</legend>
           <div className="segmented-control" role="group" aria-label="Schedule type">
             <button type="button" aria-pressed={scheduleKind === "interval"} disabled={submitting} onClick={() => {
@@ -146,7 +155,7 @@ export function JobForm({ job, workspaces, config, managedEgressConfig, submitti
             }}>Interval</button>
             <button type="button" aria-pressed={scheduleKind === "daily"} disabled={submitting} onClick={() => {
               if (!new RegExp(JOB_DAILY_TIME_PATTERN, "u").test(localTime)) setLocalTime("09:00");
-              if (!zoneOptions.includes(timeZone)) setTimeZone("UTC");
+              if (!zoneOptions.includes(timeZone)) setTimeZone(initialTimeZone);
               setScheduleKind("daily");
             }}>Daily</button>
           </div>

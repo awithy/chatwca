@@ -386,11 +386,8 @@ export function WorkspaceSidebar({
     >
       <div className="sidebar-brand">
         <div>
-          <span className="brand-mark" aria-hidden="true">W</span>
-          <div>
-            <strong>ChatWCA</strong>
-            <small>Local agent platform</small>
-          </div>
+          <strong>ChatWCA</strong>
+          <small>Local agent platform</small>
         </div>
         <button
           className="icon-button sidebar-dismiss"

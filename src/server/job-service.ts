@@ -29,6 +29,7 @@ export interface JobServiceRepositoryPort {
 
 export interface JobServiceSchedulerPort {
   runNowAccepted(jobId: string): JobRunState;
+  refreshSchedule(): void;
 }
 
 export interface JobServiceRunnerPort {
@@ -82,17 +83,20 @@ export class JobService {
   create(input: CreateJobInput): readonly JobSummary[] {
     this.#workspaces.requireAvailable(input.workspaceId);
     this.#repository.create(input);
+    this.#scheduler.refreshSchedule();
     return this.#repository.list();
   }
 
   update(jobId: string, input: UpdateJobInput): readonly JobSummary[] {
     if (input.workspaceId !== undefined) this.#workspaces.requireAvailable(input.workspaceId);
     this.#repository.update(jobId, input);
+    this.#scheduler.refreshSchedule();
     return this.#repository.list();
   }
 
   delete(jobId: string): readonly JobSummary[] {
     this.#repository.delete(jobId);
+    this.#scheduler.refreshSchedule();
     return this.#repository.list();
   }
 

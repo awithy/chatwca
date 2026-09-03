@@ -26,7 +26,10 @@ function fixture(historySucceeds = true) {
     update: vi.fn(() => job), delete: vi.fn(), referencesWorkspace: vi.fn(() => false),
     listRuns: vi.fn(() => ({ runs: [summaryOnly(state)] })), getRun: vi.fn(() => state),
   };
-  const scheduler = { runNowAccepted: vi.fn(() => state) };
+  const scheduler = {
+    runNowAccepted: vi.fn(() => state),
+    refreshSchedule: vi.fn(),
+  };
   const runner = { abort: vi.fn(async () => undefined) };
   const workspace = { id: "workspace-1", path: "/workspace", sessionDirectory: null };
   const workspaces = { requireAvailable: vi.fn(() => workspace) };
@@ -67,14 +70,16 @@ describe("JobService", () => {
     await expect(f.service.runState(job.id, state.id)).resolves.toEqual(state);
   });
 
-  it("resolves workspace IDs server-side before definition writes", () => {
+  it("resolves workspace IDs server-side and refreshes scheduling after definition writes", () => {
     const f = fixture();
     f.service.create({
       name: "Job", workspaceId: "workspace-1", prompt: "Prompt",
       schedule: { kind: "interval", intervalMinutes: 1 }, enabled: true,
     });
     f.service.update(job.id, { workspaceId: "workspace-2" });
+    f.service.delete(job.id);
     expect(f.workspaces.requireAvailable).toHaveBeenNthCalledWith(1, "workspace-1");
     expect(f.workspaces.requireAvailable).toHaveBeenNthCalledWith(2, "workspace-2");
+    expect(f.scheduler.refreshSchedule).toHaveBeenCalledTimes(3);
   });
 });

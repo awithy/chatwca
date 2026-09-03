@@ -189,6 +189,26 @@ describe("JobScheduler", () => {
     expect(f.timers.delays).toEqual([250]);
   });
 
+  it("arms scheduling when a job is created after startup", async () => {
+    const f = fixture([], 1_000, 10_000);
+    await f.scheduler.start();
+    expect(f.timers.pending.size).toBe(0);
+
+    f.repository.jobs.push(job("created", 2_000));
+    f.scheduler.refreshSchedule();
+    expect(f.timers.delays).toEqual([1_000]);
+
+    f.setNow(2_000);
+    f.timers.fireNext();
+    expect(f.repository.dues).toEqual(["created"]);
+    expect(f.dispatched).toHaveLength(1);
+    expect(f.dispatched[0]?.run).toMatchObject({
+      jobId: "created",
+      trigger: "scheduled",
+      scheduledFor: 2_000,
+    });
+  });
+
   it("re-queries on early and late wakes, claims jobs independently, and records active overlap", async () => {
     const f = fixture([job("a", 2_000), job("b", 2_000)], 1_000, 10_000);
     f.repository.activeJob = "a";

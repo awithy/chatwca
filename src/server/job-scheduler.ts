@@ -161,6 +161,16 @@ export class JobScheduler {
     return claim.run;
   }
 
+  /** Recalculate timer ownership after a persisted job definition changes. */
+  refreshSchedule(): void {
+    if (!this.#running || this.#closed) return;
+    try {
+      this.#arm();
+    } catch (error) {
+      this.#onInternalError(error);
+    }
+  }
+
   /** Permanently close occurrence and manual admission and cancel the timer. */
   beginShutdown(): void {
     if (this.#closed) return;

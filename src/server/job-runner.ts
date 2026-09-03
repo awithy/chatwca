@@ -145,6 +145,7 @@ export class JobRunner {
   readonly #activeByKey = new Map<string, ActiveRun>();
   readonly #unsubscribeJobAborts: (() => void) | undefined;
   #closed = false;
+  #persistenceSealed = false;
 
   constructor(options: Readonly<JobRunnerOptions>) {
     this.#repository = options.repository;
@@ -231,6 +232,20 @@ export class JobRunner {
     }
   }
 
+  /**
+   * Adopt the coordinator's transactionally interrupted rows and permanently
+   * prevent asynchronous continuations from issuing later SQLite operations.
+   */
+  sealPersistence(interrupted: readonly JobRunState[]): void {
+    if (this.#persistenceSealed) return;
+    const byKey = new Map(interrupted.map((state) => [activeKey(state.jobId, state.id), state]));
+    for (const [key, active] of this.#activeByKey) {
+      const state = byKey.get(key);
+      if (state !== undefined) active.state = state;
+    }
+    this.#persistenceSealed = true;
+  }
+
   async dispose(): Promise<void> {
     this.beginShutdown();
     await Promise.allSettled(
@@ -251,14 +266,17 @@ export class JobRunner {
         active.state.revision,
       );
       this.#publish(active.state);
+      if (this.#persistenceSealed) return active.state;
 
       let policy: RuntimeWorkspacePolicy;
       try {
         policy = freezePolicy(await this.#workspaces.requireUsable(active.job.workspaceId));
       } catch (error) {
+        if (this.#persistenceSealed) return active.state;
         if (active.stopReason !== undefined) return this.#finishStopped(active);
         return this.#finish(active, "blocked", safeErrorCode(error, ERROR_CODES.WORKSPACE_UNAVAILABLE), null);
       }
+      if (this.#persistenceSealed) return active.state;
       if (active.stopReason !== undefined) return this.#finishStopped(active);
 
       let preScript: string | null = null;
@@ -281,6 +299,7 @@ export class JobRunner {
       try {
         lease = await this.#registry.reserveRuntimeCapacity();
       } catch (error) {
+        if (this.#persistenceSealed) return active.state;
         if (active.stopReason !== undefined || (error instanceof AppError && error.code === ERROR_CODES.SHUTTING_DOWN)) {
           return this.#finishStopped(active);
         }
@@ -291,6 +310,7 @@ export class JobRunner {
           null,
         );
       }
+      if (this.#persistenceSealed) return active.state;
       if (active.stopReason !== undefined) return this.#finishStopped(active);
 
       if (preScript !== null) {
@@ -298,12 +318,14 @@ export class JobRunner {
           active.job.id, active.state.id, "pre-hook", active.state.revision,
         );
         this.#publish(active.state);
+        if (this.#persistenceSealed) return active.state;
         try {
           preScript = this.#hookPaths.validateForRun(active.job.preRunScript!, policy);
         } catch (error) {
           return this.#finish(active, "blocked", safeErrorCode(error, ERROR_CODES.JOB_SCRIPT_UNAVAILABLE), "pre-hook");
         }
         const result = await this.#runHook(active, policy, preScript, "pre-hook");
+        if (this.#persistenceSealed) return active.state;
         active.state = this.#recordHook(active, "pre", result);
         this.#adoptHookStop(active, result);
         if (active.stopReason !== undefined) return this.#finishStopped(active, "pre-hook");
@@ -316,6 +338,7 @@ export class JobRunner {
         active.job.id, active.state.id, "prompt", active.state.revision,
       );
       this.#publish(active.state);
+      if (this.#persistenceSealed) return active.state;
       if (active.stopReason !== undefined) return this.#finishStopped(active, "prompt");
 
       let conversation: Pick<ConversationRecord, "id">;
@@ -323,19 +346,23 @@ export class JobRunner {
         conversation = await this.#registry.createJobConversation(policy, active.owner, lease);
         lease = undefined; // promoted into registry ownership
       } catch (error) {
+        if (this.#persistenceSealed) return active.state;
         if (active.stopReason !== undefined) return this.#finishStopped(active, "prompt");
         return this.#finish(active, "failed", safeErrorCode(error, ERROR_CODES.JOB_PROMPT_FAILED), "prompt");
       }
       active.conversationId = conversation.id;
+      if (this.#persistenceSealed) return active.state;
       active.state = this.#repository.attachConversation(
         active.job.id, active.state.id, conversation.id, active.state.revision,
       );
       this.#publish(active.state);
+      if (this.#persistenceSealed) return active.state;
       await this.#registry.setJobConversationTitle(
         conversation.id,
         active.owner,
         formatJobConversationTitle(active.job.name, active.job.schedule, active.state.scheduledFor),
       );
+      if (this.#persistenceSealed) return active.state;
       if (active.stopReason !== undefined) return this.#finishStopped(active, "prompt");
 
       const promptResult = await this.#registry.runJobPrompt(
@@ -343,6 +370,7 @@ export class JobRunner {
         active.owner,
         active.job.prompt,
       );
+      if (this.#persistenceSealed) return active.state;
       if (active.stopReason !== undefined || promptResult.kind === "aborted") {
         if (active.stopReason === undefined) active.stopReason = "abort";
         return this.#finishStopped(active, "prompt");
@@ -359,6 +387,7 @@ export class JobRunner {
           active.job.id, active.state.id, "post-hook", active.state.revision,
         );
         this.#publish(active.state);
+        if (this.#persistenceSealed) return active.state;
         if (active.stopReason !== undefined) return this.#finishStopped(active, "post-hook");
         try {
           postScript = this.#hookPaths.validateForRun(active.job.postRunScript!, policy);
@@ -366,6 +395,7 @@ export class JobRunner {
           return this.#finish(active, "blocked", safeErrorCode(error, ERROR_CODES.JOB_SCRIPT_UNAVAILABLE), "post-hook");
         }
         const result = await this.#runHook(active, policy, postScript, "post-hook");
+        if (this.#persistenceSealed) return active.state;
         active.state = this.#recordHook(active, "post", result);
         this.#adoptHookStop(active, result);
         if (active.stopReason !== undefined) return this.#finishStopped(active, "post-hook");
@@ -377,6 +407,7 @@ export class JobRunner {
       return this.#finish(active, "succeeded", null, postScript === null ? "prompt" : "post-hook");
     } catch (error) {
       try {
+        if (this.#persistenceSealed) return active.state;
         if (active.stopReason !== undefined) return this.#finishStopped(active);
         return this.#finish(active, "failed", safeErrorCode(error, ERROR_CODES.JOB_PROMPT_FAILED), active.state.phase);
       } catch (finishError) {
@@ -437,6 +468,7 @@ export class JobRunner {
     errorCode: ErrorCode | null,
     phase: JobRunPhase | null,
   ): JobRunState {
+    if (this.#persistenceSealed) return active.state;
     try {
       const state = this.#repository.finishRun(active.job.id, active.state.id, {
         status,

@@ -5,6 +5,7 @@ import type { AddressInfo } from "node:net";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { ERROR_CODES } from "../../src/shared/errors.js";
 import { loadConfig, type ServerConfig } from "../../src/server/config.js";
 import {
   openDatabase,
@@ -15,6 +16,9 @@ import {
   type ChatWcaServer,
 } from "../../src/server/index.js";
 import type { PiRuntimeFactoryPort } from "../../src/server/pi-runtime.js";
+import { JobRepository } from "../../src/server/job-repository.js";
+import { JobRunner } from "../../src/server/job-runner.js";
+import { JobScheduler } from "../../src/server/job-scheduler.js";
 import { WorkspaceRepository } from "../../src/server/workspace-repository.js";
 import type {
   SandboxWorkerArtifact,
@@ -107,9 +111,21 @@ describe("production startup wiring", () => {
         calls.push("workspace-repository");
         return new WorkspaceRepository(connection);
       },
+      createJobRepository: (connection) => {
+        calls.push("job-repository");
+        return new JobRepository(connection);
+      },
       createRuntimeFactory: async () => {
         calls.push("pi-services");
         return fakeRuntimeFactory();
+      },
+      createJobRunner: (runnerOptions) => {
+        calls.push("job-runner");
+        return new JobRunner(runnerOptions);
+      },
+      createJobScheduler: (schedulerOptions) => {
+        calls.push("scheduler");
+        return new JobScheduler(schedulerOptions);
       },
       listSessions,
       serverVersion: "startup-test",
@@ -124,7 +140,10 @@ describe("production startup wiring", () => {
       "config",
       "sqlite",
       "workspace-repository",
+      "job-repository",
       "pi-services",
+      "job-runner",
+      "scheduler",
       "listeners",
     ]);
     expect(listSessions).not.toHaveBeenCalled();
@@ -140,6 +159,57 @@ describe("production startup wiring", () => {
 
     await server.shutdown();
     expect(database?.closed).toBe(true);
+  });
+
+  it("recovers interrupted runs and claims one overdue catch-up before listener readiness", async () => {
+    const root = temporaryDirectory();
+    const workspacePath = path.join(root, "workspace");
+    mkdirSync(workspacePath);
+    const loadedConfig = config(root);
+    let database: ChatWcaDatabase | undefined;
+    const listSessions = vi.fn(async () => []);
+
+    const server = await startChatWcaServer({
+      loadConfiguration: () => loadedConfig,
+      openDatabase: (dataDir) => {
+        database = openDatabase(dataDir);
+        database.connection.prepare(`
+          INSERT INTO workspaces (
+            id, name, path, session_storage, security_profile, network_policy,
+            network_policy_set_id, created_at, updated_at
+          ) VALUES ('workspace', 'Workspace', ?, 'pi-default', 'unrestricted',
+            'isolated', 'default', 0, 0)
+        `).run(realpathSync(workspacePath));
+        database.connection.prepare(`
+          INSERT INTO jobs (
+            id, name, workspace_id, prompt, schedule_kind, interval_minutes,
+            anchor_at, enabled, next_run_at, created_at, updated_at
+          ) VALUES ('job', 'Job', 'workspace', 'run', 'interval', 1,
+            0, 1, 0, 0, 0)
+        `).run();
+        database.connection.prepare(`
+          INSERT INTO job_runs (
+            id, job_id, trigger, scheduled_for, started_at, status, revision,
+            created_at, updated_at
+          ) VALUES ('old-run', 'job', 'scheduled', 0, 0, 'running', 1, 0, 0)
+        `).run();
+        return database;
+      },
+      createRuntimeFactory: async () => fakeRuntimeFactory(),
+      listSessions,
+      serverVersion: "job-recovery-test",
+      listen: async (created) => {
+        const old = database!.connection.prepare("SELECT status, error_code FROM job_runs WHERE id = 'old-run'").get();
+        expect(old).toEqual({ status: "interrupted", error_code: ERROR_CODES.JOB_INTERRUPTED });
+        const catches = database!.connection.prepare("SELECT trigger, scheduled_for FROM job_runs WHERE job_id = 'job' AND id != 'old-run'").all();
+        expect(catches).toEqual([{ trigger: "catch-up", scheduled_for: 0 }]);
+        const next = database!.connection.prepare("SELECT next_run_at FROM jobs WHERE id = 'job'").get() as { next_run_at: number };
+        expect(next.next_run_at).toBeGreaterThan(Date.now());
+        await bindEphemeral(created);
+      },
+    });
+    runningServers.push(server);
+    expect(listSessions).not.toHaveBeenCalled();
   });
 
   it("runs enabled sandbox loading, validation, and functional probing before Pi services and listeners", async () => {
@@ -329,6 +399,31 @@ describe("production startup wiring", () => {
     expect(database?.closed).toBe(true);
     expect(createPi).not.toHaveBeenCalled();
     expect(bind).not.toHaveBeenCalled();
+  });
+
+  it("unwinds runtimes and SQLite without listening when scheduler recovery fails", async () => {
+    const root = temporaryDirectory();
+    const failure = new Error("scheduler recovery failed");
+    let database: ChatWcaDatabase | undefined;
+    const bind = vi.fn(bindEphemeral);
+
+    await expect(startChatWcaServer({
+      loadConfiguration: () => config(root),
+      openDatabase: (dataDir) => {
+        database = openDatabase(dataDir);
+        return database;
+      },
+      createRuntimeFactory: async () => fakeRuntimeFactory(),
+      createJobScheduler: (schedulerOptions) => {
+        const scheduler = new JobScheduler(schedulerOptions);
+        vi.spyOn(scheduler, "start").mockRejectedValue(failure);
+        return scheduler;
+      },
+      listen: bind,
+    })).rejects.toBe(failure);
+
+    expect(bind).not.toHaveBeenCalled();
+    expect(database?.closed).toBe(true);
   });
 
   it("closes SQLite when required Pi initialization fails", async () => {

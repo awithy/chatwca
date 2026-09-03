@@ -54,6 +54,12 @@ import {
 import { publicSandboxConfig } from "./sandbox/config.js";
 import { publicManagedEgressConfig } from "./network/config.js";
 import { publicJobConfig } from "./job-config.js";
+import { JobHookPathAdmission } from "./job-hook-path.js";
+import { JobHookRunner } from "./job-hook-runner.js";
+import { JobRepository } from "./job-repository.js";
+import { JobRunner } from "./job-runner.js";
+import { JobScheduler } from "./job-scheduler.js";
+import { RuntimeCoordinator } from "./runtime-coordinator.js";
 import {
   validateNetworkHelper,
   type ValidatedNetworkHelper,
@@ -418,6 +424,15 @@ export interface ChatWcaStartupOptions {
   readonly createRuntimeFactory?: (
     config: Readonly<ServerConfig>,
   ) => Promise<PiRuntimeFactoryPort>;
+  /** Lifecycle seams used by startup ordering/failure tests. */
+  readonly createJobRepository?: (
+    connection: ChatWcaDatabase["connection"],
+    config: Readonly<ServerConfig>,
+    workspaces: ProtocolWorkspaceRepository,
+    hookPaths: JobHookPathAdmission,
+  ) => JobRepository;
+  readonly createJobRunner?: (options: ConstructorParameters<typeof JobRunner>[0]) => JobRunner;
+  readonly createJobScheduler?: (options: ConstructorParameters<typeof JobScheduler>[0]) => JobScheduler;
   /** Injectable only to assert that startup performs no Pi history listing. */
   readonly listSessions?: SessionHistoryOptions["listSessions"];
   readonly serverVersion?: string;
@@ -483,6 +498,7 @@ export async function startChatWcaServer(
   const reportError = options.onInternalError ?? (() => undefined);
   let database: ChatWcaDatabase | undefined;
   let registry: ConversationRegistry | undefined;
+  let coordinator: RuntimeCoordinator | undefined;
   let server: ChatWcaServer | undefined;
 
   try {
@@ -554,6 +570,36 @@ export async function startChatWcaServer(
         },
       }))
     )(database.connection, config);
+    const hookPaths = new JobHookPathAdmission({
+      scriptRoots: config.jobs.scriptRoots,
+      protectedPaths: [
+        dataDirectory,
+        piAgentDirectory,
+        process.execPath,
+        ...config.sandbox.readOnlyMounts.map((mount) => mount.source),
+        ...(sandboxHost === undefined
+          ? []
+          : [sandboxHost.bwrapPath, sandboxHost.rgPath]),
+        ...(networkHelper === undefined
+          ? []
+          : [networkHelper.path, networkHelper.directory]),
+      ],
+    });
+    const jobs = (options.createJobRepository ?? ((connection) => new JobRepository(connection, {
+      workspaceStatus: (workspaceId) => {
+        const workspace = workspaces.list().find((candidate) => candidate.id === workspaceId);
+        if (workspace === undefined) throw new AppError(ERROR_CODES.WORKSPACE_NOT_FOUND);
+        return { name: workspace.name, available: workspace.available };
+      },
+      hookPathAdmission: hookPaths,
+      hookWorkspacePolicy: (workspaceId) => {
+        const available = workspaces.requireAvailable(workspaceId);
+        const summary = workspaces.list().find((candidate) => candidate.id === workspaceId);
+        return { cwd: available.path, mounts: summary?.mounts ?? [] };
+      },
+      conversationAvailable: (conversationId) => registry?.get(conversationId) !== undefined,
+    })))(database.connection, config, workspaces, hookPaths);
+
     const runtimeFactory = await (
       options.createRuntimeFactory ??
       ((loadedConfig) => PiRuntimeFactory.create({
@@ -616,6 +662,33 @@ export async function startChatWcaServer(
       onListenerError: reportError,
     });
 
+    const hookRunner = new JobHookRunner({ config: config.jobs });
+    const jobRunner = (options.createJobRunner ?? ((runnerOptions) => new JobRunner(runnerOptions)))({
+      repository: jobs,
+      workspaces,
+      hookPaths,
+      hooks: hookRunner,
+      registry,
+      onInternalError: reportError,
+    });
+    const scheduler = (options.createJobScheduler ?? ((schedulerOptions) => new JobScheduler(schedulerOptions)))({
+      repository: jobs,
+      runner: jobRunner,
+      onInternalError: reportError,
+    });
+    coordinator = new RuntimeCoordinator({
+      scheduler,
+      jobRunner,
+      hookRunner,
+      registry,
+      repository: jobs,
+      onInternalError: reportError,
+    });
+
+    // Recovery and catch-up claims complete before any transport can report
+    // readiness. Dispatched catch-up work deliberately continues in parallel.
+    await scheduler.start();
+
     server = createChatWcaServer(
       config,
       options.serverVersion ?? readServerVersion(),
@@ -624,7 +697,7 @@ export async function startChatWcaServer(
         history,
         images: registry,
         workspaces,
-        shutdown: registry,
+        shutdown: coordinator,
         closeStorage: () => database?.close(),
         sandboxFunctionalProbeSucceeded: functionalProbeSucceeded,
         managedNetworkFunctionalProbeSucceeded,
@@ -638,10 +711,16 @@ export async function startChatWcaServer(
       // The normal shutdown coordinator owns registry/protocol/database order.
       await server.shutdown().catch(reportError);
     } else {
-      // Construction failed before a coordinator existed. There can be no
-      // listener, but registry and SQLite ownership may already exist.
-      registry?.beginShutdown();
-      await registry?.dispose().catch(reportError);
+      // Construction failed before the HTTP shutdown owner existed. Unwind the
+      // same jobs/hooks/registry ownership order when available.
+      if (coordinator !== undefined) {
+        try { coordinator.beginShutdown(); } catch (cleanupError) { reportError(cleanupError); }
+        await coordinator.abortActive().catch(reportError);
+        await coordinator.dispose().catch(reportError);
+      } else {
+        registry?.beginShutdown();
+        await registry?.dispose().catch(reportError);
+      }
       try {
         database?.close();
       } catch (cleanupError) {

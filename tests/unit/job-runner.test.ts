@@ -404,4 +404,33 @@ describe("JobRunner", () => {
     expect(f.registry.releaseJobConversation).toHaveBeenCalledOnce();
     expect(repository.terminalCalls).toEqual([]);
   });
+
+  it("performs no late repository operation after shutdown seals persistence", async () => {
+    let resolvePolicy!: (value: RuntimeWorkspacePolicy) => void;
+    const policyPending = new Promise<RuntimeWorkspacePolicy>((resolve) => {
+      resolvePolicy = resolve;
+    });
+    const repository = new FakeRepository();
+    const f = fixture({ repository, requireUsable: () => policyPending });
+    const pending = f.runner.run(f.claim);
+    await vi.waitFor(() => expect(repository.state.status).toBe("running"));
+
+    const recovered = runState({
+      ...repository.state,
+      status: "interrupted",
+      errorCode: ERROR_CODES.JOB_INTERRUPTED,
+      errorMessage: new AppError(ERROR_CODES.JOB_INTERRUPTED).message,
+      finishedAt: 1_500,
+      revision: repository.state.revision + 1,
+    });
+    f.runner.beginShutdown();
+    f.runner.sealPersistence([recovered]);
+    const stateCount = repository.states.length;
+    resolvePolicy(policy);
+
+    await expect(pending).resolves.toEqual(recovered);
+    expect(repository.states).toHaveLength(stateCount);
+    expect(repository.terminalCalls).toEqual([]);
+    expect(f.registry.reserveRuntimeCapacity).not.toHaveBeenCalled();
+  });
 });

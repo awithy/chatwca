@@ -44,7 +44,7 @@ test("keyboard focus and primary chat controls remain operable", async ({ page }
   await createConversation(page);
   const composer = page.getByRole("textbox", { name: "Message" });
   await expect(composer).toBeEnabled();
-  await composer.focus();
+  await expect(composer).toBeFocused();
   await composer.fill("Stream slowly for keyboard controls");
   await page.keyboard.press("Shift+Enter");
   await expect(page.locator(".message-user")).toHaveCount(0);

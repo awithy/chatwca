@@ -79,6 +79,7 @@ export function ConversationsPage({ client, chat, server, onOpenJobs, onOpenJobR
   const [conversationError, setConversationError] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const pendingActionRef = useRef<string | null>(null);
+  const focusComposerConversationIdRef = useRef<string | null>(null);
   const [branchAction, setBranchAction] = useState<{
     readonly kind: "fork" | "rewind";
     readonly conversationId: string;
@@ -166,6 +167,14 @@ export function ConversationsPage({ client, chat, server, onOpenJobs, onOpenJobR
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [mobileActionsOpen]);
+
+  useEffect(() => {
+    if (selectedConversation?.id !== focusComposerConversationIdRef.current) return;
+    const composer = document.getElementById("conversation-composer");
+    if (!(composer instanceof HTMLTextAreaElement) || composer.disabled) return;
+    composer.focus();
+    focusComposerConversationIdRef.current = null;
+  }, [connected, pendingAction, selectedConversation?.id]);
 
   async function runExclusive<T>(
     action: string,
@@ -279,6 +288,7 @@ export function ConversationsPage({ client, chat, server, onOpenJobs, onOpenJobR
         type: "conversation.create",
         workspaceId: workspace.id,
       }));
+      focusComposerConversationIdRef.current = result.conversation.id;
       client.selectConversation(result.conversation.id);
       setSidebarOpen(false);
     } catch (error) {

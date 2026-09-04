@@ -32,14 +32,19 @@ async function createJob(
   await expect(form).toHaveCount(0);
 }
 
-test("rail navigation is accessible and jobs adapt to a narrow viewport", async ({ page }) => {
+test("rail navigation moves into an accessible mobile drawer", async ({ page }) => {
   await openJobs(page);
-  const navigation = page.getByRole("navigation", { name: "Application sections" });
+  const navigation = page.getByRole("navigation", { name: "Application sections", exact: true });
   await expect(navigation.getByRole("button", { name: "Jobs" })).toHaveAttribute("aria-current", "page");
   await page.setViewportSize({ width: 390, height: 760 });
-  await expect(navigation).toHaveCSS("flex-direction", "row");
-  await navigation.getByRole("button", { name: "Conversations" }).focus();
-  await expect(navigation.getByRole("button", { name: "Conversations" })).toBeFocused();
+  await expect(navigation).toBeHidden();
+  await page.getByRole("button", { name: "Open application navigation" }).click();
+  const mobileNavigation = page.getByRole("navigation", { name: "Mobile application sections" });
+  await expect(mobileNavigation.getByRole("button", { name: "Jobs" })).toHaveAttribute("aria-current", "page");
+  await mobileNavigation.getByRole("button", { name: "Conversations" }).focus();
+  await expect(mobileNavigation.getByRole("button", { name: "Conversations" })).toBeFocused();
+  await page.locator(".mobile-section-drawer").getByRole("button", { name: "Close application navigation" }).click();
+  await expect(mobileNavigation).toHaveCount(0);
 });
 
 test("new daily jobs default to Pacific time", async ({ page }) => {

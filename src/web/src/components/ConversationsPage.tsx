@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 
 import {
+  MAX_CONVERSATION_TITLE_LENGTH,
   type ConversationSummary,
   type PublicConfig,
   type UiImage,
@@ -15,12 +16,18 @@ import { WorkspaceSidebar } from "./WorkspaceSidebar.js";
 import type { WorkspaceFormValues } from "./WorkspaceForm.js";
 import { MessageTimeline } from "./MessageTimeline.js";
 import { NetworkBlockedNotices } from "./NetworkBlockedNotices.js";
-import type { PromptAction } from "./chat-interactions.js";
+import {
+  canCloseConversation,
+  canDeleteConversation,
+  type PromptAction,
+} from "./chat-interactions.js";
+import { conversationTitle } from "./conversation-list.js";
 
 export interface ConversationsPageProps {
   readonly client: ChatSocketClient;
   readonly chat: ChatClientState;
   readonly server: ServerStatus;
+  readonly onOpenJobs: () => void;
   readonly onOpenJobRun: (jobId: string, runId: string) => void;
 }
 
@@ -34,8 +41,40 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
-export function ConversationsPage({ client, chat, server, onOpenJobRun }: ConversationsPageProps) {
+function mobileStatusLabel(status: ConversationSummary["status"] | "aborting"): string {
+  switch (status) {
+    case "closed": return "Closed";
+    case "idle": return "Idle";
+    case "streaming": return "Running";
+    case "aborting": return "Stopping";
+    case "error": return "Error";
+  }
+}
+
+function mobileSecurityLabel(conversation: ChatClientState["conversations"][string]["conversation"] | undefined): string {
+  if (conversation === undefined) return "Loading security profile…";
+  if (conversation.securityProfile !== "workspace-sandboxed") return "Unrestricted";
+  return conversation.networkPolicy === "managed-egress"
+    ? "Sandboxed · Managed egress"
+    : "Sandboxed · Network isolated";
+}
+
+function mobileContextLabel(conversation: ChatClientState["conversations"][string]["conversation"] | undefined): string {
+  const usage = conversation?.contextUsage;
+  if (usage === undefined || usage === null) return "—";
+  const window = usage.contextWindow < 1_000
+    ? String(usage.contextWindow)
+    : `${Math.round(usage.contextWindow / 1_000)}k`;
+  return `${usage.percent === null ? "?" : `${usage.percent.toFixed(1)}%`}/${window}`;
+}
+
+export function ConversationsPage({ client, chat, server, onOpenJobs, onOpenJobRun }: ConversationsPageProps) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [mobileActionsOpen, setMobileActionsOpen] = useState(false);
+  const [mobileRenaming, setMobileRenaming] = useState(false);
+  const [mobileTitleDraft, setMobileTitleDraft] = useState("");
+  const mobileActionTrigger = useRef<HTMLButtonElement>(null);
+  const mobileTitleInput = useRef<HTMLInputElement>(null);
   const [loadingConversationId, setLoadingConversationId] = useState<string | null>(null);
   const [conversationError, setConversationError] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
@@ -92,6 +131,41 @@ export function ConversationsPage({ client, chat, server, onOpenJobRun }: Conver
     runnable: true,
     ...(selectedConversation.owner === undefined ? {} : { owner: selectedConversation.owner }),
   });
+  const mobileTitle = selectedSummary === undefined
+    ? selectedWorkspace?.name ?? "ChatWCA"
+    : selectedConversation?.title.trim() || conversationTitle(selectedSummary);
+  const mobileStatus = selectedConversation?.status ?? selectedSummary?.status;
+  const mobileOwner = selectedConversation?.owner ?? selectedSummary?.owner;
+  const mobileMutationLocked = mobileOwner?.kind === "scheduled-job";
+  const mobileCloseEnabled = !mobileMutationLocked && selectedConversation !== undefined &&
+    canCloseConversation(selectedConversation.status);
+  const mobileDeleteEnabled = !mobileMutationLocked && mobileStatus !== undefined &&
+    canDeleteConversation(mobileStatus);
+  const mobileRenameEnabled = !mobileMutationLocked && selectedConversation !== undefined &&
+    connected && loadingConversationId !== selectedSummary?.id && pendingAction === null;
+  const mobileCreateEnabled = selectedWorkspace?.available === true && selectedWorkspace.usable;
+
+  useEffect(() => {
+    setMobileActionsOpen(false);
+    setMobileRenaming(false);
+    setMobileTitleDraft(mobileTitle);
+  }, [selectedSummary?.id]);
+
+  useEffect(() => {
+    if (mobileRenaming) mobileTitleInput.current?.select();
+  }, [mobileRenaming]);
+
+  useEffect(() => {
+    if (!mobileActionsOpen) return;
+    const closeOnEscape = (event: globalThis.KeyboardEvent): void => {
+      if (event.key !== "Escape") return;
+      setMobileActionsOpen(false);
+      setMobileRenaming(false);
+      window.requestAnimationFrame(() => mobileActionTrigger.current?.focus());
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [mobileActionsOpen]);
 
   async function runExclusive<T>(
     action: string,
@@ -411,6 +485,19 @@ export function ConversationsPage({ client, chat, server, onOpenJobRun }: Conver
     }
   }
 
+  async function submitMobileTitle(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    const title = mobileTitleDraft.trim();
+    if (!mobileRenameEnabled || title.length === 0 || title === mobileTitle) return;
+    try {
+      await renameConversation(title);
+      setMobileActionsOpen(false);
+      setMobileRenaming(false);
+    } catch {
+      mobileTitleInput.current?.focus();
+    }
+  }
+
   const visibleError = conversationError ?? server.error ?? chat.lastError?.message;
 
   return (
@@ -432,6 +519,10 @@ export function ConversationsPage({ client, chat, server, onOpenJobRun }: Conver
         publicManagedEgressConfig={server.config?.managedEgress}
         open={sidebarOpen}
         onDismiss={() => setSidebarOpen(false)}
+        onOpenJobs={() => {
+          setSidebarOpen(false);
+          onOpenJobs();
+        }}
         onSelectWorkspace={(workspaceId) => {
           void changeWorkspace(workspaceId).catch(() => undefined);
           setSidebarOpen(false);
@@ -458,12 +549,152 @@ export function ConversationsPage({ client, chat, server, onOpenJobRun }: Conver
             type="button"
             aria-label="Open workspaces and conversations"
             aria-expanded={sidebarOpen}
-            onClick={() => setSidebarOpen(true)}
+            onClick={() => {
+              setMobileActionsOpen(false);
+              setMobileRenaming(false);
+              setSidebarOpen(true);
+            }}
           >
             <span aria-hidden="true">☰</span>
           </button>
-          <strong>ChatWCA</strong>
-          <span className={`connection-dot${connected ? " is-connected" : ""}`} title={connected ? "Connected" : "Disconnected"} />
+          <div className="mobile-app-title">
+            <strong title={mobileTitle}>{mobileTitle}</strong>
+            {mobileStatus !== undefined && (
+              <small>
+                <span className={`mobile-conversation-status status-${mobileStatus}`}>
+                  <i aria-hidden="true" />{mobileStatusLabel(mobileStatus)}
+                </span>
+                <span aria-label={`Conversation security: ${mobileSecurityLabel(selectedConversation)}`}>
+                  {mobileSecurityLabel(selectedConversation)}
+                </span>
+              </small>
+            )}
+          </div>
+          <div className="mobile-app-bar-end">
+            <span className={`connection-dot${connected ? " is-connected" : ""}`} title={connected ? "Connected" : "Disconnected"} />
+            {selectedSummary !== undefined && (
+              <button
+                ref={mobileActionTrigger}
+                className="icon-button mobile-actions-trigger"
+                type="button"
+                aria-label="Open conversation actions"
+                aria-expanded={mobileActionsOpen}
+                onClick={() => {
+                  setMobileTitleDraft(mobileTitle);
+                  setMobileRenaming(false);
+                  setMobileActionsOpen((open) => !open);
+                }}
+              >
+                <span aria-hidden="true">⋮</span>
+              </button>
+            )}
+          </div>
+          {mobileActionsOpen && (
+            <>
+              <button
+                className="mobile-actions-backdrop"
+                type="button"
+                aria-label="Close conversation actions"
+                onClick={() => {
+                  setMobileActionsOpen(false);
+                  setMobileRenaming(false);
+                  mobileActionTrigger.current?.focus();
+                }}
+              />
+              <section className="mobile-conversation-menu" aria-label="Conversation actions">
+                {mobileRenaming ? (
+                  <form className="mobile-title-form" onSubmit={(event) => void submitMobileTitle(event)}>
+                    <label htmlFor="mobile-conversation-title">Conversation title</label>
+                    <input
+                      ref={mobileTitleInput}
+                      id="mobile-conversation-title"
+                      value={mobileTitleDraft}
+                      maxLength={MAX_CONVERSATION_TITLE_LENGTH}
+                      disabled={!mobileRenameEnabled}
+                      onChange={(event) => setMobileTitleDraft(event.target.value)}
+                    />
+                    <div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMobileRenaming(false);
+                          window.requestAnimationFrame(() => mobileActionTrigger.current?.focus());
+                        }}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={!mobileRenameEnabled || mobileTitleDraft.trim().length === 0 || mobileTitleDraft.trim() === mobileTitle}
+                      >
+                        {pendingAction === "conversation.rename" ? "Saving…" : "Save"}
+                      </button>
+                    </div>
+                  </form>
+                ) : (
+                  <>
+                    <dl className="mobile-conversation-facts">
+                      <div><dt>Workspace</dt><dd>{selectedWorkspace?.name ?? "—"}</dd></div>
+                      <div><dt>Model</dt><dd>{selectedConversation?.model?.name ?? selectedConversation?.model?.id ?? "—"}</dd></div>
+                      <div><dt>Context</dt><dd>{mobileContextLabel(selectedConversation)}</dd></div>
+                      <div><dt>Security</dt><dd>{mobileSecurityLabel(selectedConversation)}</dd></div>
+                    </dl>
+                    <div className="mobile-conversation-actions">
+                      {mobileOwner?.kind === "scheduled-job" && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMobileActionsOpen(false);
+                            onOpenJobRun(mobileOwner.jobId, mobileOwner.runId);
+                          }}
+                        >
+                          View scheduled run
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        disabled={!connected || pendingAction !== null || !mobileCreateEnabled}
+                        onClick={() => {
+                          setMobileActionsOpen(false);
+                          void createConversation();
+                        }}
+                      >
+                        {pendingAction === "conversation.create" ? "Creating…" : "New conversation"}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!mobileRenameEnabled}
+                        onClick={() => setMobileRenaming(true)}
+                      >
+                        Rename
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!connected || pendingAction !== null || !mobileCloseEnabled}
+                        onClick={() => {
+                          setMobileActionsOpen(false);
+                          void closeConversation();
+                        }}
+                      >
+                        {pendingAction === "conversation.close" ? "Closing…" : "Close"}
+                      </button>
+                      <button
+                        className="mobile-delete-action"
+                        type="button"
+                        disabled={!connected || pendingAction !== null || !mobileDeleteEnabled}
+                        onClick={() => {
+                          setMobileActionsOpen(false);
+                          void deleteConversation();
+                        }}
+                      >
+                        {pendingAction === "conversation.delete" ? "Deleting…" : "Delete"}
+                      </button>
+                    </div>
+                  </>
+                )}
+              </section>
+            </>
+          )}
         </div>
 
         {selectedWorkspace === undefined ? (

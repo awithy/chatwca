@@ -67,12 +67,13 @@ test("keyboard focus and primary chat controls remain operable", async ({ page }
   await deleteSelectedConversation(page);
 });
 
-test("responsive layout stays dark-only and exposes mobile navigation", async ({ page }) => {
+test("responsive layout prioritizes chat and moves navigation and actions into mobile menus", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await waitForConnected(page);
 
   await expect(page.getByRole("button", { name: "Open workspaces and conversations" })).toBeVisible();
   await expect(page.locator(".conversation-sidebar")).not.toBeInViewport();
+  await expect(page.getByRole("navigation", { name: "Application sections", exact: true })).toBeHidden();
   const palette = await page.evaluate(() => ({
     colorScheme: getComputedStyle(document.documentElement).colorScheme,
     background: getComputedStyle(document.body).backgroundColor,
@@ -86,9 +87,40 @@ test("responsive layout stays dark-only and exposes mobile navigation", async ({
 
   await page.getByRole("button", { name: "Open workspaces and conversations" }).click();
   await expect(page.locator(".conversation-sidebar")).toBeInViewport();
-  await expect(page.getByRole("button", { name: "Close workspaces and conversations" }).first()).toBeVisible();
-  await page.getByRole("button", { name: "Close workspaces and conversations" }).first().click();
+  const mobileSections = page.getByRole("navigation", { name: "Mobile application sections" });
+  await expect(mobileSections.getByRole("button", { name: "Conversations" })).toHaveAttribute("aria-current", "page");
+  await mobileSections.getByRole("button", { name: "Jobs" }).click();
+  await expect(page.getByRole("heading", { name: "Scheduled jobs" })).toBeVisible();
+  await page.getByRole("button", { name: "Open application navigation" }).click();
+  await page.getByRole("navigation", { name: "Mobile application sections" }).getByRole("button", { name: "Conversations" }).click();
+  await expect(page.getByRole("heading", { name: "Start in Browser workspace" })).toBeVisible();
   await expect(page.locator(".conversation-sidebar")).not.toBeInViewport();
+
+  await page.getByRole("button", { name: "New conversation", exact: true }).click();
+  await expect(page.locator(".conversation-header")).toBeHidden();
+  await expect(page.getByRole("button", { name: "Open conversation actions" })).toBeVisible();
+  const layout = await page.evaluate(() => ({
+    contentHeight: document.querySelector<HTMLElement>(".conversation-content")?.getBoundingClientRect().height ?? 0,
+    timelineHeight: document.querySelector<HTMLElement>(".message-timeline")?.getBoundingClientRect().height ?? 0,
+  }));
+  expect(layout.contentHeight).toBeGreaterThan(750);
+  expect(layout.timelineHeight).toBeGreaterThan(600);
+
+  await page.getByRole("button", { name: "Open conversation actions" }).click();
+  const actions = page.getByRole("region", { name: "Conversation actions" });
+  await expect(actions.getByRole("button", { name: "New conversation" })).toBeVisible();
+  await expect(actions.getByRole("button", { name: "Rename" })).toBeVisible();
+  await expect(actions.getByRole("button", { name: "Close", exact: true })).toBeEnabled();
+  await expect(actions.getByRole("button", { name: "Delete", exact: true })).toBeEnabled();
+  await actions.getByRole("button", { name: "Rename" }).click();
+  await page.getByLabel("Conversation title", { exact: true }).fill("Mobile conversation");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.locator(".mobile-app-title strong")).toHaveText("Mobile conversation");
+
+  await page.getByRole("button", { name: "Open conversation actions" }).click();
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("region", { name: "Conversation actions" }).getByRole("button", { name: "Delete", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Start in Browser workspace" })).toBeVisible();
 });
 
 test("long generated conversation titles do not push the chat workspace out of view", async ({ page }) => {

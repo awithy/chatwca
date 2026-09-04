@@ -50,12 +50,19 @@ export function App() {
       <AppNavigation section={section} connected={state.connection === "connected"} onSelect={setSection} />
       <div className="section-shell">
         {section === "conversations" ? (
-          <ConversationsPage client={client} chat={state} server={server} onOpenJobRun={(jobId, runId) => void openRun(jobId, runId)} />
+          <ConversationsPage
+            client={client}
+            chat={state}
+            server={server}
+            onOpenJobs={() => setSection("jobs")}
+            onOpenJobRun={(jobId, runId) => void openRun(jobId, runId)}
+          />
         ) : (
           <JobsPage
             client={client}
             state={state}
             config={server.config}
+            onOpenConversations={() => setSection("conversations")}
             onOpenConversation={async (workspaceId, conversationId) => {
               const opened = await client.openGeneratedConversation(workspaceId, conversationId);
               if (opened) setSection("conversations");

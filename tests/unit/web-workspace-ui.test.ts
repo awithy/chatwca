@@ -79,6 +79,7 @@ function sidebar(workspaces: readonly WorkspaceSummary[], selectedWorkspaceId: s
     publicManagedEgressConfig: managedConfig,
     open: false,
     onDismiss: () => undefined,
+    onOpenJobs: () => undefined,
     onSelectWorkspace: () => undefined,
     onCreateWorkspace: async () => undefined,
     onUpdateWorkspace: async () => undefined,

@@ -49,6 +49,7 @@ export interface WorkspaceSidebarProps {
   readonly publicManagedEgressConfig: PublicManagedEgressConfig | undefined;
   readonly open: boolean;
   readonly onDismiss: () => void;
+  readonly onOpenJobs: () => void;
   readonly onSelectWorkspace: (workspaceId: string) => void;
   readonly onCreateWorkspace: (
     values: WorkspaceFormValues & { readonly acknowledgeWritableMounts?: true },
@@ -195,6 +196,7 @@ export function WorkspaceSidebar({
   publicManagedEgressConfig,
   open,
   onDismiss,
+  onOpenJobs,
   onSelectWorkspace,
   onCreateWorkspace,
   onUpdateWorkspace,
@@ -398,6 +400,15 @@ export function WorkspaceSidebar({
           <span aria-hidden="true">×</span>
         </button>
       </div>
+
+      <nav className="mobile-section-navigation" aria-label="Mobile application sections">
+        <button type="button" aria-current="page" onClick={onDismiss}>
+          Conversations
+        </button>
+        <button type="button" onClick={onOpenJobs}>
+          Jobs
+        </button>
+      </nav>
 
       <section className="workspace-panel" aria-labelledby="workspace-list-heading">
         <div className="workspace-panel-header">

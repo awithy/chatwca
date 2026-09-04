@@ -510,6 +510,8 @@ Important mappings:
 | retry/compaction events | typed status notices |
 | managed-egress policy denial | `network.blocked` |
 
+Retry, compaction, and runtime notices remain separate from model-authored prose. The browser records their event-time position and renders them inline after the latest visible conversation message at that point, so later messages do not leave old notices anchored at the bottom. Current queued prompts remain at the end of the timeline.
+
 Every event includes:
 
 ```ts

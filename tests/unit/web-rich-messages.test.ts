@@ -236,32 +236,49 @@ describe("rich message rendering", () => {
     expect(html).toContain('data-entry-id="assistant-usage"');
   });
 
-  it("keeps retry, compaction, runtime, and queued-prompt notices outside assistant prose", () => {
+  it("keeps run notices inline at their event position and queued prompts at the end", () => {
     const html = render(createElement(MessageTimeline, {
-      messages: [{
-        entryId: "assistant-1",
-        role: "assistant",
-        blocks: [{ type: "text", text: "Model prose" }],
-        stopReason: "stop",
-      }],
+      messages: [
+        {
+          entryId: "assistant-1",
+          role: "assistant",
+          blocks: [{ type: "text", text: "Model prose" }],
+          stopReason: "stop",
+        },
+        {
+          entryId: "user-2",
+          role: "user",
+          blocks: [{ type: "text", text: "A later prompt" }],
+          forkEligible: true,
+        },
+      ],
       notices: [
         {
-          kind: "retry",
-          phase: "scheduled",
-          message: "A model retry has been scheduled.",
-          attempt: 2,
-          maxAttempts: 3,
-          delayMs: 1_500,
+          afterMessageCount: 1,
+          notice: {
+            kind: "retry",
+            phase: "scheduled",
+            message: "A model retry has been scheduled.",
+            attempt: 2,
+            maxAttempts: 3,
+            delayMs: 1_500,
+          },
         },
         {
-          kind: "compaction",
-          phase: "completed",
-          message: "Conversation compaction completed.",
+          afterMessageCount: 1,
+          notice: {
+            kind: "compaction",
+            phase: "completed",
+            message: "Conversation compaction completed.",
+          },
         },
         {
-          kind: "runtime",
-          level: "warning",
-          message: "Runtime needs attention.",
+          afterMessageCount: 1,
+          notice: {
+            kind: "runtime",
+            level: "warning",
+            message: "Runtime needs attention.",
+          },
         },
       ],
       queue: {
@@ -281,7 +298,9 @@ describe("rich message rendering", () => {
     expect(html).toContain("Use the focused test");
     expect(html).toContain("Follow-up prompt queued");
     expect(html).toContain("2 images");
-    expect(html.indexOf("run-activity")).toBeGreaterThan(html.indexOf("message-assistant"));
+    expect(html.indexOf("run-activity")).toBeGreaterThan(html.indexOf('data-entry-id="assistant-1"'));
+    expect(html.indexOf("run-activity")).toBeLessThan(html.indexOf('data-entry-id="user-2"'));
+    expect(html.lastIndexOf("run-activity")).toBeGreaterThan(html.indexOf('data-entry-id="user-2"'));
   });
 
   it("does not expose provisional run metadata while the last assistant is streaming", () => {

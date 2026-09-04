@@ -10,15 +10,18 @@ import type {
   StatusNotice,
   Usage,
 } from "../../../shared/protocol.js";
+import type { PositionedStatusNotice } from "../api/state.js";
 import { MarkdownContent } from "./MarkdownContent.js";
 import { RunActivity } from "./RunActivity.js";
 import { ThinkingBlock } from "./ThinkingBlock.js";
 import { ToolCallCard } from "./ToolCallCard.js";
 
+const EMPTY_QUEUE: QueueState = { steering: [], followUp: [] };
+
 export interface MessageTimelineProps {
   readonly conversationId?: string;
   readonly messages: readonly NormalizedMessage[];
-  readonly notices: readonly StatusNotice[];
+  readonly notices: readonly PositionedStatusNotice[];
   readonly queue: QueueState;
   readonly streaming: boolean;
   readonly cwd: string;
@@ -237,9 +240,21 @@ export function MessageTimeline({
     }
   }
 
-  const visibleMessages = messages.filter((message) =>
-    hasVisibleContent(message, toolCallIds));
-  const lastMessage = visibleMessages.at(-1);
+  const visibleMessages = messages.flatMap((message, sourceIndex) =>
+    hasVisibleContent(message, toolCallIds) ? [{ message, sourceIndex }] : []);
+  const lastMessage = visibleMessages.at(-1)?.message;
+  const noticesByAnchor = new Map<number, StatusNotice[]>();
+
+  for (const positioned of notices) {
+    let anchor = -1;
+    for (const visible of visibleMessages) {
+      if (visible.sourceIndex >= positioned.afterMessageCount) break;
+      anchor = visible.sourceIndex;
+    }
+    const group = noticesByAnchor.get(anchor) ?? [];
+    group.push(positioned.notice);
+    noticesByAnchor.set(anchor, group);
+  }
 
   useEffect(() => {
     const timeline = timelineRef.current;
@@ -271,14 +286,15 @@ export function MessageTimeline({
             <p>This session is open in <span>{cwd}</span>.</p>
           </div>
         )}
-        {visibleMessages.map((message) => {
+        <RunActivity notices={noticesByAnchor.get(-1) ?? []} queue={EMPTY_QUEUE} />
+        {visibleMessages.map(({ message, sourceIndex }) => {
           const activeAssistant = streaming && message === lastMessage && message.role === "assistant";
           const timestamp = message.timestamp;
           const time = formatTime(timestamp);
           return (
-            <article
+            <React.Fragment key={message.entryId}>
+              <article
               className={`chat-message message-${message.role}${activeAssistant ? " is-streaming" : ""}`}
-              key={message.entryId}
               data-entry-id={message.entryId}
             >
               <header className="message-heading">
@@ -345,10 +361,15 @@ export function MessageTimeline({
               {message.role === "assistant" && !activeAssistant && (
                 <RunMetadata message={message} />
               )}
-            </article>
+              </article>
+              <RunActivity
+                notices={noticesByAnchor.get(sourceIndex) ?? []}
+                queue={EMPTY_QUEUE}
+              />
+            </React.Fragment>
           );
         })}
-        <RunActivity notices={notices} queue={queue} />
+        <RunActivity notices={[]} queue={queue} />
       </div>
     </div>
   );

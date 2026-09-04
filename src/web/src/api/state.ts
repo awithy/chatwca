@@ -34,9 +34,16 @@ export interface WorkspaceClientErrorState extends ClientErrorState {
 
 export const MAX_NETWORK_BLOCKED_NOTICES = 50;
 
+export interface PositionedStatusNotice {
+  readonly notice: StatusNotice;
+  /** Number of conversation messages present when the notice was received. */
+  readonly afterMessageCount: number;
+}
+
 export interface ConversationProjection {
   readonly conversation: ConversationState;
-  readonly notices: readonly StatusNotice[];
+  /** Ephemeral run notices positioned at their event-time place in the timeline. */
+  readonly notices: readonly PositionedStatusNotice[];
   /** Revisioned, browser-safe denials retained across authoritative reconnect snapshots. */
   readonly networkBlocked: readonly NetworkBlockedEvent[];
 }
@@ -656,7 +663,10 @@ export function reduceChatClientState(
       if (decision === "resync") return requestResync(state, action.event.conversationId);
 
       const notices = action.event.type === "conversation.notice"
-        ? [...current.notices, action.event.payload.notice].slice(-100)
+        ? [...current.notices, {
+            notice: action.event.payload.notice,
+            afterMessageCount: current.conversation.messages.length,
+          }].slice(-100)
         : current.notices;
       const networkBlocked = action.event.type === "network.blocked"
         ? collectNetworkBlocked(current.networkBlocked, action.event)

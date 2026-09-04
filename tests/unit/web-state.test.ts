@@ -288,9 +288,10 @@ describe("web chat state", () => {
     });
     expect(projection?.conversation.queue.followUp).toHaveLength(1);
     expect(projection?.conversation.status).toBe("streaming");
-    expect(projection?.notices).toEqual([
-      { kind: "runtime", level: "info", message: "Settled" },
-    ]);
+    expect(projection?.notices).toEqual([{
+      afterMessageCount: 1,
+      notice: { kind: "runtime", level: "info", message: "Settled" },
+    }]);
   });
 
   it("collects bounded revisioned network denials, coalesces counts, and preserves them across snapshots", () => {

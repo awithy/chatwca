@@ -113,6 +113,7 @@ export type ChatClientAction =
   | { readonly type: "snapshot"; readonly conversation: ConversationState }
   | { readonly type: "event"; readonly event: ConversationEvent }
   | { readonly type: "select"; readonly conversationId: string | null }
+  | { readonly type: "network-blocked.dismiss"; readonly conversationId: string }
   | { readonly type: "conversation.closed"; readonly conversationId: string }
   | { readonly type: "conversation.deleted"; readonly conversationId: string }
   | { readonly type: "draft"; readonly conversationId: string; readonly text: string }
@@ -679,6 +680,11 @@ export function reduceChatClientState(
     }
     case "select":
       return { ...state, selectedConversationId: action.conversationId };
+    case "network-blocked.dismiss": {
+      const current = state.conversations[action.conversationId];
+      if (current === undefined || current.networkBlocked.length === 0) return state;
+      return replaceConversation(state, { ...current, networkBlocked: [] });
+    }
     case "conversation.closed": {
       if (state.conversations[action.conversationId] === undefined) return state;
       const { [action.conversationId]: _closed, ...conversations } = state.conversations;

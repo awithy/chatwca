@@ -785,7 +785,10 @@ export function ConversationsPage({ client, chat, server, onOpenJobs, onOpenJobR
               ) : (
                 <div className={`conversation-workspace${(selectedProjection?.networkBlocked.length ?? 0) > 0 ? " has-network-notices" : ""}`}>
                   {(selectedProjection?.networkBlocked.length ?? 0) > 0 && (
-                    <NetworkBlockedNotices notices={selectedProjection?.networkBlocked ?? []} />
+                    <NetworkBlockedNotices
+                      notices={selectedProjection?.networkBlocked ?? []}
+                      onDismiss={() => client.dismissNetworkBlocked(selectedConversation.id)}
+                    />
                   )}
                   <MessageTimeline
                     conversationId={selectedConversation.id}

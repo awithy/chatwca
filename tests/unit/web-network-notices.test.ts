@@ -7,6 +7,7 @@ import { NetworkBlockedNotices } from "../../src/web/src/components/NetworkBlock
 describe("blocked network notices", () => {
   it("shows only browser-safe destination fields and no approval action", () => {
     const html = renderToStaticMarkup(createElement(NetworkBlockedNotices, {
+      onDismiss: () => undefined,
       notices: [{
         type: "network.blocked" as const,
         workspaceId: "workspace-1",
@@ -28,7 +29,7 @@ describe("blocked network notices", () => {
     expect(html).toContain("https-connect");
     expect(html).toContain("explicit_deny");
     expect(html).toContain("3 occurrences");
-    expect(html).not.toContain("button");
+    expect(html).toContain('<button type="button" aria-label="Dismiss blocked network notices">Dismiss</button>');
     expect(html).not.toContain("Approve");
   });
 });

@@ -56,7 +56,7 @@ test("rewind replaces the source with a fork and prefills the selected prompt", 
   await deleteSelectedConversation(page);
 });
 
-test("managed badges and blocked notices survive reconnect and refresh after fork and rewind", async ({ page }) => {
+test("managed badges and dismissible blocked notices survive reconnect and refresh", async ({ page }) => {
   const workspaceName = "Managed lifecycle workspace";
   const prompt = "Blocked network reconnect while streaming";
   await waitForConnected(page);
@@ -78,8 +78,9 @@ test("managed badges and blocked notices survive reconnect and refresh after for
   await expect(blocked).toContainText("https-connect");
   await expect(blocked).toContainText("not_allowed");
   await expect(blocked).toContainText("3 occurrences");
-  await expect(blocked.getByRole("button")).toHaveCount(0);
   await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await blocked.getByRole("button", { name: "Dismiss blocked network notices" }).click();
+  await expect(blocked).toHaveCount(0);
 
   const sourceRow = page.locator("button.conversation-row").filter({
     hasText: prompt,

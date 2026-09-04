@@ -322,6 +322,10 @@ export class ChatSocketClient {
     this.#dispatch({ type: "draft.delete", conversationId });
   }
 
+  dismissNetworkBlocked(conversationId: string): void {
+    this.#dispatch({ type: "network-blocked.dismiss", conversationId });
+  }
+
   /**
    * Create a server-side fork, then make its returned editor text a local,
    * conversation-specific draft. Selection and draft changes happen only after

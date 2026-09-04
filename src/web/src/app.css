@@ -1519,8 +1519,31 @@ pre {
   background: var(--warning-bg);
 }
 
-.network-blocked-notices > strong {
+.network-blocked-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.network-blocked-heading strong {
   font-size: 0.72rem;
+}
+
+.network-blocked-heading button {
+  flex: 0 0 auto;
+  min-height: 1.75rem;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid var(--warning);
+  border-radius: 0.35rem;
+  color: var(--warning-text);
+  font-size: 0.68rem;
+  font-weight: 700;
+  background: transparent;
+}
+
+.network-blocked-heading button:hover {
+  background: var(--panel-hover);
 }
 
 .network-blocked-notices ul {

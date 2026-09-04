@@ -368,6 +368,31 @@ describe("web chat state", () => {
     }
     expect(state.conversations["conversation-1"]?.networkBlocked).toHaveLength(50);
     expect(state.conversations["conversation-1"]?.networkBlocked[0]?.revision).toBe(9);
+
+    state = reduceChatClientState(state, {
+      type: "network-blocked.dismiss",
+      conversationId: "conversation-1",
+    });
+    expect(state.conversations["conversation-1"]?.networkBlocked).toEqual([]);
+
+    state = reduceChatClientState(state, {
+      type: "event",
+      event: {
+        type: "network.blocked",
+        workspaceId: "workspace-1",
+        conversationId: "conversation-1",
+        revision: 59,
+        payload: {
+          host: "newly-blocked.example.com",
+          port: 443,
+          protocol: "https-connect",
+          reason: "dns_failure",
+        },
+      },
+    });
+    expect(state.conversations["conversation-1"]?.networkBlocked).toEqual([
+      expect.objectContaining({ revision: 59 }),
+    ]);
   });
 
   it("updates context usage on completed messages and clears the estimate after compaction", () => {

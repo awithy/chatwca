@@ -123,6 +123,46 @@ test("responsive layout prioritizes chat and moves navigation and actions into m
   await expect(page.getByRole("heading", { name: "Start in Browser workspace" })).toBeVisible();
 });
 
+test("compact desktop drawer stays beside the application rail", async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 720 });
+  await waitForConnected(page);
+
+  const applicationNavigation = page.getByRole("navigation", { name: "Application sections", exact: true });
+  await expect(applicationNavigation).toBeVisible();
+  await page.getByRole("button", { name: "Open workspaces and conversations" }).click();
+  const sidebar = page.locator(".conversation-sidebar");
+  await expect(sidebar).toHaveClass(/is-open/);
+  const navigationRight = await applicationNavigation.evaluate(
+    (element) => element.getBoundingClientRect().right,
+  );
+  await expect.poll(
+    () => sidebar.evaluate((element) => element.getBoundingClientRect().left),
+  ).toBeGreaterThanOrEqual(navigationRight);
+
+  const layout = await page.evaluate(() => {
+    const navigation = document.querySelector<HTMLElement>(".app-navigation");
+    const drawer = document.querySelector<HTMLElement>(".conversation-sidebar");
+    if (navigation === null || drawer === null) throw new Error("Expected compact desktop navigation");
+    const navigationRect = navigation.getBoundingClientRect();
+    const drawerRect = drawer.getBoundingClientRect();
+    return {
+      navigationRight: navigationRect.right,
+      drawerLeft: drawerRect.left,
+      drawerRight: drawerRect.right,
+      viewportWidth: window.innerWidth,
+    };
+  });
+  expect(layout.drawerLeft).toBeGreaterThanOrEqual(layout.navigationRight);
+  expect(layout.drawerRight).toBeLessThanOrEqual(layout.viewportWidth);
+
+  await page.getByRole("button", { name: /Browser workspace/ }).first().click();
+  await expect(page.getByRole("heading", { name: "Start in Browser workspace" })).toBeVisible();
+  await page.getByRole("button", { name: "Open workspaces and conversations" }).click();
+  await page.getByRole("button", { name: "New conversation in Browser workspace" }).click();
+  await expect(page.getByRole("textbox", { name: "Message" })).toBeEnabled();
+  await deleteSelectedConversation(page);
+});
+
 test("long generated conversation titles do not push the chat workspace out of view", async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 720 });
   await waitForConnected(page);

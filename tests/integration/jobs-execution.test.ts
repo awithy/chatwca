@@ -1,4 +1,5 @@
-import { existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -7,11 +8,13 @@ import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import {
   fauxAssistantMessage,
   fauxProvider,
+  fauxToolCall,
   type FauxProviderHandle,
 } from "@earendil-works/pi-ai/providers/faux";
 import { ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { loadConfig } from "../../src/server/config.js";
 import { ConversationRegistry } from "../../src/server/conversation-registry.js";
 import { openDatabase, type ChatWcaDatabase } from "../../src/server/database.js";
 import { JobHookPathAdmission } from "../../src/server/job-hook-path.js";
@@ -22,6 +25,8 @@ import { JobScheduler } from "../../src/server/job-scheduler.js";
 import { JobService } from "../../src/server/job-service.js";
 import { PiRuntimeFactory } from "../../src/server/pi-runtime.js";
 import { RuntimeCoordinator } from "../../src/server/runtime-coordinator.js";
+import { validateBwrapAndToolchain } from "../../src/server/sandbox/bwrap.js";
+import { loadSandboxWorkerArtifact } from "../../src/server/sandbox/probe.js";
 import { SessionHistory } from "../../src/server/session-history.js";
 import { WorkspaceRepository } from "../../src/server/workspace-repository.js";
 import { ERROR_CODES } from "../../src/shared/errors.js";
@@ -57,7 +62,35 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-async function createFixture(options: { readonly maxLive?: number; readonly hookTimeoutMs?: number } = {}): Promise<JobsFixture> {
+function processHasMarker(marker: string): boolean {
+  for (const entry of readdirSync("/proc")) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      if (readFileSync(`/proc/${entry}/cmdline`, "utf8").includes(marker)) return true;
+    } catch { /* process exited while inspecting it */ }
+  }
+  return false;
+}
+
+async function within<T>(promise: Promise<T>, timeoutMs = 10_000): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("operation did not settle")), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+async function createFixture(options: {
+  readonly maxLive?: number;
+  readonly hookTimeoutMs?: number;
+  readonly sandbox?: boolean;
+} = {}): Promise<JobsFixture> {
   const root = await mkdtemp(path.join(tmpdir(), "chatwca-jobs-integration-"));
   const dataDir = path.join(root, "data");
   const agentDir = path.join(root, "pi-agent");
@@ -70,17 +103,32 @@ async function createFixture(options: { readonly maxLive?: number; readonly hook
     mkdir(hookRoot),
   ]);
 
+  const sandboxConfig = options.sandbox === true
+    ? loadConfig({
+        CHATWCA_SANDBOX_MODE: "optional",
+        CHATWCA_WORKSPACE_ROOTS: JSON.stringify([root]),
+        CHATWCA_DATA_DIR: dataDir,
+        PI_CODING_AGENT_DIR: agentDir,
+      }).sandbox
+    : undefined;
+  const sandboxHost = sandboxConfig === undefined
+    ? undefined
+    : validateBwrapAndToolchain(sandboxConfig);
+  const sandboxWorker = sandboxConfig === undefined
+    ? undefined
+    : await loadSandboxWorkerArtifact();
+
   let now = 1_000;
   const database = openDatabase(dataDir);
   const workspaces = new WorkspaceRepository(database.connection, {
     cwd: root,
     clock: () => now,
     policy: {
-      mode: "disabled",
-      workspaceRoots: [],
+      mode: sandboxConfig?.mode ?? "disabled",
+      workspaceRoots: sandboxConfig?.workspaceRoots ?? [],
       dataDirectory: dataDir,
       piAgentDirectory: agentDir,
-      readOnlyMounts: [],
+      readOnlyMounts: sandboxConfig?.readOnlyMounts.map((mount) => mount.source) ?? [],
       jobScriptRoots: [hookRoot],
       managedEgressMode: "disabled",
     },
@@ -110,7 +158,20 @@ async function createFixture(options: { readonly maxLive?: number; readonly hook
       runtimeCwds.push(cwd);
       return { settingsManager: SettingsManager.inMemory({ retry: { enabled: false } }) };
     },
-    sessionOptions: () => ({ model: faux.getModel(), noTools: "all" }),
+    sessionOptions: () => ({
+      model: faux.getModel(),
+      ...(options.sandbox === true ? {} : { noTools: "all" as const }),
+    }),
+    ...(sandboxConfig === undefined || sandboxHost === undefined || sandboxWorker === undefined
+      ? {}
+      : {
+          sandbox: {
+            config: sandboxConfig,
+            host: sandboxHost,
+            worker: sandboxWorker,
+            hiddenPaths: [dataDir, agentDir, defaultSessions, hookRoot],
+          },
+        }),
   });
 
   let registry!: ConversationRegistry;
@@ -194,7 +255,7 @@ async function createFixture(options: { readonly maxLive?: number; readonly hook
       name,
       path: directory,
       sessionStorage: localSessions ? "workspace" : "pi-default",
-      securityProfile: "unrestricted",
+      securityProfile: options.sandbox === true ? "workspace-sandboxed" : "unrestricted",
       networkPolicy: "isolated",
     }),
     createJob: (workspaceId, changes = {}) => jobs.create({
@@ -431,6 +492,51 @@ describe("scheduled job execution through real service boundaries", () => {
     });
     expect(f.registry.size).toBe(0);
   }, 10_000);
+
+  it.runIf(process.platform === "linux" && process.env.CHATWCA_SANDBOX_CAPABLE === "1")(
+    "aborts a job during active sandbox Bash, releases exclusion, and disposes ownership",
+    async () => {
+      const f = await createFixture({ sandbox: true });
+      const workspacePath = await createDirectory(f.root, "workspace-sandbox-job");
+      const workspace = f.createWorkspace("Sandbox job", workspacePath, true);
+      const job = f.createJob(workspace.id, { name: "Abort active Bash" });
+      const marker = `chatwca-job-abort-${randomUUID()}`;
+      f.faux.setResponses([
+        fauxAssistantMessage(fauxToolCall("bash", {
+          command: `exec -a ${marker} sleep 300`,
+          timeout: 300,
+        }), { stopReason: "toolUse" }),
+      ]);
+
+      const pending = f.run(job.id);
+      let active!: JobRunState;
+      await vi.waitFor(() => {
+        const summary = f.jobs.get(job.id).activeRun;
+        expect(summary?.conversationId).not.toBeNull();
+        active = f.jobs.getRun(job.id, summary!.id);
+        expect(f.registry.get(active.conversationId!)?.status).toBe("streaming");
+      }, { timeout: 10_000 });
+      await vi.waitFor(() => expect(processHasMarker(marker)).toBe(true), { timeout: 10_000 });
+
+      await within(f.runner.abort(job.id, active.id));
+      const aborted = await within(pending);
+      expect(aborted).toMatchObject({
+        status: "aborted",
+        phase: "prompt",
+        errorCode: ERROR_CODES.JOB_ABORTED,
+        conversationId: active.conversationId,
+      });
+      expect(f.runner.isActive(job.id)).toBe(false);
+      expect(f.registry.size).toBe(0);
+      await vi.waitFor(() => expect(processHasMarker(marker)).toBe(false));
+
+      f.faux.appendResponses([fauxAssistantMessage("next run admitted")]);
+      await expect(f.run(job.id)).resolves.toMatchObject({ status: "succeeded" });
+      expect(f.registry.size).toBe(0);
+      expect(f.jobs.listRuns(job.id).runs).toHaveLength(2);
+    },
+    30_000,
+  );
 
   it("marks an old active run interrupted and creates only one catch-up after many misses", async () => {
     const f = await createFixture();

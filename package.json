@@ -25,7 +25,7 @@
     "pretest:integration": "npm run build:sandbox-worker",
     "test:integration": "vitest run tests/integration --passWithNoTests",
     "pretest:sandbox-real": "npm run build:network-helper && npm run build:sandbox-worker",
-    "test:sandbox-real": "CHATWCA_SANDBOX_CAPABLE=1 vitest run tests/integration/sandbox-probe.test.ts tests/integration/sandbox-worker-client.test.ts tests/integration/sandbox-pi-runtime.test.ts tests/integration/sandbox-attack-concurrency.test.ts --passWithNoTests",
+    "test:sandbox-real": "CHATWCA_SANDBOX_CAPABLE=1 vitest run tests/integration/sandbox-probe.test.ts tests/integration/sandbox-worker-client.test.ts tests/integration/sandbox-pi-runtime.test.ts tests/integration/sandbox-attack-concurrency.test.ts tests/integration/jobs-execution.test.ts --passWithNoTests",
     "test:native": "cargo test --locked --manifest-path native/network-helper/Cargo.toml",
     "test:native:architectures": "cargo test --locked --manifest-path native/network-helper/Cargo.toml seccomp::tests::x86_64_and_aarch64_have_equivalent_policy_results",
     "test:release-gates": "npm run typecheck && npm run build && npm run test:unit && npm run test:integration && npm run test:browser && npm run test:sdk-smoke && npm run test:native && npm run test:native:architectures && npm run test:sandbox-real",

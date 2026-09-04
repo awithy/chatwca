@@ -395,7 +395,7 @@ Switching workspaces or conversations is a frontend selection change, not a runt
 
 ### 9.4 Closing and eviction
 
-Closing disposes the event subscription and runtime but does not delete the Pi session file. A streaming conversation must be aborted or allowed to finish before it can be closed. Runtime disposal also terminates the Bubblewrap worker and descendants, native bridges, managed proxy connections, and private proxy sockets owned by that conversation. Abort destroys the worker namespace; after Pi becomes idle, a sandboxed runtime must establish a fresh worker before accepting another prompt. No failure path falls back to unrestricted tools or networking.
+Closing disposes the event subscription and runtime but does not delete the Pi session file. A streaming conversation must be aborted or allowed to finish before it can be closed. Runtime disposal also terminates the Bubblewrap worker and descendants, native bridges, managed proxy connections, and private proxy sockets owned by that conversation. Abort destroys the worker namespace. After invalidation, the active tool rejects before the replacement transition waits for Pi to become idle, avoiding a circular wait between Pi settlement and tool settlement. The abort operation and idle-state publication still await a fresh worker handshake before another prompt can be accepted. No failure path falls back to unrestricted tools or networking.
 
 ### 9.5 Shutdown
 
@@ -808,7 +808,7 @@ Use temporary SQLite databases, temporary Pi sessions, and a fake model/provider
 - event re-subscription after runtime replacement;
 - abort behavior;
 - reconnect/full-state reconciliation;
-- sandbox filesystem and environment isolation, app-owned tools, worker cleanup, abort replacement, and fail-closed behavior;
+- sandbox filesystem and environment isolation, app-owned tools, worker cleanup, active-Bash abort/timeout replacement without circular settlement waits, and fail-closed behavior;
 - managed-egress direct-network denial, designated proxy reachability, destination enforcement, pinned connections, and lifecycle cleanup; and
 - concurrent unrestricted, isolated, and differently scoped managed-egress conversations without shared workers, routes, or policy.
 
@@ -873,7 +873,7 @@ The current implemented design is complete when:
 - isolated workers have no usable network path and managed workers retain the isolated namespace with only conversation-owned HTTP/SOCKS5 proxy bridges;
 - managed destinations pass the immutable selected named set plus mandatory deny, port, DNS, public-address, protocol, and resource controls before connection;
 - browser commands cannot submit destinations or policy documents, and a missing set policy-blocks the workspace without silent substitution;
-- abort, close, eviction, crash, rewind replacement, and shutdown clean up workers, descendants, bridges, proxies, connections, and socket files;
+- active-tool timeout and abort settle without a Pi/tool circular wait, while abort, close, eviction, crash, rewind replacement, and shutdown clean up workers, descendants, bridges, proxies, connections, and socket files;
 - unrestricted, isolated, and differently scoped managed conversations can coexist without sharing workers, extension-mutated model runtimes, network policy, or routes;
 - when configured, `web_search` is active in both runtime profiles, keeps its credential parent-only, bounds output and deadlines, and clearly discloses that queries bypass workspace network isolation on their fixed path to Brave;
 - the workspace modal is keyboard-accessible and responsive, and live headers show immutable effective security/network state and required disclosure warnings;

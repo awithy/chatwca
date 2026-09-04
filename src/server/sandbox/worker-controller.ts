@@ -23,6 +23,14 @@ import {
 } from "./worker-client.js";
 
 export type SandboxControllerState = "healthy" | "restarting" | "error" | "closed";
+
+interface SandboxRestartTransition {
+  /** Resolves after the old namespace is gone, Pi is idle, and replacement handshake completes. */
+  readonly completion: Promise<void>;
+  /** Resolves as soon as invalidation of the old worker namespace completes. */
+  readonly workerInvalidated: Promise<void>;
+}
+
 export interface SandboxControllerWorkerPort {
   readFile(arguments_: Readonly<ReadFileArguments>, options?: SandboxCallOptions): Promise<ReadFileResult>;
   writeFile(path: string, data: Buffer | string, options?: SandboxCallOptions & { readonly createParents?: boolean }): Promise<WriteFileResult>;
@@ -60,7 +68,7 @@ export class SandboxController {
   readonly #options: SandboxControllerOptions;
   #worker: SandboxControllerWorkerPort;
   #state: SandboxControllerState = "healthy";
-  #transition: Promise<void> | undefined;
+  #transition: SandboxRestartTransition | undefined;
   #closePromise: Promise<void> | undefined;
   #pendingTerminalFailure: Readonly<SandboxWorkerFatal> | undefined;
   #fatalFailure: Readonly<SandboxWorkerFatal> | undefined;
@@ -144,15 +152,38 @@ export class SandboxController {
       if (options.signal.aborted) invalidate("abort");
     }
     const operation = worker.exec({ ...arguments_, timeoutMs }, options);
-    // The namespace teardown rejects this promise; observe it even when the planned branch wins.
-    void operation.catch(() => undefined);
     try {
       const outcome = await Promise.race([
-        operation.then((result) => ({ kind: "result" as const, result })),
+        operation.then(
+          (result) => ({ kind: "result" as const, result }),
+          (error: unknown) => ({ kind: "operation-error" as const, error }),
+        ),
         planned.then((reason) => ({ kind: "planned" as const, reason })),
       ]);
       if (outcome.kind === "result") return outcome.result;
-      await this.#plannedRestart();
+      if (outcome.kind === "operation-error") {
+        // invalidate() rejects worker operations before namespace teardown and
+        // Pi signal propagation complete. If an external planned restart owns
+        // this rejection, wait for its invalidation milestone so signal
+        // propagation is observed instead of racing the generic worker error.
+        const restart = this.#state === "restarting" ? this.#transition : undefined;
+        if (restart !== undefined) {
+          void restart.completion.catch(() => undefined);
+          await restart.workerInvalidated;
+          if (options.signal?.aborted === true) throw options.signal.reason ?? outcome.error;
+        }
+        throw outcome.error;
+      }
+
+      const restart = this.#plannedRestart();
+      // The active Pi tool must reject before the restart waits for Pi to become
+      // idle. Await only namespace invalidation here; awaiting completion would
+      // make the tool and Pi's abort settlement wait on each other. The caller
+      // of abort() owns full transition settlement. A timeout has no outer
+      // owner, so keep its detached completion observed while normal agent_end
+      // publication remains gated on waitUntilReady().
+      void restart.completion.catch(() => undefined);
+      await restart.workerInvalidated;
       if (outcome.reason === "abort") throw options.signal?.reason ?? new SandboxWorkerOperationError("cancelled");
       throw new SandboxWorkerOperationError("timeout");
     } finally {
@@ -161,7 +192,7 @@ export class SandboxController {
   }
 
   /** Conversation abort: namespace first, Pi abort/settle second, replacement last. */
-  abort(): Promise<void> { return this.#plannedRestart(); }
+  abort(): Promise<void> { return this.#plannedRestart().completion; }
 
   close(): Promise<void> {
     this.#closePromise ??= this.#closeOnce();
@@ -187,26 +218,51 @@ export class SandboxController {
         });
       }
     }
-    if (transition !== undefined) await transition.catch(() => undefined);
+    if (transition !== undefined) await transition.completion.catch(() => undefined);
     this.#fatalListeners.clear();
   }
 
   async #current(): Promise<SandboxControllerWorkerPort> {
-    if (this.#state === "restarting" && this.#transition !== undefined) await this.#transition;
+    if (this.#state === "restarting" && this.#transition !== undefined) {
+      await this.#transition.completion;
+    }
     if (this.#state !== "healthy") throw new AppError(ERROR_CODES.SANDBOX_WORKER_FAILED);
     return this.#worker;
   }
 
-  #plannedRestart(): Promise<void> {
-    if (this.#state === "closed") return Promise.reject(new AppError(ERROR_CODES.SANDBOX_WORKER_FAILED));
+  #plannedRestart(): SandboxRestartTransition {
     if (this.#state === "restarting" && this.#transition !== undefined) return this.#transition;
-    if (this.#state === "error") return Promise.reject(new AppError(ERROR_CODES.SANDBOX_WORKER_FAILED));
+    if (this.#state === "closed" || this.#state === "error") {
+      const failed = Promise.reject(new AppError(ERROR_CODES.SANDBOX_WORKER_FAILED));
+      // Both transition properties intentionally share one already-observed promise.
+      void failed.catch(() => undefined);
+      return { completion: failed, workerInvalidated: failed };
+    }
+
     this.#state = "restarting";
     const previous = this.#worker;
+    let resolveWorkerInvalidated!: () => void;
+    let rejectWorkerInvalidated!: (cause: unknown) => void;
+    const workerInvalidated = new Promise<void>((resolve, reject) => {
+      resolveWorkerInvalidated = resolve;
+      rejectWorkerInvalidated = reject;
+    });
+    // An external abort owns completion but has no reason to await this
+    // intermediate milestone directly. Keep it observed on every path.
+    void workerInvalidated.catch(() => undefined);
+
     const transition = (async () => {
       try {
-        // Never trust process-group cleanup on timeout/abort.
-        await previous.invalidate();
+        // Never trust process-group cleanup on timeout/abort. Resolve the
+        // milestone before asking Pi to abort so the active tool can reject and
+        // release Pi's own abort()/waitForIdle() settlement path.
+        try {
+          await previous.invalidate();
+          resolveWorkerInvalidated();
+        } catch (cause) {
+          rejectWorkerInvalidated(cause);
+          throw cause;
+        }
         await this.#options.abortActiveRun();
         await this.#options.waitForPiIdle();
         if (this.#state === "closed") return;
@@ -242,9 +298,14 @@ export class SandboxController {
         throw failure.error;
       }
     })();
-    const tracked = transition.finally(() => { if (this.#transition === tracked) this.#transition = undefined; });
-    this.#transition = tracked;
-    return tracked;
+
+    let restart!: SandboxRestartTransition;
+    const completion = transition.finally(() => {
+      if (this.#transition === restart) this.#transition = undefined;
+    });
+    restart = { workerInvalidated, completion };
+    this.#transition = restart;
+    return restart;
   }
 
   #workerFatal(failure: Readonly<SandboxWorkerFatal>): void {

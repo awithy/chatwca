@@ -94,8 +94,77 @@ describe("SandboxController fail-closed lifecycle", () => {
       createWorker, commandTimeoutMs: 15, abortActiveRun: vi.fn(), waitForPiIdle: vi.fn(), onFatal: vi.fn(),
     });
     await expect(controller.exec({ command: "sleep forever", timeoutMs: 60_000 })).rejects.toEqual(new SandboxWorkerOperationError("timeout"));
+    await controller.waitUntilReady();
     expect(first.invalidate).toHaveBeenCalledTimes(1); expect(exec).toHaveBeenCalledTimes(1);
     expect(createWorker).toHaveBeenCalledTimes(2); expect(controller.state).toBe("healthy");
+    await controller.close();
+  });
+
+  it("lets a timed-out tool settle before Pi abort settlement and completes replacement", async () => {
+    const signal = new AbortController();
+    const toolSettled = deferred();
+    const first = worker({ exec: vi.fn(() => new Promise<never>(() => undefined)) });
+    const second = worker();
+    const createWorker = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    const abortActiveRun = vi.fn(async () => {
+      signal.abort(new Error("Pi abort"));
+      await toolSettled.promise;
+    });
+    const controller = await SandboxController.start({
+      createWorker,
+      commandTimeoutMs: 15,
+      abortActiveRun,
+      waitForPiIdle: vi.fn(),
+      onFatal: vi.fn(),
+    });
+
+    const operation = controller.exec(
+      { command: "sleep forever", timeoutMs: 60_000 },
+      { signal: signal.signal },
+    ).finally(toolSettled.resolve);
+    await expect(operation).rejects.toEqual(new SandboxWorkerOperationError("timeout"));
+    await controller.waitUntilReady();
+
+    expect(abortActiveRun).toHaveBeenCalledOnce();
+    expect(first.invalidate).toHaveBeenCalledOnce();
+    expect(createWorker).toHaveBeenCalledTimes(2);
+    expect(controller.state).toBe("healthy");
+    await controller.close();
+  });
+
+  it("rejects an active tool without waiting on the externally initiated abort transition", async () => {
+    const signal = new AbortController();
+    const piAbortSettled = deferred();
+    const abortReason = new Error("operator abort");
+    const first = worker({ exec: vi.fn(() => new Promise<never>(() => undefined)) });
+    const second = worker();
+    const createWorker = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    const controller = await SandboxController.start({
+      createWorker,
+      commandTimeoutMs: 60_000,
+      abortActiveRun: async () => {
+        signal.abort(abortReason);
+        await piAbortSettled.promise;
+      },
+      waitForPiIdle: vi.fn(),
+      onFatal: vi.fn(),
+    });
+
+    const operation = controller.exec(
+      { command: "sleep forever", timeoutMs: 60_000 },
+      { signal: signal.signal },
+    );
+    await vi.waitFor(() => expect(first.exec).toHaveBeenCalledOnce());
+    const restarting = controller.abort();
+
+    await expect(operation).rejects.toBe(abortReason);
+    expect(controller.state).toBe("restarting");
+    piAbortSettled.resolve();
+    await restarting;
+
+    expect(first.invalidate).toHaveBeenCalledOnce();
+    expect(createWorker).toHaveBeenCalledTimes(2);
+    expect(controller.state).toBe("healthy");
     await controller.close();
   });
 

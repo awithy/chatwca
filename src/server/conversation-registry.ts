@@ -1408,6 +1408,9 @@ export class ConversationRegistry {
         ? null
         : path.resolve(policy.sessionDirectory),
       securityProfile: policy.securityProfile,
+      ...(policy.mounts === undefined
+        ? {}
+        : { mounts: Object.freeze(policy.mounts.map((mount) => Object.freeze({ ...mount }))) }),
       networkPolicy,
       networkPolicySetId,
       effectiveNetworkPolicySetId,

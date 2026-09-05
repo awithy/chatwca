@@ -265,6 +265,89 @@ function managedOwnership(
 }
 
 describe("ConversationRegistry", () => {
+  describe.each(["isolated", "managed-egress"] as const)("%s workspace mounts", (networkPolicy) => {
+    it.each(["create", "open", "job", "fork"] as const)(
+      "forwards an immutable mount snapshot when admitting %s runtimes",
+      async (operation) => {
+        const root = await temporaryRoot();
+        const cwd = path.join(root, "workspace");
+        const sessionFile = path.join(root, "source.jsonl");
+        const forkFile = path.join(root, "fork.jsonl");
+        await mkdir(cwd);
+        await writeFile(sessionFile, "source");
+        await writeFile(forkFile, "fork");
+        const mounts = [
+          { name: "reference", source: path.join(root, "reference"), access: "read-only" as const },
+          { name: "artifacts", source: path.join(root, "artifacts"), access: "read-write" as const },
+        ];
+        const expectedMounts = mounts.map((mount) => ({ ...mount }));
+        const policy = {
+          ...(networkPolicy === "managed-egress"
+            ? managedOwnership(cwd)
+            : { ...ownership(cwd), securityProfile: "workspace-sandboxed" as const, networkPolicy }),
+          mounts,
+        };
+        const options = {
+          securityProfile: "workspace-sandboxed" as const,
+          networkPolicy,
+          branch: [{
+            type: "message", id: "a1b2c3d4",
+            message: { role: "user", content: "fork this prompt" },
+          }],
+        };
+        const runtime = new FakeRuntime(identity("source", sessionFile, cwd), options);
+        const factory = new FakeFactory();
+        factory.createPersistent.mockResolvedValue(runtime);
+        factory.openPersistent.mockResolvedValue(runtime);
+        const registry = new ConversationRegistry({ runtimeFactory: factory });
+        try {
+          switch (operation) {
+            case "create":
+              await registry.create(policy);
+              break;
+            case "open":
+              await registry.open(policy, sessionFile);
+              break;
+            case "job":
+              await registry.createJobConversation(
+                policy,
+                { kind: "scheduled-job", jobId: "job-1", runId: "run-1" },
+                await registry.reserveRuntimeCapacity(),
+              );
+              break;
+            case "fork": {
+              await registry.create(policy);
+              const temporary = new FakeRuntime(identity("source", sessionFile, cwd), options);
+              temporary.forkSpy.mockImplementation(async () => {
+                temporary.replace(identity("forked", forkFile, cwd));
+                return { cancelled: false, editorText: "fork this prompt" };
+              });
+              factory.openPersistent.mockResolvedValue(temporary);
+              await registry.fork("source", "a1b2c3d4", policy);
+              break;
+            }
+          }
+          const forwarded = operation === "open" || operation === "fork"
+            ? factory.openPersistent.mock.calls[0]![0]
+            : factory.createPersistent.mock.calls[0]![0];
+          expect(forwarded.mounts).toEqual(expectedMounts);
+          expect(Object.isFrozen(forwarded)).toBe(true);
+          expect(Object.isFrozen(forwarded.mounts)).toBe(true);
+          expect(forwarded.mounts).not.toBe(mounts);
+          for (const [index, mount] of forwarded.mounts!.entries()) {
+            expect(Object.isFrozen(mount)).toBe(true);
+            expect(mount).not.toBe(mounts[index]);
+          }
+          mounts[0]!.source = path.join(root, "changed");
+          mounts.pop();
+          expect(forwarded.mounts).toEqual(expectedMounts);
+        } finally {
+          await registry.dispose();
+        }
+      },
+    );
+  });
+
   it("projects stored and effective destination-set identity from trusted workspace policy", async () => {
     const root = await temporaryRoot();
     const cwd = path.join(root, "workspace");

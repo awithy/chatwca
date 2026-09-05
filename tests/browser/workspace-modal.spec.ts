@@ -144,7 +144,7 @@ test("adds named read-only and read-write mounts under /mounts with writable con
   await dialog.getByLabel("Directory path").fill("/tmp/chatwca-mounted-workspace");
   await dialog.getByLabel("Security profile", { exact: true }).selectOption("workspace-sandboxed");
   await dialog.getByRole("button", { name: "Add mount" }).click();
-  await dialog.getByLabel("Mount name").fill("shared-data");
+  await dialog.getByLabel("Mount point name").fill("shared-data");
   await dialog.getByLabel("Server directory").fill("/srv/shared/data");
   await dialog.getByLabel("Access").selectOption("read-write");
   await expect(dialog).toContainText("/mounts/shared-data");

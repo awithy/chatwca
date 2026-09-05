@@ -344,86 +344,116 @@ export function WorkspaceForm({
           aria-describedby={validationError?.field === "mounts" ? errorId : undefined}
         >
           <legend>Additional filesystem mounts</legend>
-          <p className="workspace-form-help">
-            Existing server directories are exposed under <code>/mounts/&lt;name&gt;</code>. These paths may contain sensitive host data.
+          <p className="workspace-form-help workspace-mounts-help">
+            Expose existing server directories to sandboxed tools. Each directory gets a memorable path under <code>/mounts</code>.
           </p>
-          {mounts.map((mount, index) => (
-            <div className="workspace-mount-row" key={index}>
-              <label htmlFor={`${formId}-mount-name-${String(index)}`}>Mount name</label>
-              <input
-                id={`${formId}-mount-name-${String(index)}`}
-                value={mount.name}
-                spellCheck={false}
-                autoComplete="off"
-                placeholder="shared-data"
-                onChange={(event) => {
-                  const name = event.target.value;
-                  setMounts((current) => current.map((item, itemIndex) =>
-                    itemIndex === index ? { ...item, name } : item
-                  ));
-                  setValidationError(null);
-                }}
-              />
-              <label htmlFor={`${formId}-mount-source-${String(index)}`}>Server directory</label>
-              <input
-                id={`${formId}-mount-source-${String(index)}`}
-                value={mount.source}
-                spellCheck={false}
-                autoComplete="off"
-                placeholder="/srv/shared/data"
-                onChange={(event) => {
-                  const source = event.target.value;
-                  setMounts((current) => current.map((item, itemIndex) =>
-                    itemIndex === index ? { ...item, source } : item
-                  ));
-                  setValidationError(null);
-                }}
-              />
-              <label htmlFor={`${formId}-mount-access-${String(index)}`}>Access</label>
-              <select
-                id={`${formId}-mount-access-${String(index)}`}
-                value={mount.access}
-                onChange={(event) => {
-                  const access = event.target.value as WorkspaceMount["access"];
-                  setMounts((current) => current.map((item, itemIndex) =>
-                    itemIndex === index ? { ...item, access } : item
-                  ));
-                  setValidationError(null);
-                }}
-              >
-                <option value="read-only">Read-only</option>
-                <option value="read-write">Read-write</option>
-              </select>
-              <div className="workspace-mount-destination">
-                Guest path: <code>{workspaceMountGuestPath(mount.name || "name")}</code>
-              </div>
-              <button
-                type="button"
-                className="workspace-mount-remove"
-                onClick={() => setMounts((current) => current.filter((_, itemIndex) => itemIndex !== index))}
-              >
-                Remove mount
-              </button>
+          {mounts.length === 0 ? (
+            <div className="workspace-mounts-empty">No additional directories mounted.</div>
+          ) : (
+            <div className="workspace-mounts-list">
+              {mounts.map((mount, index) => {
+                const mountLabel = mount.name.length === 0
+                  ? `Mount ${String(index + 1)}`
+                  : workspaceMountGuestPath(mount.name);
+                const nameHelpId = `${formId}-mount-name-help-${String(index)}`;
+                return (
+                  <div className="workspace-mount-row" key={index}>
+                    <div className="workspace-mount-row-heading">
+                      <div>
+                        <span className="workspace-mount-number">Mount {String(index + 1)}</span>
+                        <code>{mountLabel}</code>
+                      </div>
+                      <button
+                        type="button"
+                        className="workspace-mount-remove"
+                        aria-label={`Remove ${mountLabel}`}
+                        onClick={() => setMounts((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                    <div className="workspace-mount-fields">
+                      <div className="workspace-mount-field workspace-mount-source-field">
+                        <label htmlFor={`${formId}-mount-source-${String(index)}`}>Server directory</label>
+                        <input
+                          id={`${formId}-mount-source-${String(index)}`}
+                          value={mount.source}
+                          spellCheck={false}
+                          autoComplete="off"
+                          placeholder="/srv/shared/data"
+                          onChange={(event) => {
+                            const source = event.target.value;
+                            setMounts((current) => current.map((item, itemIndex) =>
+                              itemIndex === index ? { ...item, source } : item
+                            ));
+                            setValidationError(null);
+                          }}
+                        />
+                      </div>
+                      <div className="workspace-mount-field workspace-mount-name-field">
+                        <label htmlFor={`${formId}-mount-name-${String(index)}`}>Mount point name</label>
+                        <div className="workspace-mount-name-input">
+                          <span aria-hidden="true">/mounts/</span>
+                          <input
+                            id={`${formId}-mount-name-${String(index)}`}
+                            value={mount.name}
+                            spellCheck={false}
+                            autoComplete="off"
+                            placeholder="shared-data"
+                            aria-describedby={nameHelpId}
+                            onChange={(event) => {
+                              const name = event.target.value;
+                              setMounts((current) => current.map((item, itemIndex) =>
+                                itemIndex === index ? { ...item, name } : item
+                              ));
+                              setValidationError(null);
+                            }}
+                          />
+                        </div>
+                        <span className="workspace-mount-name-help" id={nameHelpId}>
+                          Lowercase letters and numbers; internal hyphens or underscores are allowed.
+                        </span>
+                      </div>
+                      <div className="workspace-mount-field workspace-mount-access-field">
+                        <label htmlFor={`${formId}-mount-access-${String(index)}`}>Access</label>
+                        <select
+                          id={`${formId}-mount-access-${String(index)}`}
+                          value={mount.access}
+                          onChange={(event) => {
+                            const access = event.target.value as WorkspaceMount["access"];
+                            setMounts((current) => current.map((item, itemIndex) =>
+                              itemIndex === index ? { ...item, access } : item
+                            ));
+                            setValidationError(null);
+                          }}
+                        >
+                          <option value="read-only">Read-only</option>
+                          <option value="read-write">Read-write</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
-          ))}
-          <button
-            type="button"
-            className="workspace-mount-add"
-            disabled={submitting || securityControlsLocked || mounts.length >= MAX_WORKSPACE_MOUNTS}
-            onClick={() => {
-              let sequence = mounts.length + 1;
-              while (mounts.some(({ name }) => name === `mount-${String(sequence)}`)) sequence += 1;
-              setMounts((current) => [...current, {
-                name: `mount-${String(sequence)}`,
+          )}
+          <div className="workspace-mounts-toolbar">
+            <button
+              type="button"
+              className="workspace-mount-add"
+              disabled={submitting || securityControlsLocked || mounts.length >= MAX_WORKSPACE_MOUNTS}
+              onClick={() => setMounts((current) => [...current, {
+                name: "",
                 source: "",
                 access: "read-only",
-              }]);
-            }}
-          >
-            Add mount
-          </button>
+              }])}
+            >
+              <span aria-hidden="true">＋</span> Add mount
+            </button>
+            <span>{String(mounts.length)} of {String(MAX_WORKSPACE_MOUNTS)} configured</span>
+          </div>
           {mounts.some(({ access }) => access === "read-write") && (
-            <p className="workspace-form-warning">
+            <p className="workspace-form-warning workspace-mount-warning">
               Read-write mounts let sandboxed tools modify files outside the workspace.
             </p>
           )}

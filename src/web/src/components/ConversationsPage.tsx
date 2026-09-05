@@ -8,8 +8,8 @@ import {
   type WorkspaceSummary,
 } from "../../../shared/protocol.js";
 import type { ChatSocketClient } from "../api/client.js";
-import type { ChatClientState } from "../api/state.js";
-import { Composer } from "./Composer.js";
+import type { ChatViewState } from "../api/view-state.js";
+import { DraftComposer } from "./DraftComposer.js";
 import { ConversationHeader } from "./ConversationHeader.js";
 import { WorkspaceConversationPicker } from "./WorkspaceConversationPicker.js";
 import { WorkspaceSidebar } from "./WorkspaceSidebar.js";
@@ -25,7 +25,7 @@ import { conversationTitle } from "./conversation-list.js";
 
 export interface ConversationsPageProps {
   readonly client: ChatSocketClient;
-  readonly chat: ChatClientState;
+  readonly chat: ChatViewState;
   readonly server: ServerStatus;
   readonly onOpenJobs: () => void;
   readonly onOpenJobRun: (jobId: string, runId: string) => void;
@@ -51,7 +51,7 @@ function mobileStatusLabel(status: ConversationSummary["status"] | "aborting"): 
   }
 }
 
-function mobileSecurityLabel(conversation: ChatClientState["conversations"][string]["conversation"] | undefined): string {
+function mobileSecurityLabel(conversation: ChatViewState["conversations"][string]["conversation"] | undefined): string {
   if (conversation === undefined) return "Loading security profile…";
   if (conversation.securityProfile !== "workspace-sandboxed") return "Unrestricted";
   return conversation.networkPolicy === "managed-egress"
@@ -59,7 +59,7 @@ function mobileSecurityLabel(conversation: ChatClientState["conversations"][stri
     : "Sandboxed · Network isolated";
 }
 
-function mobileContextLabel(conversation: ChatClientState["conversations"][string]["conversation"] | undefined): string {
+function mobileContextLabel(conversation: ChatViewState["conversations"][string]["conversation"] | undefined): string {
   const usage = conversation?.contextUsage;
   if (usage === undefined || usage === null) return "—";
   const window = usage.contextWindow < 1_000
@@ -817,10 +817,11 @@ export function ConversationsPage({ client, chat, server, onOpenJobs, onOpenJobR
                     onFork={(entryId) => void forkConversation(entryId)}
                     onRewind={(entryId) => void rewindConversation(entryId)}
                   />
-                  <Composer
+                  <DraftComposer
                     key={selectedConversation.id}
+                    client={client}
+                    conversationId={selectedConversation.id}
                     status={selectedConversation.status}
-                    draft={chat.drafts[selectedConversation.id] ?? ""}
                     queue={selectedConversation.queue}
                     connected={connected && !selectedWorkspaceUnavailable && pendingAction === null}
                     mutationLocked={selectedConversation.owner?.kind === "scheduled-job"}
@@ -831,7 +832,6 @@ export function ConversationsPage({ client, chat, server, onOpenJobs, onOpenJobR
                         maxTotalImageBytes: server.config.maxTotalImageBytes,
                       },
                     })}
-                    onDraftChange={(text) => client.setDraft(selectedConversation.id, text)}
                     onPrompt={prompt}
                     onAbort={abortConversation}
                     onError={(error) => setConversationError(errorMessage(error, "Unable to send the command."))}

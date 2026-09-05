@@ -51,7 +51,7 @@ export function markdownUrl(
  * must not silently turn model output into trusted DOM. React Markdown's
  * default URL transform also rejects unsafe link protocols such as javascript:.
  */
-export function MarkdownContent({ text, conversationId }: MarkdownContentProps) {
+export const MarkdownContent = React.memo(function MarkdownContent({ text, conversationId }: MarkdownContentProps) {
   return (
     <div className="message-markdown">
       <ReactMarkdown
@@ -64,4 +64,4 @@ export function MarkdownContent({ text, conversationId }: MarkdownContentProps) 
       </ReactMarkdown>
     </div>
   );
-}
+});

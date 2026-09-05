@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { JobRunState, JobRunSummary, JobSummary } from "../../../../shared/jobs.js";
 import type { PublicConfig } from "../../../../shared/protocol.js";
 import type { ChatSocketClient } from "../../api/client.js";
-import type { ChatClientState } from "../../api/state.js";
+import type { ChatViewState } from "../../api/view-state.js";
 import { JobDialog } from "./JobDialog.js";
 import type { JobFormValues } from "./JobForm.js";
 import { JobsTable } from "./JobsTable.js";
@@ -11,7 +11,7 @@ import { RunHistoryDialog } from "./RunHistoryDialog.js";
 
 export interface JobsPageProps {
   readonly client: ChatSocketClient;
-  readonly state: ChatClientState;
+  readonly state: ChatViewState;
   readonly config: PublicConfig | undefined;
   readonly onOpenConversations: () => void;
   readonly onOpenConversation: (workspaceId: string, conversationId: string) => Promise<boolean>;

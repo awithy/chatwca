@@ -20,6 +20,8 @@ ChatWCA is a single-user local agent platform built upon the [Pi coding agent](h
 npx pi --list-models
 ```
 
+ChatWCA snapshots Pi's global `defaultProvider` and `defaultModel` from `<Pi agent directory>/settings.json` at server startup. When configured, that model is explicitly selected for every new, reopened, scheduled, forked, and rewound conversation in both security profiles. Saved session models and workspace `.pi/settings.json` model overrides do not take precedence. Historical messages retain their original model metadata; subsequent responses use the selected default. An incomplete, unknown, or unauthenticated configured default fails with `model_unavailable` rather than silently selecting another model. If neither default field is configured, Pi's normal automatic selection remains available. Restart ChatWCA after changing the global default; open conversations then use it when reopened. There is no browser model selector.
+
 The application is pinned to `@earendil-works/pi-coding-agent` **0.84.3**. See [docs/pi-sdk-notes.md](docs/pi-sdk-notes.md) for the validated SDK behavior.
 
 ## Install and run
@@ -262,10 +264,10 @@ Confirm the host clock is synchronized and timezone data is current when a daily
 
 ### No model is configured or available
 
-A prompt rejected with `model_unavailable` means Pi rejected the model prompt preflight; a missing model or credential is the common cause.
+`model_unavailable` during conversation creation/opening means the configured global default is incomplete, unknown, or lacks configured authentication. At prompt preflight it means Pi rejected the model prompt; a missing model or credential is the common cause.
 
 1. Run `npx pi --list-models` as the same OS user, from the same shell, and with the same `PI_CODING_AGENT_DIR`/provider environment as ChatWCA.
-2. Configure a model and credential in Pi; ChatWCA cannot do this in the web UI.
+2. Configure `defaultProvider` and `defaultModel` in Pi's global `settings.json` and the corresponding credential in Pi; ChatWCA cannot do this in the web UI.
 3. If network catalog access is needed, make sure `PI_OFFLINE` is completely unset—not set to `0` or an empty string—and verify provider/network access.
 4. Restart ChatWCA after changing Pi configuration or credentials.
 

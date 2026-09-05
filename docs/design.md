@@ -155,7 +155,7 @@ The server owns one global `WorkspaceRepository` and one global `ConversationReg
 
 The server creates separate process-lifetime unrestricted and strict `ModelRuntime` instances from the same administrator-controlled credential/model paths. This prevents unrestricted extension provider registration from mutating strict sessions while retaining centralized credentials, catalogs, availability, and refresh state.
 
-CWD-bound Pi services and resources are created separately for each runtime.
+CWD-bound Pi services and resources are created separately for each runtime. Pi's global `defaultProvider` and `defaultModel` are snapshotted at server startup. When configured, the factory resolves that exact model through the profile-specific catalog and supplies it explicitly to the SDK on every creation and replacement. This overrides session-restored and project-configured models for new, reopened, scheduled, forked, and rewound conversations. Partial defaults, unknown models, or missing configured authentication fail with `model_unavailable`; they never fall back to another profile or model. When neither global field is configured, Pi's normal automatic selection remains available. Default-model changes require a server restart; historical message/model entries are not rewritten.
 
 ### 6.2 Workspace repository and database
 
@@ -438,7 +438,7 @@ Fork rules:
 
 - The selected entry must be a user message on the source's current branch.
 - The source must be idle.
-- The fork inherits the source workspace, CWD, and current model where available, but freshly resolves the workspace's current effective security, network, and destination-set policy.
+- The fork inherits the source workspace and CWD, but uses the server's snapshotted global default model when configured, not the source's live or saved model. It freshly resolves the workspace's current effective security, network, and destination-set policy.
 - The temporary fork owns a distinct worker and, for managed egress, a distinct proxy runtime, private socket directory, and bridge set. Promotion transfers those resources to the new record.
 - `runtime.fork(entryId)` creates/replaces the temporary runtime's active session; it does not replace the source registry record.
 - The SDK's returned `editorText` pre-fills the composer, matching Pi's `/fork` behavior.

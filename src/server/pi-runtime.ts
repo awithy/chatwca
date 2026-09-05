@@ -79,11 +79,6 @@ export interface PiForkResult {
   readonly editorText?: string;
 }
 
-export interface PiForkOptions {
-  /** The live source model to apply to the new session after replacement. */
-  readonly inheritModel?: NonNullable<AgentSession["model"]>;
-}
-
 export interface PiRuntimeReplacement {
   readonly previous: PiRuntimeIdentity;
   readonly current: PiRuntimeIdentity;
@@ -154,7 +149,7 @@ export interface PiConversationRuntimePort {
   onNetworkBlocked(listener: PiRuntimeNetworkBlockedListener): () => void;
   prompt(text: string, options?: PromptOptions): Promise<void>;
   abort(): Promise<void>;
-  fork(entryId: string, options?: PiForkOptions): Promise<PiForkResult>;
+  fork(entryId: string): Promise<PiForkResult>;
   dispose(): Promise<void>;
 }
 
@@ -462,32 +457,14 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
     }
   }
 
-  async fork(entryId: string, options?: PiForkOptions): Promise<PiForkResult> {
+  async fork(entryId: string): Promise<PiForkResult> {
     this.#assertUsable();
     this.#replacementSource = this.identity;
 
     try {
-      const inheritedModel = options?.inheritModel;
-      const result = await this.#runtime.fork(
-        entryId,
-        inheritedModel === undefined
-          ? undefined
-          : {
-              // Pi rebuilds the fork from entries before the selected user
-              // message. A later model change on the live source may therefore
-              // not be present in that branch. Apply the source's current model
-              // only after replacement, so the source JSONL is never modified.
-              withSession: async () => {
-                const current = this.session.model;
-                if (
-                  current?.provider !== inheritedModel.provider ||
-                  current.id !== inheritedModel.id
-                ) {
-                  await this.session.setModel(inheritedModel);
-                }
-              },
-            },
-      );
+      // The replacement factory selects the global default again; neither the
+      // copied branch nor the source's live model overrides that choice.
+      const result = await this.#runtime.fork(entryId);
       if (result.cancelled) this.#replacementSource = undefined;
       return result.selectedText === undefined
         ? { cancelled: result.cancelled }
@@ -945,6 +922,19 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
                   this.#webSearchTool,
                 ],
               };
+        }
+        // An explicit SDK model takes precedence over saved session models and
+        // project settings, including during fork/runtime reconstruction. Resolve
+        // only against this profile's catalog; never cross the strict boundary.
+        const { defaultProvider, defaultModel } = this.#globalSettings;
+        if (defaultProvider !== undefined || defaultModel !== undefined) {
+          const model = defaultProvider && defaultModel
+            ? services.modelRuntime.getModel(defaultProvider, defaultModel)
+            : undefined;
+          if (model === undefined || !services.modelRuntime.hasConfiguredAuth(model.provider)) {
+            throw new AppError(ERROR_CODES.MODEL_UNAVAILABLE);
+          }
+          configurableSessionOptions = { ...configurableSessionOptions, model };
         }
         const sessionCreationOptions: CreateAgentSessionFromServicesOptions = {
           ...configurableSessionOptions,

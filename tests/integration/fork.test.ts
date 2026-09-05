@@ -35,7 +35,6 @@ import {
 import {
   PiRuntimeFactory,
   type PiConversationRuntimePort,
-  type PiForkOptions,
   type PiForkResult,
   type PiModelCapability,
   type PiRuntimeFactoryPort,
@@ -219,8 +218,8 @@ class TrackingRuntime implements PiConversationRuntimePort {
     return this.inner.abort();
   }
 
-  async fork(entryId: string, options?: PiForkOptions): Promise<PiForkResult> {
-    const result = await this.inner.fork(entryId, options);
+  async fork(entryId: string): Promise<PiForkResult> {
+    const result = await this.inner.fork(entryId);
     this.forkIdentity = this.identity;
     if (this.failAfterFork) {
       throw new AppError(ERROR_CODES.PI_RUNTIME_REPLACE_FAILED);

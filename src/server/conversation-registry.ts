@@ -1010,11 +1010,7 @@ export class ConversationRegistry {
         throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
       }
 
-      const result = await temporary.fork(entryId, {
-        ...(source.session.model === undefined
-          ? {}
-          : { inheritModel: source.session.model }),
-      });
+      const result = await temporary.fork(entryId);
       if (result.cancelled) {
         throw new AppError(ERROR_CODES.PI_RUNTIME_REPLACE_FAILED);
       }

@@ -21,7 +21,6 @@ import {
 } from "../../src/server/conversation-registry.js";
 import type {
   PiConversationRuntimePort,
-  PiForkOptions,
   PiForkResult,
   PiModelCapability,
   PiRuntimeFactoryPort,
@@ -135,7 +134,7 @@ class FakeRuntime implements PiConversationRuntimePort {
   );
   readonly abortSpy = vi.fn(async () => undefined);
   readonly forkSpy = vi.fn(
-    async (_entryId: string, _options?: PiForkOptions): Promise<PiForkResult> => ({
+    async (_entryId: string): Promise<PiForkResult> => ({
       cancelled: true,
     }),
   );
@@ -193,8 +192,8 @@ class FakeRuntime implements PiConversationRuntimePort {
     return this.abortSpy();
   }
 
-  fork(entryId: string, options?: PiForkOptions): Promise<PiForkResult> {
-    return this.forkSpy(entryId, options);
+  fork(entryId: string): Promise<PiForkResult> {
+    return this.forkSpy(entryId);
   }
 
   dispose(): Promise<void> {
@@ -1503,9 +1502,7 @@ describe("ConversationRegistry", () => {
       expect.objectContaining({ cwd, securityProfile: "unrestricted" }),
       sourceFile,
     );
-    expect(temporary.forkSpy).toHaveBeenCalledWith("a1b2c3d4", {
-      inheritModel: sourceModel,
-    });
+    expect(temporary.forkSpy).toHaveBeenCalledWith("a1b2c3d4");
     expect(result).toMatchObject({
       editorText: "copy this prompt",
       conversation: {

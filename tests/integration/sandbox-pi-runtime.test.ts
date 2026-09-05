@@ -83,11 +83,14 @@ async function createStrictRuntime(commandTimeoutMs = 900_000): Promise<{
     modelsPath: null,
     modelsStorePath: path.join(root, "unrestricted-store.json"),
   });
+  await writeFile(path.join(agentDir, "settings.json"), JSON.stringify({
+    defaultProvider: faux.getModel().provider,
+    defaultModel: faux.getModel().id,
+  }));
   const factory = await PiRuntimeFactory.create({
     agentDir,
     modelRuntime: unrestrictedModelRuntime,
     strictModelRuntime,
-    sessionOptions: () => ({ model: faux.getModel() }),
     sandbox: { config, host, worker, hiddenPaths: [dataDir, agentDir, sessionDir] },
   });
   const runtime = await factory.createPersistent({
@@ -96,6 +99,7 @@ async function createStrictRuntime(commandTimeoutMs = 900_000): Promise<{
     sessionDirectory: sessionDir,
     securityProfile: "workspace-sandboxed",
   });
+  expect(runtime.model).toMatchObject({ provider: faux.getModel().provider, id: faux.getModel().id });
   return { runtime, faux };
 }
 

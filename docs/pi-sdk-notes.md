@@ -12,6 +12,7 @@ These notes record the concrete SDK behavior on which ChatWCA relies. They are a
 - `create()` restores cached catalogs and does not use the network by default. A bounded refresh is available through `refresh({ allowNetwork: true, force?, signal? })`; `PI_OFFLINE` disables model network access.
 - Available authenticated models come from `await modelRuntime.getAvailable()`. A model advertises vision support when `model.input.includes("image")`.
 - `ModelRuntime` has no disposal method in this version. It is safe to retain for the process lifetime.
+- An explicit `model` passed to `createAgentSessionFromServices()` takes precedence over both session-restored models and settings defaults. ChatWCA snapshots global `defaultProvider`/`defaultModel` at startup, resolves them in the profile-specific catalog, and passes that model explicitly on creation, open, and fork replacement. Incomplete/unavailable configured defaults fail with `model_unavailable`; absent defaults retain Pi automatic selection. The fork adapter does not reapply the source's model. Selecting the model this way does not rewrite historical messages or append a model change to a resumed source merely to construct a temporary fork runtime; subsequent assistant messages record the model actually used.
 
 ## Strict sandbox resources and tools (Phase 6)
 

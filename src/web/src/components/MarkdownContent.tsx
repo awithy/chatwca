@@ -2,6 +2,10 @@ import * as React from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import { CodeBlock } from "./CodeBlock.js";
+
+const markdownComponents = { pre: CodeBlock };
+
 export interface MarkdownContentProps {
   readonly text: string;
   readonly conversationId?: string;
@@ -52,6 +56,7 @@ export function MarkdownContent({ text, conversationId }: MarkdownContentProps) 
     <div className="message-markdown">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        components={markdownComponents}
         skipHtml
         urlTransform={(url) => markdownUrl(url, conversationId)}
       >

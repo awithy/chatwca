@@ -250,6 +250,15 @@ export type WorkspaceSecurityProfile = Static<
 >;
 
 export const MAX_WORKSPACE_MOUNTS = 32;
+export const MAX_WORKSPACE_HTTP_TOOLS = 64;
+export const HTTP_TOOL_NAME_PATTERN = "^[a-z][a-z0-9_]{0,63}$";
+export const HttpToolNameSchema = Type.String({
+  minLength: 1,
+  maxLength: 64,
+  pattern: HTTP_TOOL_NAME_PATTERN,
+});
+export type HttpToolName = Static<typeof HttpToolNameSchema>;
+
 export const WORKSPACE_MOUNT_NAME_MAX_LENGTH = 64;
 export const WORKSPACE_MOUNT_SOURCE_MAX_LENGTH = 4_096;
 export const WORKSPACE_MOUNT_NAME_PATTERN = "^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$";
@@ -373,12 +382,22 @@ export type PublicManagedEgressConfig = Static<
   typeof PublicManagedEgressConfigSchema
 >;
 
+export const PublicHttpToolSchema = strictObject({
+  name: HttpToolNameSchema,
+  label: Type.String({ minLength: 1, maxLength: 128 }),
+  description: Type.String({ minLength: 1, maxLength: 2_000 }),
+  method: Type.Literal("POST"),
+  url: Type.String({ minLength: 1, maxLength: 2_048 }),
+});
+export type PublicHttpTool = Static<typeof PublicHttpToolSchema>;
+
 export const PublicConfigSchema = strictObject({
   maxImages: Type.Integer({ minimum: 1 }),
   maxImageBytes: Type.Integer({ minimum: 1 }),
   maxTotalImageBytes: Type.Integer({ minimum: 1 }),
   sandbox: PublicSandboxConfigSchema,
   managedEgress: PublicManagedEgressConfigSchema,
+  httpTools: Type.Array(PublicHttpToolSchema, { maxItems: MAX_WORKSPACE_HTTP_TOOLS }),
   jobs: PublicJobsConfigSchema,
 });
 export type PublicConfig = Static<typeof PublicConfigSchema>;
@@ -393,6 +412,10 @@ export const WorkspaceSchema = strictObject({
   mounts: Type.Array(WorkspaceMountSchema, { maxItems: MAX_WORKSPACE_MOUNTS }),
   networkPolicy: SandboxNetworkPolicySchema,
   networkPolicySetId: NetworkPolicySetIdSchema,
+  enabledHttpTools: Type.Array(HttpToolNameSchema, {
+    maxItems: MAX_WORKSPACE_HTTP_TOOLS,
+    uniqueItems: true,
+  }),
   createdAt: Type.Number({ minimum: 0 }),
   updatedAt: Type.Number({ minimum: 0 }),
 });
@@ -421,6 +444,14 @@ export const WorkspaceSummarySchema = strictObject({
     Type.Null(),
   ]),
   networkPolicyIssue: WorkspaceNetworkPolicyIssueSchema,
+  enabledHttpTools: Type.Array(HttpToolNameSchema, {
+    maxItems: MAX_WORKSPACE_HTTP_TOOLS,
+    uniqueItems: true,
+  }),
+  effectiveHttpTools: Type.Array(HttpToolNameSchema, {
+    maxItems: MAX_WORKSPACE_HTTP_TOOLS,
+    uniqueItems: true,
+  }),
   createdAt: Type.Number({ minimum: 0 }),
   updatedAt: Type.Number({ minimum: 0 }),
   available: Type.Boolean(),
@@ -496,6 +527,11 @@ export const ConversationStateSchema = strictObject({
   networkPolicy: Type.Union([SandboxNetworkPolicySchema, Type.Null()]),
   networkPolicySetId: NetworkPolicySetIdSchema,
   effectiveNetworkPolicySetId: Type.Union([NetworkPolicySetIdSchema, Type.Null()]),
+  /** Effective parent-owned tools captured immutably when this runtime started. */
+  effectiveHttpTools: Type.Array(HttpToolNameSchema, {
+    maxItems: MAX_WORKSPACE_HTTP_TOOLS,
+    uniqueItems: true,
+  }),
   /** Safe live ownership; closed persisted sessions have no owner. */
   owner: Type.Optional(ConversationOwnerSchema),
 });
@@ -515,6 +551,10 @@ export const WorkspaceCreateCommandSchema = strictObject({
   mounts: Type.Optional(Type.Array(WorkspaceMountSchema, { maxItems: MAX_WORKSPACE_MOUNTS })),
   networkPolicy: Type.Optional(SandboxNetworkPolicySchema),
   networkPolicySetId: Type.Optional(NetworkPolicySetIdSchema),
+  enabledHttpTools: Type.Optional(Type.Array(HttpToolNameSchema, {
+    maxItems: MAX_WORKSPACE_HTTP_TOOLS,
+    uniqueItems: true,
+  })),
   acknowledgeWritableMounts: Type.Optional(Type.Literal(true)),
 });
 export const WorkspaceUpdateCommandSchema = strictObject({
@@ -527,6 +567,10 @@ export const WorkspaceUpdateCommandSchema = strictObject({
   mounts: Type.Optional(Type.Array(WorkspaceMountSchema, { maxItems: MAX_WORKSPACE_MOUNTS })),
   networkPolicy: Type.Optional(SandboxNetworkPolicySchema),
   networkPolicySetId: Type.Optional(NetworkPolicySetIdSchema),
+  enabledHttpTools: Type.Optional(Type.Array(HttpToolNameSchema, {
+    maxItems: MAX_WORKSPACE_HTTP_TOOLS,
+    uniqueItems: true,
+  })),
   acknowledgeSecurityDowngrade: Type.Optional(Type.Literal(true)),
   acknowledgeNetworkExposure: Type.Optional(Type.Literal(true)),
   acknowledgeWritableMounts: Type.Optional(Type.Literal(true)),

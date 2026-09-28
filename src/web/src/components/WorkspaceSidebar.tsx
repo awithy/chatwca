@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import type {
   ConversationSummary,
   LiveConversationStatus,
+  PublicHttpTool,
   PublicManagedEgressConfig,
   PublicSandboxConfig,
   SandboxNetworkPolicy,
@@ -29,6 +30,7 @@ interface WorkspaceUpdateValues {
   readonly mounts?: readonly WorkspaceMount[];
   readonly networkPolicy?: SandboxNetworkPolicy;
   readonly networkPolicySetId?: string;
+  readonly enabledHttpTools?: readonly string[];
   readonly acknowledgeSecurityDowngrade?: true;
   readonly acknowledgeNetworkExposure?: true;
   readonly acknowledgeWritableMounts?: true;
@@ -47,6 +49,7 @@ export interface WorkspaceSidebarProps {
   readonly actionPending: boolean;
   readonly publicSandboxConfig: PublicSandboxConfig | undefined;
   readonly publicManagedEgressConfig: PublicManagedEgressConfig | undefined;
+  readonly publicHttpTools: readonly PublicHttpTool[] | undefined;
   readonly open: boolean;
   readonly onDismiss: () => void;
   readonly onOpenJobs: () => void;
@@ -118,6 +121,10 @@ export function workspaceUpdatePlan(workspace: WorkspaceSummary, values: Workspa
   const mountsChanged = JSON.stringify(values.mounts) !== JSON.stringify(workspace.mounts);
   const networkPolicyChanged = values.networkPolicy !== workspace.networkPolicy;
   const networkPolicySetChanged = values.networkPolicySetId !== workspace.networkPolicySetId;
+  const selectedHttpTools = values.enabledHttpTools ?? [];
+  const storedHttpTools = workspace.enabledHttpTools ?? [];
+  const httpToolsChanged = JSON.stringify([...selectedHttpTools].sort()) !==
+    JSON.stringify([...storedHttpTools].sort());
   const downgrade = profileChanged &&
     workspace.securityProfile === "workspace-sandboxed" &&
     values.securityProfile === "unrestricted";
@@ -148,6 +155,7 @@ export function workspaceUpdatePlan(workspace: WorkspaceSummary, values: Workspa
       ...(mountsChanged ? { mounts: values.mounts } : {}),
       ...(networkPolicyChanged ? { networkPolicy: values.networkPolicy } : {}),
       ...(networkPolicySetChanged ? { networkPolicySetId: values.networkPolicySetId } : {}),
+      ...(httpToolsChanged ? { enabledHttpTools: selectedHttpTools } : {}),
       ...(downgrade ? { acknowledgeSecurityDowngrade: true } : {}),
       ...(addsNetworkExposure ? { acknowledgeNetworkExposure: true } : {}),
       ...(addsWritableMounts ? { acknowledgeWritableMounts: true } : {}),
@@ -194,6 +202,7 @@ export function WorkspaceSidebar({
   actionPending,
   publicSandboxConfig,
   publicManagedEgressConfig,
+  publicHttpTools,
   open,
   onDismiss,
   onOpenJobs,
@@ -416,7 +425,7 @@ export function WorkspaceSidebar({
           <button
             className="workspace-add-button"
             type="button"
-            disabled={!connected || publicSandboxConfig === undefined || actionPending || submitting || removingId !== null}
+            disabled={!connected || publicSandboxConfig === undefined || publicHttpTools === undefined || actionPending || submitting || removingId !== null}
             aria-expanded={formMode?.type === "create"}
             onClick={(event) => {
               formReturnFocus.current = event.currentTarget;
@@ -428,7 +437,7 @@ export function WorkspaceSidebar({
           </button>
         </div>
 
-        {formMode !== null && formMode.type !== "info" && publicSandboxConfig !== undefined && publicManagedEgressConfig !== undefined && (
+        {formMode !== null && formMode.type !== "info" && publicSandboxConfig !== undefined && publicManagedEgressConfig !== undefined && publicHttpTools !== undefined && (
           <WorkspaceDialog
             key={formMode.type === "create" ? "create" : formMode.workspace.id}
             mode={formMode.type}
@@ -445,10 +454,13 @@ export function WorkspaceSidebar({
                 effectiveNetworkPolicy: formMode.workspace.effectiveNetworkPolicy,
                 effectiveNetworkPolicySetId: formMode.workspace.effectiveNetworkPolicySetId,
                 networkPolicyIssue: formMode.workspace.networkPolicyIssue,
+                enabledHttpTools: formMode.workspace.enabledHttpTools,
+                effectiveHttpTools: formMode.workspace.effectiveHttpTools,
               },
             } : {})}
             publicSandboxConfig={publicSandboxConfig}
             publicManagedEgressConfig={publicManagedEgressConfig}
+            publicHttpTools={publicHttpTools}
             securityControlsLocked={formMode.type === "edit" && liveWorkspaceIds.has(formMode.workspace.id)}
             submitting={submitting}
             error={workspaceError}
@@ -544,6 +556,27 @@ export function WorkspaceSidebar({
                     : "Unavailable"}</dd>
               </div>
               <div>
+                <dt>Stored HTTP tools</dt>
+                <dd className="workspace-info-values">{formMode.workspace.enabledHttpTools.length === 0
+                  ? "None"
+                  : formMode.workspace.enabledHttpTools.map((name) => <code key={name}>{name}</code>)}</dd>
+              </div>
+              <div>
+                <dt>Effective HTTP tools</dt>
+                <dd className="workspace-info-values">{formMode.workspace.effectiveHttpTools.length === 0
+                  ? "None"
+                  : formMode.workspace.effectiveHttpTools.map((name) => <code key={name}>{name}</code>)}</dd>
+              </div>
+              <div>
+                <dt>Unavailable HTTP tool selections</dt>
+                <dd className="workspace-info-values">{formMode.workspace.enabledHttpTools
+                  .filter((name) => !formMode.workspace.effectiveHttpTools.includes(name)).length === 0
+                    ? "None"
+                    : formMode.workspace.enabledHttpTools
+                      .filter((name) => !formMode.workspace.effectiveHttpTools.includes(name))
+                      .map((name) => <code key={name}>{name}</code>)}</dd>
+              </div>
+              <div>
                 <dt>Session storage</dt>
                 <dd>{storageLabel(formMode.workspace)}</dd>
               </div>
@@ -612,6 +645,7 @@ export function WorkspaceSidebar({
             <div className="workspace-disclosures" role="note" aria-label="Workspace sandbox limitations">
               <p><strong>Writable files:</strong> The workspace, including <code>.git</code>, and every read-write mount can be modified. Sandboxing does not prevent harmful edits, hooks, or build scripts.</p>
               <p><strong>Managed network:</strong> {publicManagedEgressConfig?.disclosureWarning ?? "Tools may transmit workspace content to configured destinations."}</p>
+              <p><strong>Parent-owned HTTP tools:</strong> Enabled tools run in the ChatWCA server outside sandbox networking and may transmit readable workspace content to their fixed endpoints. They do not give workspace processes general network access.</p>
               <p><strong>Remote model:</strong> {publicSandboxConfig?.remoteProviderWarning ?? "Workspace content may be sent to the configured model provider."}</p>
               <p><strong>No resource quotas:</strong> The sandbox does not isolate CPU, memory, or disk denial-of-service.</p>
             </div>
@@ -676,7 +710,7 @@ export function WorkspaceSidebar({
                   </button>
                   <button
                     type="button"
-                    disabled={!connected || publicSandboxConfig === undefined || publicManagedEgressConfig === undefined || busy}
+                    disabled={!connected || publicSandboxConfig === undefined || publicManagedEgressConfig === undefined || publicHttpTools === undefined || busy}
                     aria-label={`Edit workspace ${workspace.name}`}
                     onClick={(event) => {
                       formReturnFocus.current = event.currentTarget;

@@ -7,6 +7,7 @@ import {
   workspaceMountGuestPath,
 } from "../../../shared/protocol.js";
 import type {
+  PublicHttpTool,
   PublicManagedEgressConfig,
   PublicNetworkPolicySet,
   PublicSandboxConfig,
@@ -25,6 +26,7 @@ export interface WorkspaceFormValues {
   readonly mounts: readonly WorkspaceMount[];
   readonly networkPolicy: SandboxNetworkPolicy;
   readonly networkPolicySetId: string;
+  readonly enabledHttpTools: readonly string[];
 }
 
 export interface WorkspaceFormInitialValues extends WorkspaceFormValues {
@@ -32,6 +34,7 @@ export interface WorkspaceFormInitialValues extends WorkspaceFormValues {
   readonly effectiveNetworkPolicy: SandboxNetworkPolicy | null;
   readonly effectiveNetworkPolicySetId: string | null;
   readonly networkPolicyIssue: WorkspaceNetworkPolicyIssue;
+  readonly effectiveHttpTools: readonly string[];
 }
 
 export interface WorkspaceFormProps {
@@ -40,7 +43,8 @@ export interface WorkspaceFormProps {
   readonly titleId?: string;
   readonly publicSandboxConfig: PublicSandboxConfig;
   readonly publicManagedEgressConfig: PublicManagedEgressConfig;
-  /** A live runtime makes path/profile/network/set changes server-invalid; name remains editable. */
+  readonly publicHttpTools: readonly PublicHttpTool[];
+  /** A live runtime makes path/profile/network/set/tool changes server-invalid; name remains editable. */
   readonly securityControlsLocked: boolean;
   readonly submitting: boolean;
   readonly error: string | null;
@@ -86,6 +90,7 @@ export function WorkspaceForm({
   titleId,
   publicSandboxConfig,
   publicManagedEgressConfig,
+  publicHttpTools = [],
   securityControlsLocked,
   submitting,
   error,
@@ -118,6 +123,9 @@ export function WorkspaceForm({
   const [networkPolicySetId, setNetworkPolicySetId] = useState(
     initialValues?.networkPolicySetId ?? defaultPolicySet(publicManagedEgressConfig).id,
   );
+  const [enabledHttpTools, setEnabledHttpTools] = useState<readonly string[]>(
+    initialValues?.enabledHttpTools ?? [],
+  );
   const [validationError, setValidationError] = useState<{
     readonly field: "name" | "path" | "mounts";
     readonly message: string;
@@ -139,6 +147,9 @@ export function WorkspaceForm({
   const pathHelpId = `${formId}-path-help`;
   const networkHelpId = `${formId}-network-help`;
   const setHelpId = `${formId}-set-help`;
+  const httpToolsHelpId = `${formId}-http-tools-help`;
+  const availableHttpToolNames = new Set(publicHttpTools.map(({ name }) => name));
+  const unavailableHttpTools = enabledHttpTools.filter((name) => !availableHttpToolNames.has(name));
 
   useEffect(() => {
     if (validationError?.field === "name") nameRef.current?.focus();
@@ -155,6 +166,7 @@ export function WorkspaceForm({
       mounts: mounts.map((mount) => ({ ...mount, name: mount.name.trim(), source: mount.source.trim() })),
       networkPolicy,
       networkPolicySetId,
+      enabledHttpTools: [...enabledHttpTools],
     };
     if (values.name.length === 0) {
       setValidationError({ field: "name", message: "Enter a workspace name." });
@@ -228,7 +240,7 @@ export function WorkspaceForm({
       />
       <p className="workspace-form-help" id={pathHelpId}>
         {pathLocked
-          ? "Close this workspace’s live conversations before changing its directory, filesystem mounts, security profile, network type, or destination policy."
+          ? "Close this workspace’s live conversations before changing its directory, filesystem mounts, security profile, network type, destination policy, or HTTP tools."
           : "The server must be able to read and search this directory."}
       </p>
 
@@ -459,6 +471,60 @@ export function WorkspaceForm({
           )}
         </fieldset>
       )}
+      <fieldset
+        className="workspace-http-tools-control"
+        disabled={submitting || securityControlsLocked}
+        aria-describedby={httpToolsHelpId}
+      >
+        <legend>Parent-owned HTTP tools</legend>
+        <p className="workspace-form-help" id={httpToolsHelpId}>
+          Calls run in the ChatWCA server outside workspace sandbox networking. Tool arguments may send content read from this workspace or its mounts to the fixed endpoint.
+        </p>
+        {publicHttpTools.length === 0 && unavailableHttpTools.length === 0 ? (
+          <div className="workspace-http-tools-empty">No HTTP tools configured.</div>
+        ) : (
+          <div className="workspace-http-tools-list">
+            {publicHttpTools.map((tool) => (
+              <label className="workspace-http-tool-option" key={tool.name}>
+                <input
+                  type="checkbox"
+                  checked={enabledHttpTools.includes(tool.name)}
+                  onChange={(event) => {
+                    setEnabledHttpTools((current) => event.target.checked
+                      ? [...current, tool.name]
+                      : current.filter((name) => name !== tool.name));
+                    setValidationError(null);
+                  }}
+                />
+                <span>
+                  <strong>{tool.label}</strong>
+                  <small>{tool.description}</small>
+                  <code>{tool.method} {tool.url}</code>
+                </span>
+              </label>
+            ))}
+            {unavailableHttpTools.map((name) => (
+              <label className="workspace-http-tool-option is-unavailable" key={name}>
+                <input
+                  type="checkbox"
+                  checked
+                  onChange={() => {
+                    setEnabledHttpTools((current) => current.filter((item) => item !== name));
+                    setValidationError(null);
+                  }}
+                />
+                <span>
+                  <strong>{name} — unavailable</strong>
+                  <small>This stored selection has no definition in the current server catalog. Uncheck it to remove the selection.</small>
+                </span>
+              </label>
+            ))}
+          </div>
+        )}
+        {securityControlsLocked && (
+          <p className="workspace-form-warning">Close this workspace’s live conversations before changing HTTP tool access.</p>
+        )}
+      </fieldset>
       {editing && initialValues !== undefined && (
         <dl className="workspace-profile-summary">
           <div><dt>Stored profile</dt><dd>{securityProfileLabel(initialValues.securityProfile)}</dd></div>
@@ -468,6 +534,8 @@ export function WorkspaceForm({
           <div><dt>Stored destination policy</dt><dd>{setLabel(storedSet, initialValues.networkPolicySetId)}</dd></div>
           <div><dt>Effective destination policy</dt><dd>{initialValues.effectiveNetworkPolicySetId === null ? "None" : setLabel(publicManagedEgressConfig.policySets.find(({ id }) => id === initialValues.effectiveNetworkPolicySetId), initialValues.effectiveNetworkPolicySetId)}</dd></div>
           <div className="workspace-profile-summary-wide"><dt>Network policy issue</dt><dd>{networkPolicyIssueText(initialValues.networkPolicyIssue)}</dd></div>
+          <div><dt>Stored HTTP tools</dt><dd>{initialValues.enabledHttpTools?.join(", ") || "None"}</dd></div>
+          <div><dt>Effective HTTP tools</dt><dd>{initialValues.effectiveHttpTools?.join(", ") || "None"}</dd></div>
         </dl>
       )}
       {publicSandboxConfig.mode === "required" && (

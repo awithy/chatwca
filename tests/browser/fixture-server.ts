@@ -1,8 +1,11 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
+
+import { Type } from "@sinclair/typebox";
 
 import { loadConfig } from "../../src/server/config.js";
 import type { ConversationRegistryListener } from "../../src/server/conversation-registry.js";
+import type { HttpToolConfig } from "../../src/server/http-tool-catalog.js";
 import type { ConversationImageOwner } from "../../src/server/conversation-images.js";
 import { validatePromptImages } from "../../src/server/images.js";
 import {
@@ -44,7 +47,19 @@ const CWD = "/tmp/chatwca-browser-workspace";
 const WORKSPACE_ID = "browser-workspace";
 const SESSION_ROOT = "/tmp/chatwca-browser-sessions";
 const JOB_HOOK_ROOT = "/tmp/chatwca-browser-hooks";
+const TOOL_CATALOG_PATH = "/tmp/chatwca-browser-http-tools.json";
+const HTTP_TOOL_CONFIG: Readonly<HttpToolConfig> = Object.freeze({
+  name: "network_brain_search",
+  label: "Network Brain Search",
+  description: "Search indexed infrastructure documentation.",
+  method: "POST",
+  url: "http://127.0.0.1:53147/v1/search",
+  parameters: Type.Object({ query: Type.String() }, { additionalProperties: false }),
+  timeoutMs: 30_000,
+  maxResponseBytes: 1024 * 1024,
+});
 mkdirSync(JOB_HOOK_ROOT, { recursive: true });
+writeFileSync(TOOL_CATALOG_PATH, JSON.stringify({ version: 1, tools: [HTTP_TOOL_CONFIG] }));
 const WORKSPACE: WorkspaceSummary = {
   id: WORKSPACE_ID,
   name: "Browser workspace",
@@ -59,6 +74,8 @@ const WORKSPACE: WorkspaceSummary = {
   networkPolicySetId: "default",
   effectiveNetworkPolicySetId: null,
   networkPolicyIssue: null,
+  enabledHttpTools: [],
+  effectiveHttpTools: [],
   createdAt: 1,
   updatedAt: 1,
   available: true,
@@ -109,6 +126,7 @@ function emptyState(
     readonly effectiveNetworkPolicy?: ConversationState["networkPolicy"];
     readonly networkPolicySetId?: ConversationState["networkPolicySetId"];
     readonly effectiveNetworkPolicySetId?: ConversationState["effectiveNetworkPolicySetId"];
+    readonly effectiveHttpTools?: ConversationState["effectiveHttpTools"];
   } = WORKSPACE,
 ): ConversationState {
   const now = nextTime();
@@ -133,6 +151,9 @@ function emptyState(
       ? workspace.networkPolicySetId
       : "default",
     effectiveNetworkPolicySetId: workspace.effectiveNetworkPolicySetId ?? null,
+    effectiveHttpTools: "effectiveHttpTools" in workspace
+      ? [...workspace.effectiveHttpTools as readonly string[]]
+      : [],
   };
 }
 
@@ -461,6 +482,7 @@ const registry: ProtocolRegistry = {
       path: workspace.cwd,
       securityProfile: workspace.securityProfile,
       effectiveNetworkPolicy: workspace.networkPolicy,
+      effectiveHttpTools: workspace.effectiveHttpTools.map(({ name }) => name),
     }));
     return { id };
   },
@@ -477,6 +499,7 @@ const registry: ProtocolRegistry = {
       workspaceId: workspace.workspaceId,
       securityProfile: workspace.securityProfile,
       networkPolicy: workspace.networkPolicy,
+      effectiveHttpTools: workspace.effectiveHttpTools.map(({ name }) => name),
       status: "idle",
       lastActiveAt: nextTime(),
     };
@@ -637,6 +660,9 @@ const workspaces: ProtocolWorkspaceRepository = {
       networkPolicySetId: workspace.networkPolicySetId,
       effectiveNetworkPolicySetId: workspace.effectiveNetworkPolicySetId,
       networkPolicySet: null,
+      effectiveHttpTools: workspace.effectiveHttpTools.includes(HTTP_TOOL_CONFIG.name)
+        ? [HTTP_TOOL_CONFIG]
+        : [],
     };
   },
   create: (input) => {
@@ -669,6 +695,8 @@ const workspaces: ProtocolWorkspaceRepository = {
           ? selectedSetId
           : null,
       networkPolicyIssue: unavailableSet ? "managed_egress_policy_set_unavailable" : null,
+      enabledHttpTools: [...(input.enabledHttpTools ?? [])],
+      effectiveHttpTools: [...(input.enabledHttpTools ?? [])],
       createdAt: nextTime(),
       updatedAt: nextTime(),
       available: !input.path.includes("fixture-unavailable"),
@@ -726,6 +754,12 @@ const workspaces: ProtocolWorkspaceRepository = {
                 : null,
             networkPolicyIssue: null,
           }),
+      ...(changes.enabledHttpTools === undefined
+        ? {}
+        : {
+            enabledHttpTools: [...changes.enabledHttpTools],
+            effectiveHttpTools: [...changes.enabledHttpTools],
+          }),
       available: changes.path === undefined
         ? current.available
         : !changes.path.includes("fixture-unavailable"),
@@ -772,6 +806,7 @@ const config = loadConfig(
     CHATWCA_MAX_IMAGE_BYTES: String(IMAGE_LIMITS.maxImageBytes),
     CHATWCA_MAX_TOTAL_IMAGE_BYTES: String(IMAGE_LIMITS.maxTotalImageBytes),
     CHATWCA_SANDBOX_MODE: "optional",
+    CHATWCA_TOOL_CATALOG: TOOL_CATALOG_PATH,
     CHATWCA_MANAGED_EGRESS_MODE: "optional",
     CHATWCA_NETWORK_ALLOWED_DOMAINS: '["**.example.com","registry.npmjs.org"]',
     CHATWCA_NETWORK_DENIED_DOMAINS: '["blocked.example.com"]',

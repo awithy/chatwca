@@ -156,6 +156,7 @@ const conversationState = {
   networkPolicy: null,
   networkPolicySetId: "default",
   effectiveNetworkPolicySetId: null,
+  effectiveHttpTools: [],
 } as const;
 
 describe("ClientCommandSchema", () => {
@@ -380,6 +381,13 @@ describe("public configuration schema", () => {
         disclosureWarning: "Workspace disclosure",
         functionalProbeSucceeded: false,
       },
+      httpTools: [{
+        name: "network_brain_search",
+        label: "Network Brain Search",
+        description: "Search local infrastructure docs.",
+        method: "POST",
+        url: "http://127.0.0.1:53147/v1/search",
+      }],
       jobs: {
         schedulerAvailable: true,
         hooksAvailable: false,
@@ -417,6 +425,7 @@ describe("workspace schemas", () => {
     mounts: [],
     networkPolicy: "isolated",
     networkPolicySetId: "default",
+    enabledHttpTools: [],
     createdAt: 10,
     updatedAt: 20,
   } as const;
@@ -431,6 +440,7 @@ describe("workspace schemas", () => {
         effectiveNetworkPolicy: null,
         effectiveNetworkPolicySetId: null,
         networkPolicyIssue: null,
+        effectiveHttpTools: [],
         usable: true,
         policyIssue: null,
       }),
@@ -443,6 +453,7 @@ describe("workspace schemas", () => {
         effectiveNetworkPolicy: null,
         effectiveNetworkPolicySetId: null,
         networkPolicyIssue: null,
+        effectiveHttpTools: [],
         usable: true,
         policyIssue: null,
         privateMetadata: "no",
@@ -461,6 +472,7 @@ describe("workspace schemas", () => {
         effectiveNetworkPolicy: null,
         effectiveNetworkPolicySetId: null,
         networkPolicyIssue: null,
+        effectiveHttpTools: [],
         usable: true,
         policyIssue: null,
       }],
@@ -544,6 +556,8 @@ describe("ServerMessageSchema", () => {
             effectiveNetworkPolicy: "isolated",
             effectiveNetworkPolicySetId: null,
             networkPolicyIssue: null,
+            enabledHttpTools: ["network_brain_search"],
+            effectiveHttpTools: ["network_brain_search"],
             createdAt: 1,
             updatedAt: 2,
             available: true,

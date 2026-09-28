@@ -240,6 +240,7 @@ test("required authoritative mode fixes creation to Workspace sandbox", async ({
         functionalProbeSucceeded: true,
       },
       managedEgress: disabledManagedEgressConfig,
+      httpTools: [],
       jobs: publicJobsConfig,
     }),
   }));
@@ -274,6 +275,7 @@ test("disabled authoritative mode fixes creation to Unrestricted", async ({ page
         functionalProbeSucceeded: false,
       },
       managedEgress: disabledManagedEgressConfig,
+      httpTools: [],
       jobs: publicJobsConfig,
     }),
   }));

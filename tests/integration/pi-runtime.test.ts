@@ -25,8 +25,34 @@ import {
 
 const temporaryRoots: string[] = [];
 
-function policy(cwd: string, sessionDirectory: string | null = null) {
-  return { workspaceId: cwd, cwd, sessionDirectory, securityProfile: "unrestricted" as const };
+const HTTP_TOOL = Object.freeze({
+  name: "network_brain_search",
+  label: "Network Brain Search",
+  description: "Search local infrastructure documentation.",
+  method: "POST" as const,
+  url: "http://127.0.0.1:53147/v1/search",
+  parameters: Object.freeze({
+    type: "object",
+    additionalProperties: false,
+    required: ["query"],
+    properties: { query: { type: "string" } },
+  }),
+  timeoutMs: 1_000,
+  maxResponseBytes: 64 * 1024,
+});
+
+function policy(
+  cwd: string,
+  sessionDirectory: string | null = null,
+  effectiveHttpTools: readonly typeof HTTP_TOOL[] = [],
+) {
+  return {
+    workspaceId: cwd,
+    cwd,
+    sessionDirectory,
+    securityProfile: "unrestricted" as const,
+    effectiveHttpTools,
+  };
 }
 
 afterEach(async () => {
@@ -42,6 +68,10 @@ async function isolatedFactory(options: {
     readonly apiKey: string;
     readonly timeoutMs: number;
     readonly fetch: typeof globalThis.fetch;
+  };
+  readonly httpTool?: {
+    readonly fetch: typeof globalThis.fetch;
+    readonly granted?: boolean;
   };
   readonly enableTools?: boolean;
 } = {}) {
@@ -86,6 +116,9 @@ async function isolatedFactory(options: {
       ...(options.enableTools === true ? {} : { noTools: "all" as const }),
     }),
     ...(options.webSearch === undefined ? {} : { webSearch: options.webSearch }),
+    ...(options.httpTool === undefined ? {} : {
+      httpToolOptions: { fetch: options.httpTool.fetch },
+    }),
   });
 
   return { root, cwd, agentDir, sessionDir, factory, faux, strictFaux, serviceCwds };
@@ -244,6 +277,41 @@ describe("PiRuntimeFactory", () => {
       }));
     } finally {
       await runtime.dispose();
+    }
+  });
+
+  it("enables only the parent-owned HTTP tools captured in the workspace policy", async () => {
+    const fetch = vi.fn(async () => Response.json({
+      results: [{ citation: "network.md#router", content: "Router documentation" }],
+    }));
+    const enabled = await isolatedFactory({
+      enableTools: true,
+      httpTool: { fetch: fetch as typeof globalThis.fetch },
+    });
+    enabled.faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("network_brain_search", { query: "router" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage("Local search complete"),
+    ]);
+    const enabledRuntime = await enabled.factory.createPersistent(policy(enabled.cwd, null, [HTTP_TOOL]));
+
+    const disabled = await isolatedFactory({
+      enableTools: true,
+      httpTool: { fetch: fetch as typeof globalThis.fetch, granted: false },
+    });
+    const disabledRuntime = await disabled.factory.createPersistent(policy(disabled.cwd));
+
+    try {
+      expect(enabledRuntime.session.getActiveToolNames()).toContain("network_brain_search");
+      expect(disabledRuntime.session.getActiveToolNames()).not.toContain("network_brain_search");
+      await enabledRuntime.prompt("Search Network Brain for router documentation.");
+      expect(fetch).toHaveBeenCalledOnce();
+      expect(enabledRuntime.session.messages).toContainEqual(expect.objectContaining({
+        role: "toolResult",
+        toolName: "network_brain_search",
+        content: [expect.objectContaining({ text: expect.stringContaining("Router documentation") })],
+      }));
+    } finally {
+      await Promise.all([enabledRuntime.dispose(), disabledRuntime.dispose()]);
     }
   });
 

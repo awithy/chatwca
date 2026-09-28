@@ -122,6 +122,7 @@ export interface ConversationRecord {
   readonly networkPolicy: SandboxNetworkPolicy | null;
   readonly networkPolicySetId: string;
   readonly effectiveNetworkPolicySetId: string | null;
+  readonly effectiveHttpTools: readonly string[];
   /** Exact immutable compiled grant owned by this live runtime. Never projected. */
   readonly networkPolicySet: Readonly<CompiledNetworkPolicySet> | null;
   /** Live trusted-service ownership. It is attached before registration emits. */
@@ -231,6 +232,17 @@ function safeNow(now: () => number): number {
     throw new RangeError("Conversation registry clock must be non-negative");
   }
   return value;
+}
+
+function httpToolNames(policy: ConversationWorkspace): readonly string[] {
+  return (policy.effectiveHttpTools ?? []).map(({ name }) => name);
+}
+
+function sameStrings(left: readonly string[] | undefined, right: readonly string[] | undefined): boolean {
+  const normalizedLeft = left ?? [];
+  const normalizedRight = right ?? [];
+  return normalizedLeft.length === normalizedRight.length &&
+    normalizedLeft.every((value, index) => value === normalizedRight[index]);
 }
 
 function modelInfoOf(
@@ -573,6 +585,7 @@ export class ConversationRegistry {
       networkPolicy: record.networkPolicy,
       networkPolicySetId: record.networkPolicySetId,
       effectiveNetworkPolicySetId: record.effectiveNetworkPolicySetId,
+      effectiveHttpTools: [...record.effectiveHttpTools],
       ...(record.owner === undefined ? {} : { owner: record.owner }),
     };
   }
@@ -1003,6 +1016,7 @@ export class ConversationRegistry {
         temporary.networkPolicy !== forkPolicy.networkPolicy ||
         temporary.networkPolicySetId !== forkPolicy.effectiveNetworkPolicySetId ||
         temporary.networkPolicySet !== forkPolicy.networkPolicySet ||
+        !sameStrings(temporary.effectiveHttpTools, httpToolNames(forkPolicy)) ||
         path.resolve(temporary.identity.sessionFile) !==
           reservation.sourceSessionFile ||
         path.resolve(temporary.identity.cwd) !== reservation.sourceCwd
@@ -1252,7 +1266,8 @@ export class ConversationRegistry {
       runtime.securityProfile !== workspace.securityProfile ||
       runtime.networkPolicy !== workspace.networkPolicy ||
       runtime.networkPolicySetId !== workspace.effectiveNetworkPolicySetId ||
-      runtime.networkPolicySet !== workspace.networkPolicySet
+      runtime.networkPolicySet !== workspace.networkPolicySet ||
+      !sameStrings(runtime.effectiveHttpTools, httpToolNames(workspace))
     ) {
       throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
     }
@@ -1278,6 +1293,7 @@ export class ConversationRegistry {
       networkPolicy: workspace.networkPolicy,
       networkPolicySetId: workspace.networkPolicySetId,
       effectiveNetworkPolicySetId: workspace.effectiveNetworkPolicySetId,
+      effectiveHttpTools: Object.freeze([...(runtime.effectiveHttpTools ?? [])]),
       networkPolicySet: workspace.networkPolicySet,
       ...(owner === undefined ? {} : { owner }),
       runtimeFailureTerminal: false,
@@ -1411,6 +1427,7 @@ export class ConversationRegistry {
       networkPolicySetId,
       effectiveNetworkPolicySetId,
       networkPolicySet,
+      effectiveHttpTools: Object.freeze([...(policy.effectiveHttpTools ?? [])]),
     });
   }
 
@@ -1426,7 +1443,8 @@ export class ConversationRegistry {
       record.networkPolicy !== workspace.networkPolicy ||
       record.networkPolicySetId !== workspace.networkPolicySetId ||
       record.effectiveNetworkPolicySetId !== workspace.effectiveNetworkPolicySetId ||
-      record.networkPolicySet !== workspace.networkPolicySet
+      record.networkPolicySet !== workspace.networkPolicySet ||
+      !sameStrings(record.effectiveHttpTools, httpToolNames(workspace))
     ) {
       throw new AppError(ERROR_CODES.SESSION_UNAVAILABLE);
     }
@@ -1680,7 +1698,8 @@ export class ConversationRegistry {
       record.runtime.securityProfile !== record.securityProfile ||
       record.runtime.networkPolicy !== record.networkPolicy ||
       record.runtime.networkPolicySetId !== record.effectiveNetworkPolicySetId ||
-      record.runtime.networkPolicySet !== record.networkPolicySet
+      record.runtime.networkPolicySet !== record.networkPolicySet ||
+      !sameStrings(record.runtime.effectiveHttpTools, record.effectiveHttpTools)
     ) {
       this.#handleRuntimeFailure(record, new AppError(ERROR_CODES.SESSION_UNAVAILABLE));
       return;

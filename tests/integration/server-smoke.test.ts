@@ -118,6 +118,7 @@ describe("server shell", () => {
           "Workspace content may still be sent to the configured model provider.",
         functionalProbeSucceeded: false,
       },
+      httpTools: [],
       jobs: {
         schedulerAvailable: true,
         hooksAvailable: false,

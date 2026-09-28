@@ -100,6 +100,10 @@ export function ConversationHeader({
         ? "Sandboxed · Managed egress"
         : "Sandboxed · Network isolated"
       : "Unrestricted";
+  const effectiveHttpTools = conversation?.effectiveHttpTools ?? [];
+  const httpToolsLabel = effectiveHttpTools.length === 0
+    ? "No parent-owned HTTP tools"
+    : `${String(effectiveHttpTools.length)} parent-owned HTTP ${effectiveHttpTools.length === 1 ? "tool" : "tools"}: ${effectiveHttpTools.join(", ")}. Calls run outside sandbox networking and may transmit readable workspace content to fixed endpoints.`;
   const owner = conversation?.owner ?? summary.owner;
   const mutationLocked = owner?.kind === "scheduled-job";
   const createEnabled = workspace.available && workspace.usable;
@@ -170,6 +174,11 @@ export function ConversationHeader({
           >
             {securityLabel}
           </span>
+          {effectiveHttpTools.length > 0 && (
+            <span className="http-tools-badge" title={httpToolsLabel} aria-label={httpToolsLabel}>
+              HTTP tools · {String(effectiveHttpTools.length)}
+            </span>
+          )}
         </p>
         {editingTitle ? (
           <form className="conversation-title-form" onSubmit={(event) => void submitTitle(event)}>

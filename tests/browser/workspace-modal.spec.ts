@@ -228,5 +228,5 @@ test("a live managed workspace locks path, profile, network type, and destinatio
   await expect(dialog.getByLabel("Security profile", { exact: true })).toBeDisabled();
   await expect(dialog.getByLabel("Sandbox network", { exact: true })).toBeDisabled();
   await expect(dialog.getByLabel("Destination policy", { exact: true })).toBeDisabled();
-  await expect(dialog).toContainText("security profile, network type, or destination policy");
+  await expect(dialog).toContainText("security profile, network type, destination policy, or HTTP tools");
 });

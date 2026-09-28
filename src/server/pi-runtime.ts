@@ -55,10 +55,10 @@ import { createSandboxTools, SANDBOX_TOOL_NAMES } from "./sandbox/tools.js";
 import { startSandboxWorkerClient } from "./sandbox/worker-client.js";
 import { SandboxController } from "./sandbox/worker-controller.js";
 import {
-  WEB_SEARCH_TOOL_NAME,
   createWebSearchTool,
   type WebSearchToolOptions,
 } from "./web-search.js";
+import { createHttpTool, type CreateHttpToolOptions } from "./http-tool.js";
 
 export interface PiModelCapability {
   readonly provider: string;
@@ -135,6 +135,7 @@ export interface PiConversationRuntimePort {
   /** Selected managed-egress grant; null for unrestricted/isolated runtimes. */
   readonly networkPolicySetId: string | null;
   readonly networkPolicySet: Readonly<CompiledNetworkPolicySet> | null;
+  readonly effectiveHttpTools: readonly string[];
   readonly identity: PiRuntimeIdentity;
   readonly model: PiModelCapability | undefined;
   readonly supportsImages: boolean;
@@ -200,6 +201,8 @@ export interface PiRuntimeFactoryOptions {
   ) => PiSessionOptions | Promise<PiSessionOptions>;
   /** Optional parent-owned Brave Search integration shared by every profile. */
   readonly webSearch?: Readonly<WebSearchToolOptions>;
+  /** Injectable HTTP transport used only by tests. */
+  readonly httpToolOptions?: Readonly<CreateHttpToolOptions>;
 }
 
 let sharedModelRuntimePromise: Promise<ModelRuntime> | undefined;
@@ -273,6 +276,7 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
   readonly #networkPolicy: SandboxNetworkPolicy | null;
   readonly #networkPolicySetId: string | null;
   readonly #networkPolicySet: Readonly<CompiledNetworkPolicySet> | null;
+  readonly #effectiveHttpTools: readonly string[];
   readonly #sandboxController: SandboxController | undefined;
   readonly #managedNetwork: ManagedNetworkRuntimePort | undefined;
   readonly #eventListeners = new Set<AgentSessionEventListener>();
@@ -296,6 +300,7 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
     managedNetwork?: ManagedNetworkRuntimePort,
     networkPolicySetId: string | null = null,
     networkPolicySet: Readonly<CompiledNetworkPolicySet> | null = null,
+    effectiveHttpTools: readonly string[] = [],
   ) {
     const managedIdentityMatches =
       networkPolicy === "managed-egress" &&
@@ -323,6 +328,7 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
     this.#networkPolicy = networkPolicy;
     this.#networkPolicySetId = networkPolicySetId;
     this.#networkPolicySet = networkPolicySet;
+    this.#effectiveHttpTools = Object.freeze([...effectiveHttpTools]);
     this.#sandboxController = sandboxController;
     this.#managedNetwork = managedNetwork;
     if (sandboxController !== undefined) {
@@ -375,6 +381,10 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
 
   get networkPolicySet(): Readonly<CompiledNetworkPolicySet> | null {
     return this.#networkPolicySet;
+  }
+
+  get effectiveHttpTools(): readonly string[] {
+    return this.#effectiveHttpTools;
   }
 
   declare readonly sandboxFileReader?: SandboxWorkspaceFileReaderPort;
@@ -581,6 +591,7 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
   readonly #sessionOptions: PiRuntimeFactoryOptions["sessionOptions"];
   readonly #sandbox: Readonly<PiSandboxRuntimeOptions> | undefined;
   readonly #webSearchTool: ToolDefinition<any, any> | undefined;
+  readonly #httpToolOptions: Readonly<CreateHttpToolOptions>;
   readonly #globalSettings: ReturnType<SettingsManager["getGlobalSettings"]>;
 
   private constructor(
@@ -599,6 +610,7 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
     this.#webSearchTool = options.webSearch?.apiKey == null
       ? undefined
       : createWebSearchTool(options.webSearch);
+    this.#httpToolOptions = options.httpToolOptions ?? {};
     this.#globalSettings = structuredClone(globalSettings);
   }
 
@@ -765,6 +777,7 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
       networkPolicySetId,
       effectiveNetworkPolicySetId,
       networkPolicySet,
+      effectiveHttpTools: Object.freeze([...(policy.effectiveHttpTools ?? [])]),
     });
   }
 
@@ -872,6 +885,13 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
         sessionManager: runtimeSessionManager,
         sessionStartEvent,
       }: Parameters<Parameters<typeof createAgentSessionRuntime>[0]>[0]) => {
+        const workspaceHttpConfigs = policy.effectiveHttpTools ?? [];
+        const workspaceHttpTools = workspaceHttpConfigs.map((config) =>
+          createHttpTool(config, this.#httpToolOptions));
+        const parentTools = [
+          ...(this.#webSearchTool === undefined ? [] : [this.#webSearchTool]),
+          ...workspaceHttpTools,
+        ];
         let services: AgentSessionServices;
         let configurableSessionOptions: PiSessionOptions;
         if (policy.securityProfile === "workspace-sandboxed") {
@@ -881,6 +901,7 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
             policy.networkPolicy ?? "isolated",
             policy.mounts,
             this.#webSearchTool !== undefined,
+            workspaceHttpConfigs,
           );
           services = {
             cwd: "/workspace",
@@ -897,11 +918,11 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
             ...(requested.scopedModels === undefined ? {} : { scopedModels: requested.scopedModels }),
             tools: [
               ...SANDBOX_TOOL_NAMES,
-              ...(this.#webSearchTool === undefined ? [] : [WEB_SEARCH_TOOL_NAME]),
+              ...parentTools.map((tool) => tool.name),
             ],
             customTools: [
               ...createSandboxTools(sandboxController),
-              ...(this.#webSearchTool === undefined ? [] : [this.#webSearchTool]),
+              ...parentTools,
             ],
           };
         } else {
@@ -913,13 +934,13 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
             modelRuntime: this.#modelRuntime,
           });
           const requested = (await this.#sessionOptions?.(services)) ?? {};
-          configurableSessionOptions = this.#webSearchTool === undefined
+          configurableSessionOptions = parentTools.length === 0
             ? requested
             : {
                 ...requested,
                 customTools: [
                   ...(requested.customTools ?? []),
-                  this.#webSearchTool,
+                  ...parentTools,
                 ],
               };
         }
@@ -945,14 +966,17 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
         const created = await createAgentSessionFromServices(sessionCreationOptions);
         if (
           policy.securityProfile === "unrestricted" &&
-          this.#webSearchTool !== undefined &&
-          configurableSessionOptions.noTools !== "all" &&
-          !configurableSessionOptions.excludeTools?.includes(WEB_SEARCH_TOOL_NAME)
+          parentTools.length > 0 &&
+          configurableSessionOptions.noTools !== "all"
         ) {
+          const excluded = new Set(configurableSessionOptions.excludeTools ?? []);
+          const activeParentToolNames = parentTools
+            .map((tool) => tool.name)
+            .filter((name) => !excluded.has(name));
           created.session.setActiveToolsByName([
             ...new Set([
               ...created.session.getActiveToolNames(),
-              WEB_SEARCH_TOOL_NAME,
+              ...activeParentToolNames,
             ]),
           ]);
         }
@@ -989,6 +1013,7 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
         managedNetwork,
         policy.effectiveNetworkPolicySetId,
         policy.networkPolicySet,
+        policy.effectiveHttpTools.map(({ name }) => name),
       );
       // Keep the startup observer until the fully owning wrapper has installed
       // its replayable fatal subscription; there is no unobserved proxy gap.

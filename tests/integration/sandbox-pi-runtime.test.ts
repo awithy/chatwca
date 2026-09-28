@@ -50,7 +50,10 @@ async function within<T>(promise: Promise<T>, timeoutMs = 10_000): Promise<T> {
   }
 }
 
-async function createStrictRuntime(commandTimeoutMs = 900_000): Promise<{
+async function createStrictRuntime(
+  commandTimeoutMs = 900_000,
+  httpToolFetch?: typeof globalThis.fetch,
+): Promise<{
   readonly runtime: PiConversationRuntimePort;
   readonly faux: ReturnType<typeof fauxProvider>;
 }> {
@@ -92,12 +95,30 @@ async function createStrictRuntime(commandTimeoutMs = 900_000): Promise<{
     modelRuntime: unrestrictedModelRuntime,
     strictModelRuntime,
     sandbox: { config, host, worker, hiddenPaths: [dataDir, agentDir, sessionDir] },
+    ...(httpToolFetch === undefined ? {} : {
+      httpToolOptions: { fetch: httpToolFetch },
+    }),
   });
   const runtime = await factory.createPersistent({
     workspaceId: "sandbox-abort-workspace",
     cwd: workspace,
     sessionDirectory: sessionDir,
     securityProfile: "workspace-sandboxed",
+    effectiveHttpTools: httpToolFetch === undefined ? [] : [Object.freeze({
+      name: "network_brain_search",
+      label: "Network Brain Search",
+      description: "Search local infrastructure documentation.",
+      method: "POST" as const,
+      url: "http://127.0.0.1:53147/v1/search",
+      parameters: Object.freeze({
+        type: "object",
+        additionalProperties: false,
+        required: ["query"],
+        properties: { query: { type: "string" } },
+      }),
+      timeoutMs: 1_000,
+      maxResponseBytes: 64 * 1024,
+    })],
   });
   expect(runtime.model).toMatchObject({ provider: faux.getModel().provider, id: faux.getModel().id });
   return { runtime, faux };
@@ -190,6 +211,33 @@ describe.skipIf(process.env.CHATWCA_SANDBOX_CAPABLE !== "1")("profile-selected s
         content: [{ type: "text", text: "inside worker\n" }],
       });
       expect(runtime.session.messages.at(-1)).toMatchObject({ role: "assistant" });
+    } finally {
+      await runtime.dispose();
+    }
+  }, 20_000);
+
+  it("runs a granted parent-owned HTTP tool while workspace networking remains isolated", async () => {
+    const fetch = vi.fn(async () => Response.json({
+      results: [{ citation: "network.md#router", content: "Router documentation" }],
+    }));
+    const { runtime, faux } = await createStrictRuntime(900_000, fetch as typeof globalThis.fetch);
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("network_brain_search", { query: "router" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage("Search complete"),
+    ]);
+
+    try {
+      expect(runtime.networkPolicy).toBe("isolated");
+      expect(runtime.session.getActiveToolNames()).toContain("network_brain_search");
+      expect(runtime.session.agent.state.systemPrompt).toContain("network_brain_search");
+      expect(runtime.session.agent.state.systemPrompt).toContain("workspace networking is isolated");
+      await runtime.prompt("Search the local network documentation.");
+      expect(fetch).toHaveBeenCalledOnce();
+      expect(runtime.session.messages).toContainEqual(expect.objectContaining({
+        role: "toolResult",
+        toolName: "network_brain_search",
+        content: [expect.objectContaining({ text: expect.stringContaining("Router documentation") })],
+      }));
     } finally {
       await runtime.dispose();
     }

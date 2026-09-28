@@ -206,6 +206,7 @@ export function ConversationsPage({ client, chat, server, onOpenJobs, onOpenJobR
       mounts: [...values.mounts],
       networkPolicy: values.networkPolicy,
       networkPolicySetId: values.networkPolicySetId,
+      enabledHttpTools: [...values.enabledHttpTools],
       ...(values.acknowledgeWritableMounts === true
         ? { acknowledgeWritableMounts: true as const }
         : {}),
@@ -225,6 +226,7 @@ export function ConversationsPage({ client, chat, server, onOpenJobs, onOpenJobR
       readonly mounts?: WorkspaceFormValues["mounts"];
       readonly networkPolicy?: WorkspaceFormValues["networkPolicy"];
       readonly networkPolicySetId?: string;
+      readonly enabledHttpTools?: readonly string[];
       readonly acknowledgeSecurityDowngrade?: true;
       readonly acknowledgeNetworkExposure?: true;
       readonly acknowledgeWritableMounts?: true;
@@ -245,6 +247,9 @@ export function ConversationsPage({ client, chat, server, onOpenJobs, onOpenJobR
       ...(values.networkPolicySetId === undefined
         ? {}
         : { networkPolicySetId: values.networkPolicySetId }),
+      ...(values.enabledHttpTools === undefined
+        ? {}
+        : { enabledHttpTools: [...values.enabledHttpTools] }),
       ...(values.acknowledgeSecurityDowngrade === true
         ? { acknowledgeSecurityDowngrade: true as const }
         : {}),
@@ -527,6 +532,7 @@ export function ConversationsPage({ client, chat, server, onOpenJobs, onOpenJobR
         actionPending={pendingAction !== null}
         publicSandboxConfig={server.config?.sandbox}
         publicManagedEgressConfig={server.config?.managedEgress}
+        publicHttpTools={server.config?.httpTools}
         open={sidebarOpen}
         onDismiss={() => setSidebarOpen(false)}
         onOpenJobs={() => {
@@ -648,6 +654,9 @@ export function ConversationsPage({ client, chat, server, onOpenJobs, onOpenJobR
                       <div><dt>Model</dt><dd>{selectedConversation?.model?.name ?? selectedConversation?.model?.id ?? "—"}</dd></div>
                       <div><dt>Context</dt><dd>{mobileContextLabel(selectedConversation)}</dd></div>
                       <div><dt>Security</dt><dd>{mobileSecurityLabel(selectedConversation)}</dd></div>
+                      <div><dt>HTTP tools</dt><dd>{selectedConversation === undefined
+                        ? "—"
+                        : selectedConversation.effectiveHttpTools.join(", ") || "None"}</dd></div>
                     </dl>
                     <div className="mobile-conversation-actions">
                       {mobileOwner?.kind === "scheduled-job" && (

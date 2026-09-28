@@ -28,7 +28,7 @@ afterEach(() => {
 });
 
 describe("openDatabase", () => {
-  it("creates nested storage and initializes the version-seven schema", () => {
+  it("creates nested storage and initializes the version-eight schema", () => {
     const dataDir = path.join(temporaryDirectory(), "nested", "data");
     const database = openDatabase(dataDir);
 
@@ -64,7 +64,7 @@ describe("openDatabase", () => {
     database.close();
   });
 
-  it("accepts and preserves an existing version-seven database", () => {
+  it("accepts and preserves an existing version-eight database", () => {
     const dataDir = temporaryDirectory();
     const first = openDatabase(dataDir);
     first.connection
@@ -361,7 +361,37 @@ describe("openDatabase", () => {
     expect(migrated.connection.prepare("SELECT * FROM jobs").all()).toEqual([]);
     expect(migrated.connection.prepare("SELECT * FROM job_runs").all()).toEqual([]);
     expect(migrated.connection.prepare("SELECT id FROM workspaces").all()).toEqual([{ id: "v6" }]);
-    expect(migrated.connection.pragma("user_version", { simple: true })).toBe(7);
+    expect(migrated.connection.pragma("user_version", { simple: true })).toBe(DATABASE_SCHEMA_VERSION);
+    migrated.close();
+  });
+
+  it("migrates version-seven databases to empty HTTP tool selections", () => {
+    const dataDir = temporaryDirectory();
+    const filename = path.join(dataDir, DATABASE_FILENAME);
+    const legacy = new Database(filename);
+    legacy.exec(`
+      CREATE TABLE workspaces (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL UNIQUE,
+        session_storage TEXT NOT NULL DEFAULT 'pi-default',
+        security_profile TEXT NOT NULL DEFAULT 'unrestricted',
+        network_policy TEXT NOT NULL DEFAULT 'isolated',
+        network_policy_set_id TEXT NOT NULL DEFAULT 'default',
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE workspace_mounts (
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        name TEXT NOT NULL, source_path TEXT NOT NULL, access TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, name)
+      );
+      INSERT INTO workspaces VALUES
+        ('v7', 'Version 7', '/work/v7', 'pi-default', 'unrestricted', 'isolated', 'default', 1, 2);
+      PRAGMA user_version = 7;
+    `);
+    legacy.close();
+
+    const migrated = openDatabase(dataDir);
+    expect(migrated.connection.prepare("SELECT * FROM workspace_http_tools").all()).toEqual([]);
+    expect(migrated.connection.pragma("user_version", { simple: true })).toBe(DATABASE_SCHEMA_VERSION);
     migrated.close();
   });
 
@@ -499,14 +529,14 @@ describe("openDatabase", () => {
     const dataDir = temporaryDirectory();
     const filename = path.join(dataDir, DATABASE_FILENAME);
     const unsupported = new Database(filename);
-    unsupported.pragma("user_version = 8");
+    unsupported.pragma("user_version = 9");
     unsupported.close();
 
     expect(() => openDatabase(dataDir)).toThrow(
       UnsupportedDatabaseVersionError,
     );
     expect(() => openDatabase(dataDir)).toThrow(
-      /schema version 8; expected 7/,
+      /schema version 9; expected 8/,
     );
 
     const afterFailure = new Database(filename);

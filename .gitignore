@@ -10,3 +10,4 @@ native/network-helper/target/
 .env
 .env.*
 !.env.example
+/tool-catalog.json

@@ -77,6 +77,19 @@ describe("SandboxResourceLoader", () => {
     expect(loader.getSystemPrompt()).toContain("Brave");
   });
 
+  it("discloses granted parent-owned HTTP tools in an isolated workspace", async () => {
+    const { cwd } = await workspace();
+    const loader = await SandboxResourceLoader.create(cwd, "isolated", [], false, [{
+      name: "network_brain_search",
+      description: "Search local infrastructure documentation.",
+    }]);
+
+    expect(loader.getSystemPrompt()).toContain("network_brain_search");
+    expect(loader.getSystemPrompt()).toContain("ChatWCA parent");
+    expect(loader.getSystemPrompt()).toContain("workspace networking is isolated");
+    expect(loader.getSystemPrompt()).toContain("may disclose");
+  });
+
   it("rejects a noncanonical workspace and ignores symlink context files", async () => {
     const { root, cwd } = await workspace();
     const outside = path.join(root, "outside.md");

@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import type {
   PublicManagedEgressConfig,
   PublicSandboxConfig,
+  PublicHttpTool,
   WorkspaceSummary,
 } from "../../src/shared/protocol.js";
 import { WorkspaceForm } from "../../src/web/src/components/WorkspaceForm.js";
@@ -42,6 +43,14 @@ const managedConfig: PublicManagedEgressConfig = {
   functionalProbeSucceeded: true,
 };
 
+const httpTools: readonly PublicHttpTool[] = [{
+  name: "network_brain_search",
+  label: "Network Brain Search",
+  description: "Search indexed infrastructure documentation.",
+  method: "POST",
+  url: "http://127.0.0.1:53147/v1/search",
+}];
+
 const workspace: WorkspaceSummary = {
   id: "workspace-1",
   name: "Deep Project",
@@ -56,6 +65,8 @@ const workspace: WorkspaceSummary = {
   networkPolicySetId: "default",
   effectiveNetworkPolicySetId: null,
   networkPolicyIssue: null,
+  enabledHttpTools: [],
+  effectiveHttpTools: [],
   createdAt: 1,
   updatedAt: 2,
   available: true,
@@ -77,6 +88,7 @@ function sidebar(workspaces: readonly WorkspaceSummary[], selectedWorkspaceId: s
     actionPending: false,
     publicSandboxConfig: optionalConfig,
     publicManagedEgressConfig: managedConfig,
+    publicHttpTools: httpTools,
     open: false,
     onDismiss: () => undefined,
     onOpenJobs: () => undefined,
@@ -97,6 +109,7 @@ function renderForm(
     mode: "create",
     publicSandboxConfig,
     publicManagedEgressConfig: managedConfig,
+    publicHttpTools: httpTools,
     securityControlsLocked: false,
     submitting: false,
     error: null,
@@ -295,6 +308,7 @@ describe("workspace form", () => {
       mounts: [],
       networkPolicy: "managed-egress",
       networkPolicySetId: "web",
+      enabledHttpTools: [],
     });
 
     expect(plan.addsNetworkExposure).toBe(true);
@@ -323,6 +337,7 @@ describe("workspace form", () => {
       mounts: [{ name: "shared", source: "/srv/shared", access: "read-write" }],
       networkPolicy: sandboxed.networkPolicy,
       networkPolicySetId: sandboxed.networkPolicySetId,
+      enabledHttpTools: [],
     });
 
     expect(plan.addsWritableMounts).toBe(true);
@@ -330,6 +345,66 @@ describe("workspace form", () => {
       mounts: [{ name: "shared", source: "/srv/shared", access: "read-write" }],
       acknowledgeWritableMounts: true,
     });
+  });
+
+  it("discloses fixed parent-owned HTTP tools and defaults them off", () => {
+    const html = renderForm(optionalConfig);
+
+    expect(html).toContain("Parent-owned HTTP tools");
+    expect(html).toContain("Network Brain Search");
+    expect(html).toContain("Search indexed infrastructure documentation.");
+    expect(html).toContain("POST http://127.0.0.1:53147/v1/search");
+    expect(html).toContain("outside workspace sandbox networking");
+    expect(html).not.toMatch(/type="checkbox" checked=""[^>]*\/?>\s*<span><strong>Network Brain Search/);
+  });
+
+  it("plans changed HTTP tool authority but omits an unchanged selection", () => {
+    const selected = { ...workspace, enabledHttpTools: ["network_brain_search"] };
+    const baseValues = {
+      name: selected.name,
+      path: selected.path,
+      sessionStorage: selected.sessionStorage,
+      securityProfile: selected.securityProfile,
+      mounts: selected.mounts,
+      networkPolicy: selected.networkPolicy,
+      networkPolicySetId: selected.networkPolicySetId,
+    };
+
+    expect(workspaceUpdatePlan(selected, {
+      ...baseValues,
+      enabledHttpTools: ["network_brain_search"],
+    }).changes).not.toHaveProperty("enabledHttpTools");
+    expect(workspaceUpdatePlan(selected, {
+      ...baseValues,
+      enabledHttpTools: [],
+    }).changes).toMatchObject({ enabledHttpTools: [] });
+  });
+
+  it("shows unavailable stored selections and locks tool authority while live", () => {
+    const html = renderForm(optionalConfig, {
+      mode: "edit",
+      initialValues: {
+        name: workspace.name,
+        path: workspace.path,
+        sessionStorage: workspace.sessionStorage,
+        securityProfile: workspace.securityProfile,
+        mounts: [],
+        networkPolicy: workspace.networkPolicy,
+        networkPolicySetId: workspace.networkPolicySetId,
+        effectiveSecurityProfile: workspace.effectiveSecurityProfile,
+        effectiveNetworkPolicy: workspace.effectiveNetworkPolicy,
+        effectiveNetworkPolicySetId: workspace.effectiveNetworkPolicySetId,
+        networkPolicyIssue: null,
+        enabledHttpTools: ["retired_search"],
+        effectiveHttpTools: [],
+      },
+      securityControlsLocked: true,
+    });
+
+    expect(html).toContain("retired_search — unavailable");
+    expect(html).toContain("Uncheck it to remove the selection");
+    expect(html).toContain("Close this workspace’s live conversations before changing HTTP tool access");
+    expect(html).toMatch(/<fieldset[^>]*class="workspace-http-tools-control"[^>]*disabled=""/);
   });
 
   it("implements disabled, optional, and required profile semantics", () => {

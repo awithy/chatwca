@@ -20,6 +20,8 @@ import {
   toAppError,
 } from "../shared/errors.js";
 import {
+  HTTP_TOOL_NAME_PATTERN,
+  MAX_WORKSPACE_HTTP_TOOLS,
   MAX_WORKSPACE_MOUNTS,
   NETWORK_POLICY_SET_ID_MAX_LENGTH,
   NETWORK_POLICY_SET_ID_PATTERN,
@@ -43,6 +45,7 @@ import {
   type CompiledNetworkPolicySet,
 } from "./network/config.js";
 import { compileDestinationPolicy } from "./network/policy.js";
+import type { HttpToolCatalog, HttpToolConfig } from "./http-tool-catalog.js";
 
 interface WorkspaceRow {
   readonly id: string;
@@ -61,6 +64,11 @@ interface WorkspaceMountRow {
   readonly name: string;
   readonly source_path: string;
   readonly access: WorkspaceMountAccess;
+}
+
+interface WorkspaceHttpToolRow {
+  readonly workspace_id: string;
+  readonly tool_name: string;
 }
 
 export const WORKSPACE_SESSION_DIRECTORY = path.join(".chatwca", "sessions");
@@ -133,6 +141,8 @@ export interface WorkspaceRepositoryOptions {
   readonly fileSystem?: WorkspaceFileSystem;
   readonly policy?: Readonly<WorkspacePolicyInputs>;
   readonly sandboxAdmission?: Pick<SandboxWorkspaceAdmission, "admit" | "admitMount">;
+  /** Startup-frozen definitions used to validate selections and resolve runtime grants. */
+  readonly httpTools?: Readonly<HttpToolCatalog>;
 }
 
 export interface RuntimeWorkspacePolicy {
@@ -146,6 +156,8 @@ export interface RuntimeWorkspacePolicy {
   readonly networkPolicySetId: NetworkPolicySetId;
   readonly effectiveNetworkPolicySetId: NetworkPolicySetId | null;
   readonly networkPolicySet: CompiledNetworkPolicySet | null;
+  /** Immutable effective parent-owned definitions captured for this runtime. */
+  readonly effectiveHttpTools: readonly Readonly<HttpToolConfig>[];
 }
 
 export interface CreateWorkspaceInput {
@@ -156,6 +168,7 @@ export interface CreateWorkspaceInput {
   readonly mounts?: readonly WorkspaceMount[];
   readonly networkPolicy?: SandboxNetworkPolicy;
   readonly networkPolicySetId?: NetworkPolicySetId;
+  readonly enabledHttpTools?: readonly string[];
   readonly acknowledgeWritableMounts?: true;
 }
 
@@ -166,12 +179,17 @@ export interface UpdateWorkspaceInput {
   readonly mounts?: readonly WorkspaceMount[];
   readonly networkPolicy?: SandboxNetworkPolicy;
   readonly networkPolicySetId?: NetworkPolicySetId;
+  readonly enabledHttpTools?: readonly string[];
   readonly acknowledgeSecurityDowngrade?: true;
   readonly acknowledgeNetworkExposure?: true;
   readonly acknowledgeWritableMounts?: true;
 }
 
-function workspaceFromRow(row: WorkspaceRow, mounts: readonly WorkspaceMount[]): Workspace {
+function workspaceFromRow(
+  row: WorkspaceRow,
+  mounts: readonly WorkspaceMount[],
+  enabledHttpTools: readonly string[],
+): Workspace {
   if (
     row.security_profile !== "unrestricted" &&
     row.security_profile !== "workspace-sandboxed"
@@ -194,6 +212,7 @@ function workspaceFromRow(row: WorkspaceRow, mounts: readonly WorkspaceMount[]):
     mounts: [...mounts],
     networkPolicy: row.network_policy,
     networkPolicySetId: row.network_policy_set_id,
+    enabledHttpTools: [...enabledHttpTools],
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -244,6 +263,7 @@ export class WorkspaceRepository {
   readonly #policy: Readonly<WorkspacePolicyInputs>;
   readonly #sandboxAdmission: Pick<SandboxWorkspaceAdmission, "admit" | "admitMount">;
   readonly #networkPolicySets: ReadonlyMap<string, CompiledNetworkPolicySet>;
+  readonly #httpToolByName: ReadonlyMap<string, Readonly<HttpToolConfig>>;
   readonly #listStatement: Database.Statement<[], WorkspaceRow>;
   readonly #getStatement: Database.Statement<[string], WorkspaceRow>;
   readonly #insertStatement: Database.Statement<
@@ -256,6 +276,9 @@ export class WorkspaceRepository {
   readonly #listMountsStatement: Database.Statement<[string], WorkspaceMountRow>;
   readonly #insertMountStatement: Database.Statement<[string, string, string, WorkspaceMountAccess]>;
   readonly #deleteMountsStatement: Database.Statement<[string]>;
+  readonly #listHttpToolsStatement: Database.Statement<[string], WorkspaceHttpToolRow>;
+  readonly #insertHttpToolStatement: Database.Statement<[string, string]>;
+  readonly #deleteHttpToolsStatement: Database.Statement<[string]>;
   readonly #referencingJobStatement: Database.Statement<[string], { readonly found: number }>;
 
   constructor(
@@ -277,6 +300,9 @@ export class WorkspaceRepository {
     });
     this.#networkPolicySets = new Map(
       suppliedPolicy.networkPolicySets ?? [[DEFAULT_NETWORK_POLICY_SET_ID, LEGACY_DEFAULT_POLICY_SET]],
+    );
+    this.#httpToolByName = new Map(
+      (options.httpTools?.tools ?? []).map((tool) => [tool.name, tool]),
     );
     this.#sandboxAdmission = options.sandboxAdmission ?? new SandboxWorkspaceAdmission();
 
@@ -308,6 +334,15 @@ export class WorkspaceRepository {
       );
       this.#deleteMountsStatement = connection.prepare<[string]>(
         "DELETE FROM workspace_mounts WHERE workspace_id = ?",
+      );
+      this.#listHttpToolsStatement = connection.prepare<[string], WorkspaceHttpToolRow>(
+        "SELECT workspace_id, tool_name FROM workspace_http_tools WHERE workspace_id = ? ORDER BY tool_name",
+      );
+      this.#insertHttpToolStatement = connection.prepare<[string, string]>(
+        "INSERT INTO workspace_http_tools (workspace_id, tool_name) VALUES (?, ?)",
+      );
+      this.#deleteHttpToolsStatement = connection.prepare<[string]>(
+        "DELETE FROM workspace_http_tools WHERE workspace_id = ?",
       );
       this.#referencingJobStatement = connection.prepare<[string], { readonly found: number }>(
         "SELECT 1 AS found FROM jobs WHERE workspace_id = ? LIMIT 1",
@@ -382,6 +417,10 @@ export class WorkspaceRepository {
       networkPolicySet: evaluation.effectiveNetworkPolicySetId === null
         ? null
         : this.#networkPolicySets.get(evaluation.effectiveNetworkPolicySetId) ?? null,
+      effectiveHttpTools: Object.freeze(workspace.enabledHttpTools.flatMap((name) => {
+        const tool = this.#httpToolByName.get(name);
+        return tool === undefined ? [] : [tool];
+      })),
     });
   }
 
@@ -427,6 +466,7 @@ export class WorkspaceRepository {
       throw new AppError(ERROR_CODES.INVALID_WORKSPACE_PATH);
     }
     const mounts = this.#validMounts(input.mounts ?? [], canonicalPath);
+    const enabledHttpTools = this.#validHttpTools(input.enabledHttpTools ?? []);
     const addsWritableMounts = mounts.some(({ access }) => access === "read-write");
     if (input.acknowledgeWritableMounts === true && !addsWritableMounts) {
       throw new AppError(ERROR_CODES.INVALID_COMMAND);
@@ -455,6 +495,9 @@ export class WorkspaceRepository {
           for (const mount of mounts) {
             this.#insertMountStatement.run(id, mount.name, mount.source, mount.access);
           }
+          for (const toolName of enabledHttpTools) {
+            this.#insertHttpToolStatement.run(id, toolName);
+          }
         })();
       } catch (error) {
         if (isDuplicatePathConstraint(error)) {
@@ -477,6 +520,7 @@ export class WorkspaceRepository {
       mounts: [...mounts],
       networkPolicy,
       networkPolicySetId,
+      enabledHttpTools: [...enabledHttpTools],
       createdAt: now,
       updatedAt: now,
     });
@@ -493,7 +537,8 @@ export class WorkspaceRepository {
       changes.securityProfile === undefined &&
       changes.mounts === undefined &&
       changes.networkPolicy === undefined &&
-      changes.networkPolicySetId === undefined
+      changes.networkPolicySetId === undefined &&
+      changes.enabledHttpTools === undefined
     ) {
       throw new AppError(ERROR_CODES.INVALID_COMMAND);
     }
@@ -607,6 +652,9 @@ export class WorkspaceRepository {
     ) {
       this.#assertPathPolicy(canonicalPath, securityProfile, networkPolicy, mounts);
     }
+    const enabledHttpTools = changes.enabledHttpTools === undefined
+      ? current.enabledHttpTools
+      : this.#validHttpTools(changes.enabledHttpTools);
     const now = this.#clock();
 
     this.#database(() => {
@@ -630,6 +678,12 @@ export class WorkspaceRepository {
               this.#insertMountStatement.run(workspaceId, mount.name, mount.source, mount.access);
             }
           }
+          if (changes.enabledHttpTools !== undefined) {
+            this.#deleteHttpToolsStatement.run(workspaceId);
+            for (const toolName of enabledHttpTools) {
+              this.#insertHttpToolStatement.run(workspaceId, toolName);
+            }
+          }
         })();
       } catch (error) {
         if (isDuplicatePathConstraint(error)) {
@@ -651,6 +705,7 @@ export class WorkspaceRepository {
       mounts: [...mounts],
       networkPolicy,
       networkPolicySetId,
+      enabledHttpTools: [...enabledHttpTools],
       updatedAt: now,
     });
   }
@@ -695,7 +750,38 @@ export class WorkspaceRepository {
     if (mounts.length > MAX_WORKSPACE_MOUNTS) {
       throw new AppError(ERROR_CODES.DATABASE_ERROR);
     }
-    return workspaceFromRow(row, Object.freeze(mounts));
+    const enabledHttpTools = this.#listHttpToolsStatement.all(row.id).map(({ workspace_id, tool_name }) => {
+      if (
+        workspace_id !== row.id ||
+        !new RegExp(HTTP_TOOL_NAME_PATTERN, "u").test(tool_name)
+      ) {
+        throw new AppError(ERROR_CODES.DATABASE_ERROR);
+      }
+      return tool_name;
+    });
+    if (enabledHttpTools.length > MAX_WORKSPACE_HTTP_TOOLS) {
+      throw new AppError(ERROR_CODES.DATABASE_ERROR);
+    }
+    return workspaceFromRow(row, Object.freeze(mounts), Object.freeze(enabledHttpTools));
+  }
+
+  #validHttpTools(input: readonly string[]): readonly string[] {
+    if (!Array.isArray(input) || input.length > MAX_WORKSPACE_HTTP_TOOLS) {
+      throw new AppError(ERROR_CODES.INVALID_COMMAND);
+    }
+    const names = new Set<string>();
+    for (const name of input) {
+      if (
+        typeof name !== "string" ||
+        !new RegExp(HTTP_TOOL_NAME_PATTERN, "u").test(name) ||
+        names.has(name) ||
+        !this.#httpToolByName.has(name)
+      ) {
+        throw new AppError(ERROR_CODES.INVALID_COMMAND);
+      }
+      names.add(name);
+    }
+    return Object.freeze([...names].sort());
   }
 
   #validMounts(input: readonly WorkspaceMount[], workspacePath: string): readonly WorkspaceMount[] {
@@ -812,6 +898,7 @@ export class WorkspaceRepository {
       mounts: [...mounts],
       networkPolicy,
       networkPolicySetId: DEFAULT_NETWORK_POLICY_SET_ID,
+      enabledHttpTools: [],
       createdAt: 0,
       updatedAt: 0,
     };
@@ -1046,7 +1133,14 @@ export class WorkspaceRepository {
   #summary(workspace: Workspace): WorkspaceSummary {
     const available = this.#isAvailable(workspace);
     const evaluation = this.#evaluatePolicy(workspace);
-    return { ...workspace, available, ...evaluation, usable: available && evaluation.usable };
+    return {
+      ...workspace,
+      enabledHttpTools: [...workspace.enabledHttpTools],
+      effectiveHttpTools: workspace.enabledHttpTools.filter((name) => this.#httpToolByName.has(name)),
+      available,
+      ...evaluation,
+      usable: available && evaluation.usable,
+    };
   }
 
   #database<T>(operation: () => T): T {

@@ -11,6 +11,10 @@ import {
 } from "./network/config.js";
 import { loadJobConfig, type JobConfig } from "./job-config.js";
 import { loadWebSearchConfig, type WebSearchConfig } from "./web-search.js";
+import {
+  loadHttpToolCatalog,
+  type HttpToolCatalog,
+} from "./http-tool-catalog.js";
 
 export { ConfigurationError } from "./sandbox/config.js";
 
@@ -47,6 +51,8 @@ export interface ServerConfig {
   readonly jobs: Readonly<JobConfig>;
   /** Optional parent-owned Brave Search tool configuration; the key is never public. */
   readonly webSearch: Readonly<WebSearchConfig>;
+  /** Startup-only parent-owned HTTP tools and exact per-workspace grants. */
+  readonly httpTools: Readonly<HttpToolCatalog>;
 }
 
 function optionalNonEmpty(
@@ -124,6 +130,7 @@ export function loadConfig(
   });
   const jobs = loadJobConfig(environment);
   const webSearch = loadWebSearchConfig(environment);
+  const httpTools = loadHttpToolCatalog(environment, processCwd);
 
   return Object.freeze({
     host,
@@ -156,5 +163,6 @@ export function loadConfig(
     managedNetwork,
     jobs,
     webSearch,
+    httpTools,
   });
 }

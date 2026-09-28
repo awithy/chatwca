@@ -148,6 +148,48 @@ test("creates immutable workspace-local storage and shows it in workspace info",
   await expect(page.getByLabel("Store sessions in this workspace")).toHaveCount(0);
 });
 
+test("enables and disables parent-owned HTTP tools per workspace", async ({ page }) => {
+  const name = "HTTP tool workspace";
+  await waitForConnected(page);
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await page.getByLabel("Name").fill(name);
+  await page.getByLabel("Directory path").fill("/tmp/chatwca-http-tool-workspace");
+  const tool = page.getByRole("checkbox", { name: /Network Brain Search/ });
+  await expect(tool).not.toBeChecked();
+  await expect(page.getByText("POST http://127.0.0.1:53147/v1/search")).toBeVisible();
+  await tool.check();
+  await page.getByRole("button", { name: "Add workspace", exact: true }).click();
+
+  await page.getByRole("button", { name: `Workspace actions for ${name}` }).click();
+  await page.getByRole("button", { name: `Workspace info ${name}` }).click();
+  const info = page.getByRole("region", { name: `Workspace info for ${name}` });
+  await expect(info).toContainText("Stored HTTP tools");
+  await expect(info).toContainText("Effective HTTP tools");
+  await expect(info).toContainText("network_brain_search");
+  await info.getByRole("button", { name: "Close" }).click();
+
+  await page.getByRole("button", { name: `New conversation in ${name}` }).click();
+  await expect(page.getByLabel(/1 parent-owned HTTP tool: network_brain_search/)).toBeVisible();
+  await page.getByRole("button", { name: `Workspace actions for ${name}` }).click();
+  await page.getByRole("button", { name: `Edit workspace ${name}` }).click();
+  await expect(tool).toBeChecked();
+  await expect(tool).toBeDisabled();
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+
+  await page.getByRole("button", { name: `Workspace actions for ${name}` }).click();
+  await page.getByRole("button", { name: `Edit workspace ${name}` }).click();
+  await tool.uncheck();
+  await page.getByRole("button", { name: "Save changes" }).click();
+
+  // The action menu remains open so focus can return to the exact Edit trigger.
+  await page.getByRole("button", { name: `Workspace info ${name}` }).click();
+  const updatedInfo = page.getByRole("region", { name: `Workspace info for ${name}` });
+  await expect(updatedInfo).toContainText("Stored HTTP toolsNone");
+  await expect(updatedInfo).toContainText("Effective HTTP toolsNone");
+  await expect(updatedInfo).toContainText("Unavailable HTTP tool selectionsNone");
+});
+
 test("marks an unavailable workspace and disables path-dependent actions", async ({ page }) => {
   await waitForConnected(page);
   await addWorkspace(
@@ -247,7 +289,7 @@ test("busy workspace mutation is rejected and removal retains closed sessions", 
   await expect(page.getByLabel("Name")).toBeEnabled();
   await expect(page.getByLabel("Directory path")).toBeDisabled();
   await expect(page.getByLabel("Security profile", { exact: true })).toBeDisabled();
-  await expect(page.getByText("Close this workspace’s live conversations")).toBeVisible();
+  await expect(page.getByText("Close this workspace’s live conversations before changing its directory", { exact: false })).toBeVisible();
   await page.getByRole("button", { name: "Cancel" }).click();
 
   page.once("dialog", (dialog) => dialog.accept());

@@ -88,6 +88,7 @@ export interface ProtocolWorkspaceRepository {
     readonly mounts?: WorkspaceSummary["mounts"];
     readonly networkPolicy?: WorkspaceSummary["networkPolicy"];
     readonly networkPolicySetId?: WorkspaceSummary["networkPolicySetId"];
+    readonly enabledHttpTools?: readonly string[];
     readonly acknowledgeWritableMounts?: true;
   }): WorkspaceSummary;
   update(workspaceId: string, changes: UpdateWorkspaceInput): WorkspaceSummary;
@@ -232,6 +233,9 @@ export async function dispatchClientCommand(
         ...(command.networkPolicySetId === undefined
           ? {}
           : { networkPolicySetId: command.networkPolicySetId }),
+        ...(command.enabledHttpTools === undefined
+          ? {}
+          : { enabledHttpTools: command.enabledHttpTools }),
         ...(command.acknowledgeWritableMounts === undefined
           ? {}
           : { acknowledgeWritableMounts: command.acknowledgeWritableMounts }),
@@ -247,13 +251,15 @@ export async function dispatchClientCommand(
       const mounts = command.mounts;
       const networkPolicy = command.networkPolicy;
       const networkPolicySetId = command.networkPolicySetId;
+      const enabledHttpTools = command.enabledHttpTools;
       if (
         (
           command.path !== undefined ||
           securityProfile !== undefined ||
           mounts !== undefined ||
           networkPolicy !== undefined ||
-          networkPolicySetId !== undefined
+          networkPolicySetId !== undefined ||
+          enabledHttpTools !== undefined
         ) &&
         registry.hasLiveWorkspace(command.workspaceId)
       ) {
@@ -272,6 +278,7 @@ export async function dispatchClientCommand(
         ...(networkPolicySetId === undefined
           ? {}
           : { networkPolicySetId }),
+        ...(enabledHttpTools === undefined ? {} : { enabledHttpTools }),
         ...(command.acknowledgeSecurityDowngrade === undefined
           ? {}
           : { acknowledgeSecurityDowngrade: command.acknowledgeSecurityDowngrade }),

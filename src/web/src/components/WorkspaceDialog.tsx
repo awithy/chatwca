@@ -2,6 +2,7 @@ import * as React from "react";
 import { useId, type RefObject } from "react";
 
 import type {
+  PublicHttpTool,
   PublicManagedEgressConfig,
   PublicSandboxConfig,
 } from "../../../shared/protocol.js";
@@ -17,6 +18,7 @@ export interface WorkspaceDialogProps {
   readonly initialValues?: WorkspaceFormInitialValues;
   readonly publicSandboxConfig: PublicSandboxConfig;
   readonly publicManagedEgressConfig: PublicManagedEgressConfig;
+  readonly publicHttpTools: readonly PublicHttpTool[];
   readonly securityControlsLocked: boolean;
   readonly submitting: boolean;
   readonly error: string | null;
@@ -30,6 +32,7 @@ export function WorkspaceDialog({
   initialValues,
   publicSandboxConfig,
   publicManagedEgressConfig,
+  publicHttpTools,
   securityControlsLocked,
   submitting,
   error,
@@ -52,6 +55,7 @@ export function WorkspaceDialog({
         titleId={titleId}
         publicSandboxConfig={publicSandboxConfig}
         publicManagedEgressConfig={publicManagedEgressConfig}
+        publicHttpTools={publicHttpTools}
         securityControlsLocked={securityControlsLocked}
         submitting={submitting}
         error={error}

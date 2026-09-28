@@ -22,6 +22,7 @@ import {
   DEFAULT_WEB_SEARCH_TIMEOUT_MS,
   loadWebSearchConfig,
 } from "../../src/server/web-search.js";
+import { loadHttpToolCatalog } from "../../src/server/http-tool-catalog.js";
 
 describe("loadConfig", () => {
   it("applies defaults", () => {
@@ -42,6 +43,7 @@ describe("loadConfig", () => {
       managedNetwork: loadManagedNetworkConfig({}, "disabled", { processCwd: cwd }),
       jobs: loadJobConfig({}),
       webSearch: loadWebSearchConfig({}),
+      httpTools: loadHttpToolCatalog({}, cwd),
     });
   });
 
@@ -83,6 +85,7 @@ describe("loadConfig", () => {
         apiKey: "brave-secret",
         timeoutMs: 3500,
       },
+      httpTools: loadHttpToolCatalog({}, cwd),
     });
     expect(Object.isFrozen(config)).toBe(true);
   });
@@ -194,5 +197,6 @@ describe("loadConfig", () => {
       apiKey: null,
       timeoutMs: DEFAULT_WEB_SEARCH_TIMEOUT_MS,
     });
+    expect(config.httpTools).toEqual({ sourcePath: null, tools: [] });
   });
 });

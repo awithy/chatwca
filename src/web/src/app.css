@@ -492,7 +492,8 @@ pre {
 }
 
 .destination-policy-control,
-.workspace-mounts-control {
+.workspace-mounts-control,
+.workspace-http-tools-control {
   display: grid;
   gap: 0.45rem;
   min-width: 0;
@@ -509,7 +510,8 @@ pre {
   background: var(--code-bg);
 }
 
-.workspace-mounts-control legend {
+.workspace-mounts-control legend,
+.workspace-http-tools-control legend {
   padding: 0 0.35rem;
   color: var(--text);
   font-size: 0.72rem;
@@ -518,6 +520,80 @@ pre {
 
 .workspace-mounts-help {
   max-width: 38rem;
+}
+
+.workspace-http-tools-control {
+  gap: 0.65rem;
+  margin-top: 0.15rem;
+  background: var(--code-bg);
+}
+
+.workspace-http-tools-list {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.workspace-http-tool-option {
+  display: grid;
+  grid-template-columns: 1rem minmax(0, 1fr);
+  align-items: start;
+  gap: 0.6rem;
+  padding: 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  color: var(--text) !important;
+  background: var(--panel-raised);
+  cursor: pointer;
+}
+
+.workspace-http-tool-option input {
+  width: 1rem;
+  height: 1rem;
+  margin: 0.12rem 0 0;
+  accent-color: var(--accent);
+}
+
+.workspace-http-tool-option > span {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.workspace-http-tool-option strong {
+  font-size: 0.72rem;
+}
+
+.workspace-http-tool-option small {
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-weight: 400;
+  line-height: 1.4;
+}
+
+.workspace-http-tool-option code {
+  color: var(--subtle);
+  font-size: 0.62rem;
+  overflow-wrap: anywhere;
+}
+
+.workspace-http-tool-option.is-unavailable {
+  border-color: var(--warning);
+  background: var(--warning-bg);
+}
+
+.workspace-http-tools-control:disabled .workspace-http-tool-option {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.workspace-http-tools-empty {
+  padding: 0.75rem;
+  border: 1px dashed var(--border-strong);
+  border-radius: 0.45rem;
+  color: var(--subtle);
+  font-size: 0.68rem;
+  text-align: center;
+  background: var(--panel);
 }
 
 .workspace-mounts-empty {
@@ -1458,7 +1534,8 @@ pre {
   font-size: 0.62rem;
 }
 
-.security-badge {
+.security-badge,
+.http-tools-badge {
   display: inline-flex;
   align-items: center;
   min-height: 1.4rem;
@@ -1469,6 +1546,12 @@ pre {
   font-weight: 800;
   letter-spacing: 0.035em;
   text-transform: none;
+}
+
+.http-tools-badge {
+  color: var(--warning-text);
+  background: var(--warning-bg);
+  cursor: help;
 }
 
 .security-sandboxed,

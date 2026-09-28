@@ -55,6 +55,7 @@ import {
 import { publicSandboxConfig } from "./sandbox/config.js";
 import { publicManagedEgressConfig } from "./network/config.js";
 import { publicJobConfig } from "./job-config.js";
+import { publicHttpTools } from "./http-tool-catalog.js";
 import { JobHookPathAdmission } from "./job-hook-path.js";
 import { JobHookRunner } from "./job-hook-runner.js";
 import { JobRepository } from "./job-repository.js";
@@ -212,6 +213,7 @@ export function createChatWcaServer(
         config.managedNetwork,
         services?.managedNetworkFunctionalProbeSucceeded ?? false,
       ),
+      httpTools: publicHttpTools(config.httpTools),
       jobs: publicJobConfig(config.jobs),
     });
   });
@@ -572,6 +574,7 @@ export async function startChatWcaServer(
           networkHelperDirectory: loadedConfig.managedNetwork.helperDirectory,
           networkPolicySets: loadedConfig.managedNetwork.policySets,
         },
+        httpTools: loadedConfig.httpTools,
       }))
     )(database.connection, config);
     const hookPaths = new JobHookPathAdmission({

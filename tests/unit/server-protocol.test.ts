@@ -240,6 +240,7 @@ describe("server WebSocket protocol", () => {
       securityProfile: "workspace-sandboxed",
       networkPolicy: "managed-egress",
       networkPolicySetId: "github",
+      enabledHttpTools: ["network_brain_search"],
     }), registry, history, workspaces);
     expect(workspaces.create).toHaveBeenCalledWith({
       name: "Managed",
@@ -248,6 +249,7 @@ describe("server WebSocket protocol", () => {
       securityProfile: "workspace-sandboxed",
       networkPolicy: "managed-egress",
       networkPolicySetId: "github",
+      enabledHttpTools: ["network_brain_search"],
     });
 
     const renamed = await dispatchClientCommand(command({
@@ -287,6 +289,12 @@ describe("server WebSocket protocol", () => {
       workspaceId: workspace.id,
       networkPolicySetId: "github",
       acknowledgeNetworkExposure: true,
+    }), registry, history, workspaces)).rejects.toMatchObject({ code: ERROR_CODES.WORKSPACE_BUSY });
+    await expect(dispatchClientCommand(command({
+      type: "workspace.update",
+      requestId: "http-tools",
+      workspaceId: workspace.id,
+      enabledHttpTools: ["network_brain_search"],
     }), registry, history, workspaces)).rejects.toMatchObject({ code: ERROR_CODES.WORKSPACE_BUSY });
     await expect(dispatchClientCommand(command({
       type: "workspace.delete",

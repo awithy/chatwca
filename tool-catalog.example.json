@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "tools": [
+    {
+      "name": "network_brain_search",
+      "label": "Network Brain Search",
+      "description": "Search locally indexed networking and infrastructure documentation. Use this for questions about networks, hosts, services, and infrastructure configuration. Results include source citations and document excerpts.",
+      "method": "POST",
+      "url": "http://127.0.0.1:53147/v1/search",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["query"],
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000,
+            "description": "The networking or infrastructure question to search for."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10,
+            "description": "Maximum number of source chunks to return."
+          }
+        }
+      },
+      "timeoutMs": 30000,
+      "maxResponseBytes": 1048576
+    }
+  ]
+}

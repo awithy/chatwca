@@ -91,6 +91,8 @@ describe("WorkspaceRepository CRUD", () => {
       effectiveNetworkPolicy: null,
       effectiveNetworkPolicySetId: null,
       networkPolicyIssue: null,
+      enabledHttpTools: [],
+      effectiveHttpTools: [],
       createdAt: 10,
       updatedAt: 10,
       available: true,
@@ -155,6 +157,8 @@ describe("WorkspaceRepository CRUD", () => {
         effectiveNetworkPolicy: null,
         effectiveNetworkPolicySetId: null,
         networkPolicyIssue: null,
+        enabledHttpTools: [],
+        effectiveHttpTools: [],
         createdAt: 123,
         updatedAt: 123,
         available: true,
@@ -727,6 +731,73 @@ describe("workspace path canonicalization and availability", () => {
     expect(() => inaccessible.requireAvailable("workspace-1")).toThrow(
       expect.objectContaining({ code: ERROR_CODES.WORKSPACE_UNAVAILABLE }),
     );
+  });
+});
+
+describe("workspace HTTP tool selections", () => {
+  const tool = Object.freeze({
+    name: "network_brain_search",
+    label: "Network Brain Search",
+    description: "Search local infrastructure docs.",
+    method: "POST" as const,
+    url: "http://127.0.0.1:53147/v1/search",
+    parameters: Object.freeze({ type: "object", properties: {}, additionalProperties: false }),
+    timeoutMs: 1_000,
+    maxResponseBytes: 4_096,
+  });
+  const catalog = Object.freeze({ sourcePath: "/tools.json", tools: Object.freeze([tool]) });
+
+  it("defaults off, persists selections, and resolves frozen runtime definitions", async () => {
+    const root = temporaryDirectory();
+    const opened = database();
+    const repository = new WorkspaceRepository(opened.connection, {
+      uuid: () => "workspace-tools",
+      clock: () => 10,
+      httpTools: catalog,
+    });
+    const created = repository.create({
+      name: "Tools",
+      path: directory(root, "tools"),
+      enabledHttpTools: [tool.name],
+    });
+
+    expect(created.enabledHttpTools).toEqual([tool.name]);
+    expect(created.effectiveHttpTools).toEqual([tool.name]);
+    const policy = await repository.requireUsable(created.id);
+    expect(policy.effectiveHttpTools).toEqual([tool]);
+    expect(Object.isFrozen(policy.effectiveHttpTools)).toBe(true);
+
+    const withoutCatalog = new WorkspaceRepository(opened.connection);
+    expect(withoutCatalog.get(created.id)).toMatchObject({
+      enabledHttpTools: [tool.name],
+      effectiveHttpTools: [],
+      usable: true,
+    });
+    expect((await withoutCatalog.requireUsable(created.id)).effectiveHttpTools).toEqual([]);
+  });
+
+  it("validates browser selections and cascades rows on workspace deletion", () => {
+    const root = temporaryDirectory();
+    const opened = database();
+    const repository = new WorkspaceRepository(opened.connection, {
+      uuid: () => "workspace-tools",
+      httpTools: catalog,
+    });
+    const created = repository.create({ name: "Tools", path: directory(root, "tools") });
+    expect(created.enabledHttpTools).toEqual([]);
+
+    expect(() => repository.update(created.id, {
+      enabledHttpTools: [tool.name, tool.name],
+    })).toThrow(expect.objectContaining({ code: ERROR_CODES.INVALID_COMMAND }));
+    expect(() => repository.update(created.id, {
+      enabledHttpTools: ["unknown_tool"],
+    })).toThrow(expect.objectContaining({ code: ERROR_CODES.INVALID_COMMAND }));
+
+    repository.update(created.id, { enabledHttpTools: [tool.name] });
+    expect(opened.connection.prepare("SELECT tool_name FROM workspace_http_tools").all())
+      .toEqual([{ tool_name: tool.name }]);
+    repository.delete(created.id);
+    expect(opened.connection.prepare("SELECT * FROM workspace_http_tools").all()).toEqual([]);
   });
 });
 

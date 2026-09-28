@@ -13,6 +13,7 @@ import {
   type SandboxNetworkPolicy,
   type WorkspaceMount,
 } from "../../shared/protocol.js";
+import type { HttpToolConfig } from "../http-tool-catalog.js";
 
 const CONTEXT_FILE_NAMES = Object.freeze([
   "AGENTS.override.md",
@@ -24,7 +25,7 @@ const CONTEXT_FILE_NAMES = Object.freeze([
 
 const SANDBOX_PROMPT_HEADER = `You are an expert coding assistant operating in a workspace sandbox.
 
-Available tools:
+Built-in workspace tools:
 - read: Read file contents
 - write: Create or overwrite files
 - edit: Make precise file edits with exact text replacement, including multiple disjoint edits in one call
@@ -34,7 +35,7 @@ Available tools:
 - find: Find files by glob pattern (respects .gitignore)
 
 Guidelines:
-- Use only read, write, edit, bash, ls, grep, and find for filesystem and process work.
+- Use only read, write, edit, bash, ls, grep, and find for filesystem and process work; separately listed parent-owned tools may be used for their stated purpose.
 - Use read to examine files instead of cat or sed.
 - Use write only for new files or complete rewrites.
 - Use edit for precise changes; every edits[].oldText must be unique in the original file and edits must not overlap.
@@ -160,6 +161,7 @@ export class SandboxResourceLoader implements ResourceLoader {
     private readonly networkPolicy: SandboxNetworkPolicy,
     private readonly mounts: readonly WorkspaceMount[],
     private readonly webSearchEnabled: boolean,
+    private readonly httpTools: readonly Pick<HttpToolConfig, "name" | "description">[],
   ) {
     this.#canonicalWorkspace = canonicalWorkspace;
   }
@@ -169,12 +171,14 @@ export class SandboxResourceLoader implements ResourceLoader {
     networkPolicy: SandboxNetworkPolicy = "isolated",
     mounts: readonly WorkspaceMount[] = [],
     webSearchEnabled = false,
+    httpTools: readonly Pick<HttpToolConfig, "name" | "description">[] = [],
   ): Promise<SandboxResourceLoader> {
     const loader = new SandboxResourceLoader(
       canonicalWorkspace,
       networkPolicy,
       mounts,
       webSearchEnabled,
+      httpTools,
     );
     await loader.reload();
     return loader;
@@ -195,6 +199,13 @@ export class SandboxResourceLoader implements ResourceLoader {
 - web_search queries the public Brave Search API and returns snippets; it does not fetch result pages.
 - The Brave request runs outside the workspace network namespace, even when sandbox networking is isolated.
 - Search queries may disclose text derived from readable workspace content to Brave.`);
+    }
+    if (this.httpTools.length > 0) {
+      const descriptions = this.httpTools.map((tool) => `- ${tool.name}: ${tool.description}`);
+      sections.push(`Parent-owned workspace HTTP tools:
+${descriptions.join("\n")}
+- These fixed HTTP requests run in the ChatWCA parent and remain available when workspace networking is isolated.
+- Tool arguments may disclose model-selected text derived from readable workspace content to the configured service.`);
     }
     if (this.mounts.length > 0) {
       const descriptions = this.mounts.map((mount) =>

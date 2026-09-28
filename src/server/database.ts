@@ -4,7 +4,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 
 export const DATABASE_FILENAME = "chatwca.sqlite";
-export const DATABASE_SCHEMA_VERSION = 7;
+export const DATABASE_SCHEMA_VERSION = 8;
 export const DATABASE_BUSY_TIMEOUT_MS = 5_000;
 
 const JOB_SCHEMA = `
@@ -110,6 +110,20 @@ const JOB_SCHEMA = `
     WHERE status IN ('queued', 'running');
 `;
 
+const WORKSPACE_HTTP_TOOLS_SCHEMA = `
+  CREATE TABLE workspace_http_tools (
+    workspace_id TEXT NOT NULL
+      REFERENCES workspaces(id) ON DELETE CASCADE,
+    tool_name TEXT NOT NULL
+      CHECK (
+        length(tool_name) BETWEEN 1 AND 64 AND
+        tool_name NOT GLOB '*[^a-z0-9_]*' AND
+        substr(tool_name, 1, 1) GLOB '[a-z]'
+      ),
+    PRIMARY KEY (workspace_id, tool_name)
+  );
+`;
+
 const INITIAL_SCHEMA = `
   CREATE TABLE workspaces (
     id         TEXT PRIMARY KEY,
@@ -151,6 +165,7 @@ const INITIAL_SCHEMA = `
   );
 
   ${JOB_SCHEMA}
+  ${WORKSPACE_HTTP_TOOLS_SCHEMA}
 `;
 
 export class UnsupportedDatabaseVersionError extends Error {
@@ -285,6 +300,14 @@ function migrateVersionSix(connection: Database.Database): void {
   })();
 }
 
+/** Add empty per-workspace HTTP tool selections; existing workspaces stay disabled. */
+function migrateVersionSeven(connection: Database.Database): void {
+  connection.transaction(() => {
+    connection.exec(WORKSPACE_HTTP_TOOLS_SCHEMA);
+    connection.pragma("user_version = 8");
+  })();
+}
+
 /**
  * Create/open and initialize ChatWCA's SQLite database.
  *
@@ -316,26 +339,34 @@ export function openDatabase(
       migrateVersionFour(connection);
       migrateVersionFive(connection);
       migrateVersionSix(connection);
+      migrateVersionSeven(connection);
     } else if (version === 2) {
       migrateVersionTwo(connection);
       migrateVersionThree(connection);
       migrateVersionFour(connection);
       migrateVersionFive(connection);
       migrateVersionSix(connection);
+      migrateVersionSeven(connection);
     } else if (version === 3) {
       migrateVersionThree(connection);
       migrateVersionFour(connection);
       migrateVersionFive(connection);
       migrateVersionSix(connection);
+      migrateVersionSeven(connection);
     } else if (version === 4) {
       migrateVersionFour(connection);
       migrateVersionFive(connection);
       migrateVersionSix(connection);
+      migrateVersionSeven(connection);
     } else if (version === 5) {
       migrateVersionFive(connection);
       migrateVersionSix(connection);
+      migrateVersionSeven(connection);
     } else if (version === 6) {
       migrateVersionSix(connection);
+      migrateVersionSeven(connection);
+    } else if (version === 7) {
+      migrateVersionSeven(connection);
     } else if (version !== DATABASE_SCHEMA_VERSION) {
       throw new UnsupportedDatabaseVersionError(version);
     }

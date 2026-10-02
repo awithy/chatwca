@@ -251,7 +251,7 @@ function prepare(publication: SearchDocumentPublication): PreparedPublication {
   return { metadata, batches, keys };
 }
 
-/** Unwired maintenance repository; PostgreSQL never establishes source authority. */
+/** Serialized-worker maintenance repository; PostgreSQL never establishes source authority. */
 export class PostgresSearchRepository implements SearchIndexRepository {
   private readonly database: SearchRepositoryDatabase;
   constructor(pool: SearchDatabasePool, timeoutMs?: number) { this.database = new SearchRepositoryDatabase(pool, timeoutMs); }

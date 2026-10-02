@@ -765,22 +765,20 @@ chat or jobs. Migrations remain explicit through `npm run search:migrate`.
 permanent suppression tombstones, cleanup tickets and revocation, separate cleanup
 queues, repeated pre-commit authority seals and recovery eligibility barriers.
 `SearchDocumentIndexer` now takes ordinary workspace/candidate/space/options without authority
-capabilities. Use existing repository operations directly from the serialized worker;
-do not wire `SearchIndexAuthority`, `SearchIndexCleanup` or the authority-dependent
-workspace synchronizer. Persistent run history, resumable scans, elaborate fairness
-and distributed-writer coordination are not v1 requirements.
+capabilities. The serialized worker uses repository operations directly; retired
+authority/cleanup/workspace-preparation modules and obsolete tests are removed.
+Persistent run history, resumable scans, elaborate fairness and distributed-writer
+coordination are not v1 requirements.
 
 **Complexity budget and finish line:** the earlier authority/ticket foundations
 were excessive for this single-user feature. Keep the small architecture: one worker
 → cached index → local search → optional reranking. The browser toggle/fallback
-increment and focused end-to-end synthetic validation are complete; seek explicit
-rollout approval. Do not add more
-infrastructure or guarantees; optional reranking must not block usable local search.
-Preserve source non-mutation, atomic replacement, model-space consistency, bounded
-IO/cancellation and isolation from chat/jobs. After approved rollout, separately remove
-unused foundations/obsolete tests and consolidate abstractions that do not earn their
-maintenance cost. Cleanup is not a release gate; further complexity needs evidence
-from actual use.
+increment, synthetic validation and explicitly approved live rollout are complete.
+Do not add more infrastructure or guarantees; optional reranking must not block usable
+local search. Preserve source non-mutation, atomic replacement, model-space consistency,
+bounded IO/cancellation and isolation from chat/jobs. Post-rollout cleanup removes
+retired foundations/obsolete tests while retaining useful repository coverage and
+unchanged SQL/migrations. Further complexity needs evidence from actual use.
 
 **Current implementation:** configuration, PostgreSQL migrations/pool/repository,
 read-only sources/extraction/chunking, Ollama/signatures, per-document reconciliation,
@@ -796,8 +794,7 @@ in-memory query/results/rerank selection, All/one-workspace scope, submit/cancel
 refresh/confirmed rebuild and plain-text grouped excerpts. Existing conversation opening
 focuses the matching message; missing sessions/branch entries show stale-result notices
 without automatic branch switching. Synthetic browser tests cover these flows and outages.
-The superseded authority/cleanup/workspace-sync modules remain unwired. Optional Pi
-reranking is wired into queries/service/API after RRF collapse and before grouping,
+Optional Pi reranking is wired into queries/service/API after RRF collapse and before grouping,
 using the existing runtime/global model snapshot, default-on API requests, explicit
 opt-out and local fallback with stable reasons. The browser now has the default-on
 user toggle, disclosure/capability hint and safe applied/local-fallback labels driven

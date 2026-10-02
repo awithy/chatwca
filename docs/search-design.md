@@ -5,10 +5,11 @@ startup, one indexing worker, timer/mutation refresh, retrieval/grouping, status
 shutdown. Browser Global Search/navigation, retained state and message-focused opening
 are implemented and synthetically tested. The bounded Pi reranking adapter and
 query/runtime/API/browser wiring are tested, including the default-on App-memory toggle,
-safe fallback labels and real browser-to-API/faux-Pi composition. Awaiting rollout
-approval. This simplified plan supersedes the
-earlier authority/ticket/membership lifecycle. Keep the workstation disabled until
-explicit rollout approval; isolated synthetic validation does not authorize enabling it.
+safe fallback labels and real browser-to-API/faux-Pi composition. The workstation's
+explicitly approved rollout is live and verified, including real-history search,
+message navigation and Pi reranking. Retired authority/cleanup/workspace-preparation
+modules and obsolete tests are removed. This plan supersedes the earlier
+authority/ticket/membership lifecycle. See [checkpoint.md](../checkpoint.md).
 
 **Deployment:** One trusted user, one ChatWCA server process, local workspaces.
 
@@ -46,20 +47,19 @@ affects search only, never conversations or jobs.
 - Atomic per-document publication, successful fingerprints and lexical metadata.
 - Per-operation timeouts, cancellation, parameterized SQL and bounded responses.
 
-**Remove from the production path:**
+**Excluded from the architecture:**
 
-- `SearchIndexAuthority`, workspace incarnation seals and path/session epochs.
+- Workspace incarnation seals and path/session epochs.
 - Permanent suppression tombstones, capacity blocking and suppression-release protocols.
 - Cleanup tickets, attempt-based ticket revocation and conditional cleanup continuations.
 - Repeated filesystem/SQLite admission and authority checks around every await/COMMIT.
 - Mandatory authoritative membership recovery before serving cached search results.
 - Distributed/advisory writer coordination and a separate fair cleanup queue.
 
-These unwired modules are complexity debt, not unfinished prerequisites. Do not
-expand or integrate them. The document-indexer contract now takes ordinary inputs
-without authority callbacks; the serialized worker uses repository operations directly.
-Remove the retired modules and their obsolete tests after user-visible validation
-and approved rollout, as a separate cleanup rather than a release gate.
+The retired modules and obsolete tests have been removed after approved rollout.
+The document-indexer contract takes ordinary inputs without authority callbacks;
+the serialized worker uses repository operations directly. Useful conditional-deletion
+coverage remains in the repository suites; working SQL and migrations are unchanged.
 
 **Defer unless actual use warrants them:** persistent run history, resumable scan
 checkpoints, sophisticated backoff/fairness, HNSW, exhaustive pagination, query
@@ -72,9 +72,9 @@ The earlier foundations overcomplicated a trusted single-user feature and delaye
 proving the complete user experience. The design reset is the architecture to keep:
 **one worker → cached index → local search → optional reranking**.
 
-The browser toggle/fallback increment and focused synthetic end-to-end validation
-are complete; seek explicit rollout approval. Do not add infrastructure, lifecycle frameworks,
-new guarantees or another layer of standalone primitives before this finish line.
+The browser toggle/fallback increment, synthetic end-to-end validation and approved
+live rollout are complete. Do not add infrastructure, lifecycle frameworks,
+new guarantees or another layer of standalone primitives.
 Reranking remains optional; it must not obstruct usable local search.
 
 Preserve safeguards with direct value: no source mutation, atomic replacement,
@@ -83,9 +83,8 @@ isolated from chat/jobs. Accepted staleness is not a defect to fix with more mac
 Use existing tests and focused synthetic composition checks; do not grow an evaluation
 or test framework to prove guarantees outside this product contract.
 
-After approved rollout, remove unused foundations and consolidate abstractions that
-do not earn their maintenance cost. Broader optimization and reliability work should
-follow observed problems. The next product question is **“Does search work well for
+Retired foundations and obsolete tests are removed. Further abstraction cleanup,
+optimization and reliability work should follow observed problems. The next product question is **“Does search work well for
 the operator?”**, not “What additional guarantees can we build?”
 
 ## 3. Small architecture
@@ -164,11 +163,11 @@ an error; never silently publish a shortened transcript.
 
 All these writes run through the same worker, so cleanup cannot overlap publication.
 Use existing repository revision/generation checks where already required; do not
-add a second epoch/ticket layer. Workspace sync can directly read/synchronize derived
-metadata; it need not use the authority-dependent workspace synchronizer.
+add a second epoch/ticket layer. Workspace sync reads/synchronizes derived metadata
+directly, without a separate workspace synchronizer.
 
 `SearchDocumentIndexer` now takes ordinary workspace/candidate/space/options,
-not a `SearchDocumentAuthority`, and retains stable snapshot checking and a final source
+without authority capabilities, and retains stable snapshot checking and a final source
 fingerprint/model-space check. A straightforward current-registration comparison
 at a workspace boundary is enough; a change during work can discard that workspace's
 remaining work and request another pass. No repeated name/incarnation/pre-commit seals.
@@ -341,26 +340,23 @@ Deliver user-visible vertical slices, not more standalone foundations:
    the default-on App-memory toggle and safe applied/local-fallback labels. Synthetic
    fixtures cover opt-out, unavailable capability, timeout/invalid-response fallback
    and cancellation/navigation. No additional backend foundations are needed.
-3. **Validation complete; seek rollout approval:** existing typecheck/build/unit,
-   integration and full browser suites pass. Focused synthetic browser-to-real
-   API/faux-Pi checks close the composition gap; prior disposable PostgreSQL evidence
-   is retained (no SQL/indexer/backend changes in this increment). README/operations
-   notes are updated.
-   Confirm the complete search/navigation/fallback experience, not just isolated modules.
-   No real history, shared providers or paid calls are needed for synthetic validation.
-   Keep workstation search disabled; enable/restart only with explicit rollout approval.
-4. **Simplify after approved rollout:** remove retired authority/cleanup/workspace-sync
-   modules and obsolete tests, and consolidate low-value abstractions. Keep this cleanup
-   separate from shipping; do not rewrite working SQL or checksum-tracked migrations
-   merely to make the implementation look smaller.
+3. **Released and verified:** typecheck/build/unit, integration and browser validation
+   passed before explicit rollout approval. Live HTTP and browser checks verified real
+   history search, exact-message opening and Pi reranking. Assess everyday operator
+   relevance rather than adding infrastructure gates. Future synthetic checks need
+   no production restart, real history, shared providers or paid calls.
+4. **Post-rollout cleanup complete:** retired authority/cleanup/workspace-sync modules
+   and obsolete tests are removed. Useful repository tests are retained. Working SQL
+   and checksum-tracked migrations are unchanged. Consolidate other abstractions only
+   when the maintenance benefit is clear.
 
 Required tests cover source non-mutation/saved branches, unchanged-file skipping and
 vector reuse, atomic replacement/rollback, complete versus incomplete-store pruning,
 ordinary workspace filtering, single-flight/coalescing, restart using cached results,
 lexical fallback, shutdown, RRF/grouping, rerank validation and result navigation.
 No ABA, instant-revocation, tombstone-capacity, ticket-recovery or authoritative
-membership proof tests are release requirements. Tests belonging to retired modules
-may stay until those modules are removed; do not let them dictate the new design.
+membership proof tests are release requirements. Retired-module tests have been
+removed; they do not dictate the current design.
 
 The feature is done when a user can search one/all registered workspaces, find exact
 and semantic matches, open the matching conversation/message, refresh/rebuild, and
@@ -393,9 +389,10 @@ service/query/adapter and pinned Pi runtime with in-memory faux providers; only
 storage/history/embedding/inference boundaries are synthetic. They cover OpenAI/Codex
 ordering, scope/opt-out, message focus, fallback and provider IO cancellation.
 
-Implemented but superseded for production: `search/authority.ts`, `search/cleanup.ts`,
-`search/workspace-sync.ts` and their ticket/incarnation/suppression-dependent composition.
-No runtime behavior changes just because this document changed.
+Removed after rollout: the retired authority, cleanup and guarded workspace-preparation
+modules, their ticket/incarnation/suppression-dependent tests and the unused source-error
+suppression hint. Ownership validation, cached-content retention and repository
+version-conditional deletion remain.
 
 - [Technical design](design.md)
 - [Checkpoint / next actions](../checkpoint.md)

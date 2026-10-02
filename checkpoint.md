@@ -1,6 +1,40 @@
 # ChatWCA Conversation Search Checkpoint
 
-**Updated:** 2026-10-01T19:44:42-07:00
+**Updated:** 2026-10-02T09:42:41-07:00
+
+## Post-rollout cleanup: complete
+
+The operator requested cleanup after the approved release. The starting tree was
+clean; prior search work and rollout were committed in `abb8e4e`. The operator
+subsequently requested committing this cleanup.
+
+- Removed `src/server/search/{authority,cleanup,workspace-sync}.ts` and their six
+  obsolete unit/integration suites. No replacement lifecycle framework added.
+- Removed the unused `SearchSourceError.invalidatePrevious` suppression hint and
+  updated source tests. Foreign/unavailable CWDs still reject snapshots; read failures
+  still retain cached content. Indexing remains read-only and single-writer.
+- Preserved useful conditional-deletion coverage in `search-repository.test.ts`:
+  exact scope/version/path and bigint checks, stale generation/move/recreation no-ops,
+  atomic evidence/counter updates, cancellation rollback and ambiguous COMMIT recovery.
+  Removed the obsolete repository registration/invalidation-seal composition test;
+  existing cancellation coverage remains. Working SQL and migrations are unchanged.
+- Updated README, design and operations docs: retired API sections/commands removed,
+  implementation/rollout state corrected. Fixed stale “unwired” code comments only.
+- Validation passed: `npm run typecheck`, `npm run build:server`, `npm run build:web`,
+  strict standalone checking of all four changed unit/integration suites;
+  **81 unit files / 1,281 tests**; **17 integration files passed, 10 skipped /
+  104 tests passed, 80 skipped** (database/sandbox opt-ins omitted);
+  **6 PostgreSQL files / 66 tests** on a fresh loopback PG17/pgvector container with
+  random credentials, tmpfs data and random schemas (container/schemas removed);
+  **2 focused browser files / 14 tests**, including real API/faux-Pi composition.
+  Existing web chunk-size warning remains. Final `git diff --check` passed.
+- No production restart, `.env` changes, migration changes, live-cache writes, real
+  transcript/provider access or paid calls. Disposable tests used synthetic history,
+  fake local embeddings and in-memory faux inference/auth.
+
+**Next:** assess search usefulness in normal operator use. Retired-module cleanup is
+done; further refactoring/optimization needs a concrete maintenance or observed-use
+benefit. Do not run another writer alongside production search.
 
 ## Approved rollout: live and verified
 
@@ -63,7 +97,8 @@ operator relevance remains a usage assessment, not another infrastructure gate.
 Fallback is covered by the real-cache query-only unreachable-provider check and
 existing synthetic UI/API tests, not a deliberate outage of live dependencies.
 Do not run another writer alongside production search. Retired-module cleanup is
-separate; add reliability/optimization only for observed problems. No commit made.
+now complete above; add reliability/optimization only for observed problems. No commit
+was made during this rollout (subsequently committed in `abb8e4e`).
 
 ## Design reset: finish the single-user feature
 
@@ -108,10 +143,10 @@ debt, not missing production prerequisites.
 3. **Released/verified:** operator restart completed; initial production indexing,
    real HTTP search, browser exact-message navigation and real Pi reranking passed.
    Assess useful search in everyday operator use (see top section).
-4. After approved rollout, separately remove retired authority/cleanup/workspace-sync
-   modules and obsolete tests, and consolidate abstractions that do not earn their
-   maintenance cost. Cleanup is not a release gate; do not rewrite working SQL or
-   checksum-tracked migrations just to reduce apparent size.
+4. **Done after rollout:** removed retired authority/cleanup/workspace-sync modules
+   and obsolete tests; preserved useful repository coverage and working SQL/migrations.
+   Consolidate other abstractions only for a concrete maintenance benefit, not to
+   reduce apparent size.
 
 Do not add infrastructure, lifecycle frameworks, another foundation increment or new
 race/security guarantees. Preserve the valuable safeguards: no source mutation,
@@ -182,21 +217,13 @@ Use repository workspace read/sync directly from the single worker. Existing CAS
 and generation fields can remain; removing working SQL is not required to simplify
 the orchestration. Keep current checksum-tracked migrations unchanged.
 
-### Superseded, not production prerequisites
+### Superseded foundations: removed after rollout
 
-These modules/tests still exist but should **not** drive the next implementation:
-
-- `src/server/search/authority.ts`: incarnation/epoch seals and suppression tombstones.
-- `src/server/search/cleanup.ts`: private revocable tickets and bounded continuations.
-- `src/server/search/workspace-sync.ts`: authority-dependent guarded preparation.
-
-Do not wire these modules, implement suppression release, add tombstone recovery,
-construct cleanup capabilities or extend their race tests. Mandatory
-`SearchDocumentAuthority` coupling is now removed from the pipeline (no no-op seals).
-The legacy interface lives only in `authority.ts`; standalone retired-module tests
-remain, but the authority/document composition tests have been removed.
-Retain ordinary worker-boundary registration checks and cancellation without the
-framework. Retired modules remain unwired.
+Removed `src/server/search/{authority,cleanup,workspace-sync}.ts`, their legacy
+interfaces and six obsolete suites. Useful repository deletion tests are retained
+under the repository suites. Do not reintroduce suppression release, tombstone
+recovery, cleanup capabilities or ticket/incarnation race guarantees. Retain ordinary
+worker-boundary registration checks and cancellation without the framework.
 
 ## Practical contracts still worth preserving
 
@@ -702,20 +729,13 @@ This reset only updated documentation; runtime suites were not rerun for it.
 
 ## Working tree and handoff
 
-No commit has been made. Preserve the existing uncommitted foundation changes;
-do not discard or revert them wholesale when simplifying orchestration.
-`docs/search-design.md` was already untracked when foundation work began.
+Search implementation and rollout were committed in `abb8e4e`; the cleanup started
+from a clean tree and is included in the subsequent operator-requested cleanup commit.
+Consult `git status --short` for any later changes. Do not discard unrelated work.
 
-Tracked changes include `.env.example`, `README.md`, `checkpoint.md`, `docs/design.md`,
-`docs/pi-sdk-notes.md`, package files, server config/history and config/smoke tests.
-New files include `src/server/search/`, `src/server/session-scope.ts`, search
-migrations/provisioning/runbook, and `tests/{fixtures,unit,integration}/search-*`.
-Consult `git status --short` for the exact current tree.
-
-This handoff includes document simplification, the serialized worker, local hybrid retrieval,
-optional runtime/API, browser Global Search/navigation/message focus and Pi reranking
-query/runtime/API/browser wiring, retained rerank toggle and completed synthetic
-end-to-end validation after the design reset. Earlier
-foundation details/tests remain in source and the existing adapter runbook; its retired
-authority/ticket sections describe old code, not production requirements. The simplified
-search design is the plan to follow.
+This handoff includes the released single-worker search/API/browser/reranking path
+and removal of retired authority/cleanup/workspace-preparation modules, obsolete tests
+and docs. Repository conditional-deletion coverage is preserved; SQL/migrations and
+production configuration are unchanged. Historical increments above describe prior
+states, not outstanding requirements. Follow the simplified search design; assess
+operator usefulness rather than adding infrastructure.

@@ -43,9 +43,5 @@ export type SearchSourceErrorCode =
 
 /** Safe diagnostics: never include transcript text, JSON parse errors, or paths. */
 export class SearchSourceError extends Error {
-  constructor(
-    readonly code: SearchSourceErrorCode,
-    /** Legacy ownership-mismatch hint for retired authority consumers; the single-user pipeline retains cached content. */
-    readonly invalidatePrevious = false,
-  ) { super(code); }
+  constructor(readonly code: SearchSourceErrorCode) { super(code); }
 }

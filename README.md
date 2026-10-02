@@ -119,17 +119,17 @@ See the [scheduled-jobs operations runbook](docs/jobs-operations.md) for safe la
 
 ## Conversation search
 
-The [conversation-search design](docs/search-design.md) is being implemented incrementally.
+The [conversation-search design](docs/search-design.md) is implemented and released.
 Implemented foundations include startup-only configuration, a separate PostgreSQL 17/pgvector
 schema with explicit `npm run search:migrate` tooling, tested read-only scoped source,
 saved-branch extraction/message chunking, and a bounded local Ollama adapter with immutable
 model-digest signatures, plus an injectable atomic document/checkpoint repository with
 bounded transactions, paged scoped checkpoint/source-path lookup, and exact-input embedding
 reuse. The simplified per-document pipeline composes fingerprint skipping, reuse, cancellation,
-final source/model checks and atomic publication without authority capabilities. Older
-unwired authority/cleanup/workspace-preparation modules are superseded by the single-user
-plan and are not used by the new serialized `SearchIndexer`. Its explicitly invoked loop
-syncs registrations, indexes configured stores, prunes safely, coalesces refresh/rebuild,
+final source/model checks and atomic publication without authority capabilities. Retired
+authority/cleanup/workspace-preparation modules and obsolete tests have been removed.
+The serialized `SearchIndexer` syncs registrations, indexes configured stores,
+prunes safely, coalesces refresh/rebuild,
 and reports in-memory progress/errors. The local query service now combines parameterized
 lexical/exact-vector retrieval, model-space filtering, RRF, grouped excerpts and lexical
 fallback, with bounded admission/cancellation and cached results across restart/source

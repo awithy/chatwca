@@ -96,25 +96,25 @@ describe("scoped search discovery and stable snapshots", () => {
     expect(sourceFingerprint(await stat(f.file, { bigint: true }))).toEqual(sourceFingerprint(before));
   });
 
-  it("checks header ownership and signals immediate suppression, including legacy files", async () => {
+  it("rejects foreign header ownership, including legacy files", async () => {
     const f = await fixture();
     const foreign = path.join(f.root, "foreign");
     await mkdir(foreign);
     for (const version of [3, 2]) {
       await writeFile(f.file, jsonl([header(foreign, { version }), ...f.records.slice(1)]));
       const candidate = (await f.discover()).candidates[0]!;
-      await expect(readSessionSnapshot(f.workspace, candidate)).rejects.toMatchObject({ code: "search_session_invalid", invalidatePrevious: true });
+      await expect(readSessionSnapshot(f.workspace, candidate)).rejects.toMatchObject({ code: "search_session_invalid" });
     }
     await writeFile(f.file, jsonl([header(f.workspace.path, { version: 2 })]));
     const candidate = (await f.discover()).candidates[0]!;
-    await expect(readSessionSnapshot(f.workspace, candidate)).rejects.toMatchObject({ code: "search_session_version_unsupported", invalidatePrevious: false });
+    await expect(readSessionSnapshot(f.workspace, candidate)).rejects.toMatchObject({ code: "search_session_version_unsupported" });
   });
 
-  it("does not diagnose unavailable stored-CWD aliases as confirmed cross-workspace ownership", async () => {
+  it("rejects unavailable stored-CWD aliases", async () => {
     const f = await fixture();
     await writeFile(f.file, jsonl([header(path.join(f.root, "missing-alias")), ...f.records.slice(1)]));
     const candidate = (await f.discover()).candidates[0]!;
-    await expect(readSessionSnapshot(f.workspace, candidate)).rejects.toMatchObject({ code: "search_session_invalid", invalidatePrevious: false });
+    await expect(readSessionSnapshot(f.workspace, candidate)).rejects.toMatchObject({ code: "search_session_invalid" });
   });
 
   it("accepts canonical CWD aliases but rejects a different candidate scope or session ID", async () => {

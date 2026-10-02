@@ -75,7 +75,7 @@ function vector(value: readonly number[]): readonly number[] {
   return Object.freeze([...value]);
 }
 
-/** Unwired per-document maintenance. No discovery, registry mutation, pruning, retry or scheduler. */
+/** Per-document maintenance for the serialized worker. No discovery, registry mutation, pruning, retry or scheduler. */
 export class SearchDocumentIndexer {
   private active: AbortController | undefined;
   private closed = false;

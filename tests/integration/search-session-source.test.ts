@@ -135,7 +135,7 @@ describe("Pi 0.84.3 search source contracts", () => {
     await writeFile(injected, searchJsonl([searchSessionHeader(foreign), searchUserEntry("u", null), searchAssistantEntry("a", "u")]));
     const discovery = await discoverSessionFiles(f.workspace, f.agentDirectory);
     expect(discovery.candidates).toHaveLength(2);
-    await expect(readSessionSnapshot(f.workspace, discovery.candidates.find(({ path }) => path === injected)!)).rejects.toMatchObject({ code: "search_session_invalid", invalidatePrevious: true });
+    await expect(readSessionSnapshot(f.workspace, discovery.candidates.find(({ path }) => path === injected)!)).rejects.toMatchObject({ code: "search_session_invalid" });
   });
 
   it("accepts a 40 MiB image-bearing record within the 48 MiB limit without retaining its image", async () => {

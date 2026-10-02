@@ -351,7 +351,7 @@ describe("atomic search repository boundary", () => {
     await expect(repository.readCheckpointPage(REPOSITORY_WORKSPACE, { afterSessionId: "session-A" })).rejects.toThrow("search_database_unavailable");
   });
 
-  it("applies cancellation and synchronous authority seals to page reads", async () => {
+  it("applies cancellation and synchronous pre-commit guards to page reads", async () => {
     const { repository, client, pool } = fixture();
     const controller = new AbortController(); controller.abort();
     await expect(repository.readCheckpointPage(REPOSITORY_WORKSPACE, {}, { signal: controller.signal })).rejects.toThrow("search_cancelled");
@@ -379,5 +379,66 @@ describe("atomic search repository boundary", () => {
     expect(await repository.deleteWorkspace(REPOSITORY_WORKSPACE)).toBe(false);
     expect(client.query.mock.calls.find(([sql]) => sql.startsWith("DELETE FROM search_workspaces"))?.[1]).toEqual([REPOSITORY_WORKSPACE.workspaceId, REPOSITORY_WORKSPACE.sourceRevision]);
     expect("prune" in repository).toBe(false);
+  });
+});
+
+function conditionalFixture(override?: (sql: string) => { rows: Record<string, unknown>[] } | undefined) {
+  const checkpoint = previous(); const client = {
+    query: vi.fn(async (sql: string, _values?: unknown[]) => {
+      const custom = override?.(sql); if (custom) return custom;
+      if (sql.startsWith("SELECT workspace_id")) return { rows: [{ workspace_id: checkpoint.workspaceId }] };
+      if (sql.startsWith("SELECT id FROM search_documents") || sql.startsWith("DELETE FROM search_documents")) return { rows: [{ id: checkpoint.documentId }] };
+      if (sql.startsWith("SELECT count(*)")) return { rows: [{ count: "3" }] };
+      return { rows: [] };
+    }), release: vi.fn(),
+  };
+  const pool = { connect: vi.fn(async () => client) };
+  return { checkpoint, client, pool, repository: new PostgresSearchRepository(pool) };
+}
+
+describe("conditional repository document deletion", () => {
+  it("locks exact scope and document version/path, cascades evidence and adjusts counters atomically", async () => {
+    const f = conditionalFixture(); expect(await f.repository.deleteDocumentVersion(f.checkpoint)).toBe(true);
+    const select = f.client.query.mock.calls.find(([sql]) => sql.startsWith("SELECT id FROM search_documents"))!;
+    expect(select[0]).toContain("FOR UPDATE");
+    expect(select[1]).toEqual([f.checkpoint.workspaceId, f.checkpoint.sourceRevision, f.checkpoint.sessionId, f.checkpoint.documentId, "1", f.checkpoint.sourcePath]);
+    const remove = f.client.query.mock.calls.find(([sql]) => sql.startsWith("DELETE FROM search_documents"))!;
+    expect(remove[1]).toEqual(select[1]); expect(remove[0]).toContain("generation = $5::bigint AND source_path = $6");
+    expect(f.client.query.mock.calls.find(([sql]) => sql.startsWith("UPDATE search_workspaces"))?.[1]).toEqual([f.checkpoint.workspaceId, -1, -3]);
+    expect(f.client.query.mock.calls.at(-1)?.[0]).toBe("COMMIT");
+  });
+
+  it.each(["workspace", "document"])("missing/stale %s is a no-op without counter updates", async (part) => {
+    const f = conditionalFixture((sql) => sql.startsWith(part === "workspace" ? "SELECT workspace_id" : "SELECT id FROM search_documents") ? { rows: [] } : undefined);
+    expect(await f.repository.deleteDocumentVersion(f.checkpoint)).toBe(false);
+    expect(f.client.query.mock.calls.some(([sql]) => sql.startsWith("DELETE") || sql.startsWith("UPDATE"))).toBe(false);
+  });
+
+  it("snapshots exact bigint generation and scope/path before borrowing a client", async () => {
+    const f = conditionalFixture(); const checkpoint = { ...f.checkpoint, generation: "9007199254740993" };
+    const attempt = f.repository.deleteDocumentVersion(checkpoint); checkpoint.generation = "1"; checkpoint.sourcePath = "/other.jsonl";
+    expect(await attempt).toBe(true);
+    expect(f.client.query.mock.calls.find(([sql]) => sql.startsWith("DELETE FROM search_documents"))?.[1]?.slice(4)).toEqual(["9007199254740993", f.checkpoint.sourcePath]);
+  });
+
+  it.each([{ generation: "0" }, { documentId: "invalid" }, { sessionId: "../secret" }, { sourcePath: "/a/../b.jsonl" }])("rejects invalid deletion witnesses before IO (%j)", async (mutation) => {
+    const f = conditionalFixture(); await expect(f.repository.deleteDocumentVersion({ ...f.checkpoint, ...mutation })).rejects.toThrow("search_index_invalid");
+    expect(f.pool.connect).not.toHaveBeenCalled();
+  });
+
+  it("rolls back deletion/counters on pre-commit cancellation", async () => {
+    const f = conditionalFixture(); let checks = 0;
+    await expect(f.repository.deleteDocumentVersion(f.checkpoint, { assertCurrent: () => {
+      if (++checks === 2) throw new SearchRepositoryError("search_cancelled");
+    } })).rejects.toThrow("search_cancelled");
+    expect(f.client.query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+    expect(f.client.query.mock.calls.some(([sql]) => sql === "COMMIT")).toBe(false);
+  });
+
+  it("rejects corrupt delete acknowledgements without committing counts", async () => {
+    const f = conditionalFixture((sql) => sql.startsWith("DELETE FROM search_documents") ? { rows: [] } : undefined);
+    await expect(f.repository.deleteDocumentVersion(f.checkpoint)).rejects.toThrow("search_index_invalid");
+    expect(f.client.query.mock.calls.some(([sql]) => sql.startsWith("UPDATE"))).toBe(false);
+    expect(f.client.query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
   });
 });

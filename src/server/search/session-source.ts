@@ -246,7 +246,7 @@ export async function readSessionSnapshot(workspace: SessionWorkspaceScope, cand
         const header = value as Record<string, unknown>;
         if (header.type === "session" && typeof header.cwd === "string" && header.cwd.trim()) {
           const ownership = await storedCwdOwnership(header.cwd, scope);
-          if (ownership !== "owned") throw new SearchSourceError("search_session_invalid", ownership === "mismatch");
+          if (ownership !== "owned") throw new SearchSourceError("search_session_invalid");
         }
       }
       extractor.append(value);

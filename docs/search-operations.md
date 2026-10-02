@@ -1,24 +1,18 @@
-# Conversation search: foundation and provisioning
+# Conversation search: operations and provisioning
 
-> **Design reset:** [search-design.md](search-design.md) is now the simplified
-> single-user implementation plan. Authority, ticket, suppression and guarded
-> workspace-preparation sections below document existing unwired APIs, not required
-> production architecture. Do not implement their proposed recovery/queue lifecycle.
-> The new plan uses one serialized indexer and accepts stale cached results; it does
-> not require membership reconciliation before serving them. Provisioning instructions
-> and implemented source/embedding/repository bounds remain applicable. The document
-> pipeline, serialized worker, local hybrid retrieval and optional server lifecycle/API
-> and browser Global Search/message navigation are implemented. Pi reranking is wired
-> into the API and browser, with a default-on toggle and safe fallback labels.
-> This workstation's approved rollout is live and verified, including real-history
-> search/navigation and Pi reranking. See `../checkpoint.md` for current status.
+> **Architecture:** [search-design.md](search-design.md) describes the single-user
+> implementation: one serialized indexer, cached local search and optional Pi reranking.
+> Stale cached results are accepted; no membership recovery barrier is required.
+> Retired authority/ticket/workspace-preparation modules and obsolete tests have been
+> removed. This workstation's approved rollout is live and verified, including
+> real-history search/navigation and Pi reranking. See `../checkpoint.md` for status.
 
 **Implementation state:** configuration/schema/migrations, read-only source/chunk
 and bounded Ollama/signature adapters, plus atomic document/checkpoint repository
 operations, an injectable per-document reconciliation pipeline, and the serialized
 sync/discovery/index/prune worker with coalescing, cancellation and in-memory status,
 plus local lexical/vector retrieval, RRF/grouping, lexical fallback and bounded query
-admission. Retired authority/cleanup/guarded workspace modules remain unwired.
+admission.
 Optional mode now wires asynchronous startup/schema checks, the timer and mutation
 refresh hooks, bounded search/status/refresh/rebuild routes and shutdown. Browser Global
 Search and optional Pi query/API/browser reranking are implemented and synthetically validated.
@@ -147,7 +141,7 @@ The schema stores plaintext conversation excerpts, source metadata, and 1,024-di
 vectors. Protect its storage/backups like Pi history. Keep database storage outside
 workspaces and sandbox mounts. Do not give database credentials to tools/workers.
 
-## Local embedding adapter (unwired)
+## Local embedding adapter
 
 `src/server/search/embeddings.ts` is explicitly constructed and does no IO until
 called. It uses only `/api/tags`, `/api/show`, and `/api/embed`; it never pulls a model,
@@ -169,7 +163,7 @@ expiry yields `search_timeout`. `close()` seals admission and aborts active/queu
 There are no automatic retries; failed inputs are retried on the next refresh/timer pass.
 
 Resolve the immutable SHA-256 digest/capability before a pass. Batches verify the digest
-before/after embedding. The future publisher must recheck with `assertSpaceCurrent()`
+before/after embedding. The document pipeline rechecks with `assertSpaceCurrent()`
 immediately before committing; these guards do not lock Ollama's mutable tag. Spaces
 include canonical model tag, digest, dimensions and normalization version. Processing
 signatures additionally include extractor/chunker/document-input versions; query profiles
@@ -177,7 +171,7 @@ have separate signatures and cannot force document re-embedding. Never use a vec
 a different space signature. The embedding adapter itself does not persist vectors
 or advertise readiness.
 
-## Atomic repository (unwired)
+## Atomic repository
 
 `search/repository.ts` provides a narrow injectable maintenance boundary. Reads are
 scoped by workspace/source revision, with exact bigint generation and nanosecond
@@ -243,7 +237,7 @@ Explicit scoped delete/seen primitives are used only by the serialized worker;
 mutation hooks request refresh rather than writing the derived index themselves. Checkpoint pages are comparison data, not proof of
 complete enumeration; the worker independently validates the directory witness before
 absence pruning. Persistent run history is deferred; the timer/API now invoke the
-same worker, while browser UI remains future work.
+same worker. Browser Global Search invokes these routes.
 
 ## Serialized indexing worker
 
@@ -292,8 +286,8 @@ serialized worker synchronizes derived workspace metadata from SQLite and compar
 registrations at workspace boundaries. There are no authority seals, suppression callbacks
 or cleanup tickets in this pipeline. Invalid/unavailable sources retain cached old content;
 a successfully published replacement session ID must have prior IDs at its canonical path
-removed by the same worker. The local API vertical slice is now validated with
-synthetic server composition; workstation rollout still requires explicit approval.
+removed by the same worker. The local API vertical slice is validated with
+synthetic server composition and the approved workstation rollout.
 
 An exact canonical-target checkpoint lookup permits skipping only a single unambiguous
 identity with matching fingerprint, processing profile and embedding space. Skip still
@@ -301,8 +295,8 @@ rechecks source/model and conditionally marks scan membership, never the
 successful fingerprint/generation. Multiple prior path identities require reading the header.
 Changed/forced snapshots extract the saved branch and deterministically chunk it; relocation
 can find prior metadata by session ID. In-store symlink aliases converge on the canonical
-source target. Future scan membership must account for aliases and discovered-unreadable
-paths separately; this module neither establishes complete membership nor prunes old IDs.
+source target. The worker accounts for aliases and discovered-unreadable paths
+separately; this module neither establishes complete membership nor prunes old IDs.
 
 Exact input hashes are deduplicated within a document. Reuse reads stream at most 128 hashes;
 missing local embedding batches respect both 16-input and 256 KiB serialized-request limits,
@@ -321,98 +315,6 @@ transaction is held during provider/source IO. Failed extraction, embedding or p
 preserves the prior successful checkpoint. Ambiguous commit acknowledgements are not blindly
 retried: a later attempt must freshly read committed metadata. This is not an instant external
 filesystem/model lock; changes after final witness checks remain subject to later reconciliation.
-
-## Process-owned authority (retired, unwired)
-
-`search/authority.ts` supplies `SearchIndexAuthority` through an injected fresh synchronous
-SQLite registration reader, a canonical read-only source-admission boundary, and a required
-synchronous invalidation observer. Construction performs no IO. `admitWorkspace()` observes
-current source revisions; `capture()` returns the legacy `SearchDocumentAuthority` callbacks,
-now declared in this retired module and not consumed by `SearchDocumentIndexer`. Seals re-read registrations synchronously before commit;
-fresh revalidation checks canonical source admission outside the transaction.
-
-Workspace incarnations prevent old attempts from reviving after unregister/re-register or
-path-change-and-restore, **provided mutation hooks invalidate after durable changes and before
-yielding**. Final revision comparisons alone cannot detect such change-and-restore races.
-Path/session epochs catch invalidation even when the header ID or derived document did not
-exist at attempt start. Ownership mismatches suppress both canonical target and admitted alias
-before notifying cleanup; late old-incarnation callbacks cannot poison replacements. Observer
-failures remain redacted and cannot undo seals; future mutation hooks must isolate those errors
-from already completed source deletion/registration changes. Cancellation/shutdown bounds even injected
-source admission that ignores abort and discards late completion.
-
-State is capped at 1,024 admitted workspaces and 100,000 distinct path/session tombstones across
-the process. Repeated invalidations update epochs without consuming more capacity. Workspace
-admission overflow returns `search_busy`; identity overflow blocks that workspace entirely
-rather than evicting tombstones and permitting stale results/publication. Limits may only be
-tightened. Tombstones otherwise persist for their workspace incarnation. Fresh post-invalidation
-attempts can reconcile derived data, but **publication does not clear result suppression**.
-
-`isSuppressed()` is a negative filter, not eligibility or proof of current complete membership.
-Unavailable sources, recovery/restart, or a newly admitted incarnation still need authoritative
-membership before results may be exposed. No suppression-release or recovery protocol exists
-yet. Invalidation notifications now carry non-enumerable synchronous cleanup seals. Pass the
-original process-local ticket, never reconstructed JSON metadata. A fresh document attempt
-conservatively revokes all existing tickets in its workspace, even when unrelated or subsequently
-failed. Repeated matching invalidations revoke older identity tickets. Retired-workspace tickets
-check fresh registrations and reject same-revision re-registration before it is even re-admitted.
-`captureWorkspace()` provides workspace-incarnation seals for metadata preparation without
-starting a document attempt or revoking cleanup tickets. It does not establish store membership.
-No production cleanup queue, mutation hooks, registration synchronization, pass coordinator,
-scan/run lifecycle, pruning, scheduler or retrieval is wired. Keep search disabled.
-
-## Known-invalidation cleanup (retired, unwired)
-
-`search/cleanup.ts` adds explicit `SearchIndexCleanup.clean(ticket, options?)`, single-flight with
-no queue. It only processes known session/path/workspace invalidations; it never discovers missing
-sources or authorizes absence pruning. The required process-local ticket seal is checked before
-and after IO and forwarded to the repository's synchronous pre-commit guard. No filesystem,
-provider IO or async admission is held inside a transaction.
-
-Delayed document deletion uses new `deleteDocumentVersion()` with the observed workspace/revision,
-session ID, document ID, exact bigint generation and exact source path. Publication/replacement
-serializes on the workspace lock; absent/changed scope, generations, moves and deleted/recreated
-identities are no-ops. Chunks cascade and counters change atomically. The older `deleteDocument()`
-is an explicit current-session primitive, not appropriate for delayed cleanup. Retired-workspace
-cleanup additionally requires its ticket's fresh registration/incarnation seal.
-
-Each path call processes at most 64 observed document versions, shared across canonical target
-and optional alias. Return `next` as the cursor on the **same ticket** to continue; each page is
-fresh metadata, not scan completeness or new deletion authority. Sessions use exact checkpoint
-lookup, not store enumeration. Results count deleted/skipped targets (a workspace cascade is one
-target, not a document-count report). Empty pages finish known-path cleanup only.
-
-One five-second aggregate deadline covers all reads/deletes/admission; overrides may only tighten
-it. Caller abort/close cancels even injected repositories ignoring abort and seals late operations.
-Native transactions retain their own budgets. A large workspace cascade may time out and roll back;
-there is no unlimited cleanup transaction. Earlier independently committed document removals may
-remain if a later operation fails. No error triggers automatic retry: an unacknowledged COMMIT may
-have committed, so the next explicit invocation must freshly read committed checkpoints. Successful
-cleanup never clears suppression or establishes positive membership. Production bounded queuing,
-coordinator fairness, suppression recovery and complete-scan pruning remain unfinished.
-
-## Workspace preparation (retired, unwired)
-
-`search/workspace-sync.ts` adds explicit `SearchWorkspaceSynchronizer.synchronize(workspaceId)`.
-Use the same freshly read SQLite registrations and `SearchIndexAuthority` as document work.
-Construction performs no IO; calls are single-flight with no queue or retry. It snapshots current
-name/path/storage, admits the current workspace incarnation and freshly validates its canonical
-filesystem path. Derived PostgreSQL metadata supplies only the expected prior revision for CAS.
-Creates, lexical renames and source-revision replacement use the existing atomic repository operation.
-Unchanged metadata avoids a write but still repeats canonical/registration checks. Names and source
-incarnations are sealed synchronously before COMMIT; async source admission never holds a transaction.
-
-One five-second aggregate deadline includes admission and all database calls. Caller abort/close
-bounds uncooperative injected IO, prevents late continuation, and does not close dependencies.
-Failures never automatically retry, including ambiguous COMMIT acknowledgements: a subsequent
-explicit call freshly reads committed metadata. Names are validated against the repository's
-2-KiB UTF-8 limit, never silently truncated. Private errors omit underlying paths/diagnostics.
-
-Successful preparation is **not scan completion or search eligibility**. It neither creates nor
-checks the session store, discovers files, prunes by absence, clears suppression, nor revokes
-existing document-cleanup tickets. Missing stores may still need unavailable status during a
-future pass. Production mutation hooks are still required to detect registration ABA; no pass
-coordinator, scan/run lifecycle, cleanup queue, scheduler or startup wiring is added here.
 
 ## Provision PostgreSQL 17 and pgvector
 
@@ -575,10 +477,9 @@ startup behavior are introduced by these retrieval adapters.
   `resetLeaf()`. Duplicates, cyclic/forward/missing parent links, malformed required
   fields, and unsupported versions fail without changing sources. Unknown tree metadata
   and message roles are not searchable. `context_edit` does not redact historical text.
-- Confirmed canonical CWD mismatches retain a legacy prior-index suppression flag. The
-  simplified pipeline does not consume it or suppress cached results. An unavailable
-  stored-CWD alias is not mistaken for confirmed cross-workspace ownership. Scoped deletion
-  primitives are used by the serialized worker, not history/source adapters.
+- Foreign or unavailable stored CWDs reject the new snapshot without suppressing cached
+  results. Read failures preserve previously indexed content. Scoped deletion primitives
+  are used by the serialized worker, not history/source adapters.
 - `search/chunk.ts` emits independent message chunks with checked UTF-8 byte spans,
   3,200-code-point/12-KiB bounds, up to 400-code-point overlap, deterministic keys/input
   hashes, and a 20,000-chunk conversation cap. Only line endings are normalized.
@@ -607,15 +508,13 @@ already provisioned and schema-creation permission:
 
 ```sh
 npx vitest run tests/integration/search-schema.test.ts tests/integration/search-repository.test.ts tests/integration/search-document-indexer.test.ts tests/integration/search-indexer.test.ts
-# Retired module suites may also be run, but do not define production requirements:
-npx vitest run tests/integration/search-cleanup.test.ts tests/integration/search-workspace-sync.test.ts
 ```
 
 Each run creates/drops its own random schema. Tests validate idempotence, schema
 compatibility, fixed dimensions, exact nanosecond fingerprints, weighted lexical
 columns, cascading deletion, rollback, exact-input reuse, atomic complete-generation
 visibility, metadata renames, stale revision/generation rejection, cancellation, aggregate
-deadlines and pre-commit registration guards. Checkpoint tests cover initial-schema
+deadlines and pre-commit cancellation guards. Checkpoint tests cover initial-schema
 upgrades, stable keyset pagination, duplicate path identities, long paths, exact lookup,
 stale scopes, and concurrent changes between pages. They never use Ollama/OpenAI or real
 transcripts. The document composition suite additionally uses new temporary synthetic JSONL
@@ -628,13 +527,11 @@ kinds, sequential publication/skipping/reuse, forced rebuild, canonical aliases,
 and missing stores, directory witness changes, identity replacement, rename/source revision
 sync, unregister/restart, busy refresh coalescing and dependency failure/recovery. All source
 files are temporary synthetic evidence and are verified unchanged by indexing.
-The retired cleanup composition suite additionally checks exact conditional deletion, bounded duplicate-path
-continuations, fresh-attempt/registration ticket revocation, rollback of counters/evidence, cancellation
-and ambiguous deletion COMMIT recovery; all evidence and registrations are synthetic.
-The workspace preparation suite uses temporary SQLite/filesystem registrations and checks that
-session stores/Pi directories are not created. Its opt-in PostgreSQL cases cover lexical rename
-atomicity/rollback, revision replacement and fresh reconciliation after an ambiguous COMMIT.
-Without the environment variable PostgreSQL cases are skipped; filesystem/SQLite cases still run.
+Repository suites also cover exact version/path-conditional deletion, stale generation/move/
+recreation no-ops, rollback of counters/evidence, cancellation and ambiguous deletion COMMIT
+recovery. These checks remain under `search-repository.test.ts`; retired ticket/incarnation/
+workspace-preparation suites have been removed. Without the environment variable PostgreSQL
+cases are skipped; source/SQLite and fake-provider composition tests still run.
 
 ## Rollback and backup
 
@@ -669,6 +566,6 @@ rerank labels. Let the production initial pass finish; it reuses existing cached
 Do not run a second indexer alongside it. Current counts, protected secret/backup paths
 and deployment/usage-assessment state are recorded in `../checkpoint.md`.
 
-Retired-module cleanup is separate, not a release gate. No cleanup tickets,
+Retired modules and obsolete tests are removed. No cleanup tickets,
 suppression recovery or membership barrier. Missing/incomplete stores still never
 authorize pruning.

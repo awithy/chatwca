@@ -3,7 +3,6 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { SearchRepositoryDatabase } from "../../src/server/search/database.js";
 import { searchHash } from "../../src/server/search/extract.js";
-import { SearchRepositoryError } from "../../src/server/search/errors.js";
 import { loadSearchMigrations, migrateSearchDatabase, type SearchDatabasePool } from "../../src/server/search/migrations.js";
 import { createSearchPool } from "../../src/server/search/postgres.js";
 import { PostgresSearchRepository } from "../../src/server/search/repository.js";
@@ -271,7 +270,76 @@ describe.skipIf(testUrl === undefined)("PostgreSQL atomic search repository", ()
     await expect(repository.publishDocument({ ...candidate, expected: saved })).rejects.toThrow("search_source_changed");
   });
 
-  it("source-revision replacement is atomic; delayed old-revision cleanup cannot delete the new workspace", async () => {
+  it.each(["generation", "move", "recreate"] as const)("exact observed deletion cannot remove a newer %s", async (change) => {
+    const candidate = searchPublication();
+    await repository.publishDocument(candidate);
+    const observed = (await repository.readCheckpoint(REPOSITORY_WORKSPACE, candidate.sessionId))!;
+    if (change === "recreate") {
+      await repository.deleteDocument(REPOSITORY_WORKSPACE, candidate.sessionId);
+      await repository.publishDocument(candidate);
+    } else {
+      await repository.publishDocument({ ...candidate, expected: observed,
+        sourcePath: change === "move" ? "/synthetic/sessions/alias.jsonl" : candidate.sourcePath });
+    }
+    const current = (await repository.readCheckpoint(REPOSITORY_WORKSPACE, candidate.sessionId))!;
+    expect(await repository.deleteDocumentVersion(observed)).toBe(false);
+    expect(await repository.readCheckpoint(REPOSITORY_WORKSPACE, candidate.sessionId)).toEqual(current);
+    expect(await counts()).toEqual({ document_count: 1, chunk_count: 1 });
+    expect(await repository.deleteDocumentVersion(current)).toBe(true);
+    expect(await counts()).toEqual({ document_count: 0, chunk_count: 0 });
+    expect((await pool.query("SELECT count(*)::integer AS count FROM search_chunks")).rows[0].count).toBe(0);
+  });
+
+  it("conditional deletion is a no-op for a replaced or missing derived workspace revision", async () => {
+    const candidate = searchPublication();
+    await repository.publishDocument(candidate);
+    const observed = (await repository.readCheckpoint(REPOSITORY_WORKSPACE, candidate.sessionId))!;
+    const replacement = { ...REPOSITORY_WORKSPACE, sourceRevision: searchHash("replacement") };
+    await repository.synchronizeWorkspace(replacement, REPOSITORY_WORKSPACE.sourceRevision);
+    expect(await repository.deleteDocumentVersion(observed)).toBe(false);
+    await repository.deleteWorkspace(replacement);
+    expect(await repository.deleteDocumentVersion(observed)).toBe(false);
+  });
+
+  it("cancellation of an in-flight deletion preserves committed evidence and counters", async () => {
+    const candidate = searchPublication();
+    await repository.publishDocument(candidate);
+    const observed = (await repository.readCheckpoint(REPOSITORY_WORKSPACE, candidate.sessionId))!;
+    const reached = deferred(); const proceed = deferred();
+    const paused = new PostgresSearchRepository(injected(async (sql, _values, query) => {
+      const result = await query();
+      if (sql.startsWith("DELETE FROM search_documents")) { reached.resolve(); await proceed.promise; }
+      return result;
+    }));
+    const controller = new AbortController();
+    const pending = expect(paused.deleteDocumentVersion(observed, { signal: controller.signal })).rejects.toThrow("search_cancelled");
+    try {
+      await reached.promise; controller.abort(); await pending; proceed.resolve();
+      expect(await repository.readCheckpoint(REPOSITORY_WORKSPACE, candidate.sessionId)).toEqual(observed);
+      expect(await counts()).toEqual({ document_count: 1, chunk_count: 1 });
+    } finally { controller.abort(); proceed.resolve(); await pending; paused.close(); }
+  });
+
+  it("does not retry an ambiguous deletion COMMIT; fresh metadata reconciles the outcome", async () => {
+    const candidate = searchPublication();
+    await repository.publishDocument(candidate);
+    const observed = (await repository.readCheckpoint(REPOSITORY_WORKSPACE, candidate.sessionId))!;
+    let commits = 0;
+    const ambiguous = new PostgresSearchRepository(injected(async (sql, _values, query) => {
+      const result = await query();
+      if (sql === "COMMIT") { commits++; throw new Error("synthetic lost deletion acknowledgement"); }
+      return result;
+    }));
+    try {
+      await expect(ambiguous.deleteDocumentVersion(observed)).rejects.toThrow("search_database_unavailable");
+      expect(commits).toBe(1);
+      expect(await repository.readCheckpoint(REPOSITORY_WORKSPACE, candidate.sessionId)).toBeNull();
+      expect(await counts()).toEqual({ document_count: 0, chunk_count: 0 });
+      expect(await repository.deleteDocumentVersion(observed)).toBe(false);
+    } finally { ambiguous.close(); }
+  });
+
+  it("source-revision replacement is atomic; delayed old-revision deletion cannot delete the new workspace", async () => {
     const candidate = searchPublication();
     await repository.publishDocument(candidate);
     const changed = { ...REPOSITORY_WORKSPACE, sourceRevision: searchHash("different source"), canonicalPath: "/synthetic/new-workspace", sessionDirectory: "/synthetic/new-sessions" };
@@ -320,24 +388,6 @@ describe.skipIf(testUrl === undefined)("PostgreSQL atomic search repository", ()
       expect((await pool.query("SELECT original_text FROM search_chunks")).rows).toEqual([{ original_text: "Committed evidence" }]);
       expect(await counts()).toEqual({ document_count: 1, chunk_count: 1 });
     } finally { controller.abort(); proceed.resolve(); await pending; paused.close(); }
-  });
-
-  it("rejects an authoritative registration/invalidation change immediately before commit", async () => {
-    const candidate = searchPublication();
-    const saved = await repository.publishDocument(candidate);
-    let current = true;
-    const guarded = new PostgresSearchRepository(injected(async (sql, _values, query) => {
-      const result = await query();
-      if (sql.startsWith("INSERT INTO search_chunks")) current = false;
-      return result;
-    }));
-    try {
-      await expect(guarded.publishDocument({ ...candidate, expected: saved, title: "Stale title" }, {
-        assertCurrent: () => { if (!current) throw new SearchRepositoryError("search_source_changed"); },
-      })).rejects.toThrow("search_source_changed");
-      expect((await repository.readCheckpoint(REPOSITORY_WORKSPACE, candidate.sessionId))?.title).toBe(candidate.title);
-      expect((await repository.readCheckpoint(REPOSITORY_WORKSPACE, candidate.sessionId))?.generation).toBe("1");
-    } finally { guarded.close(); }
   });
 
   it("bounds lock contention and aggregate database work, retaining committed content", async () => {

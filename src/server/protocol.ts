@@ -15,6 +15,7 @@ import {
   type UiImage,
   type WorkspaceSummary,
 } from "../shared/protocol.js";
+import type { SearchRefreshRequest } from "./search/indexer.js";
 import type { CreateJobInput, JobRunPage, UpdateJobInput } from "./job-repository.js";
 import type { JobServiceListener } from "./job-service.js";
 import type {
@@ -118,6 +119,7 @@ export interface WebSocketProtocolOptions {
   readonly maxInboundMessageBytes?: number;
   readonly outboundFlow?: OutboundFlowOptions;
   readonly onInternalError?: (error: unknown) => void;
+  readonly onSearchRefresh?: (request: SearchRefreshRequest) => void;
 }
 
 export interface DispatchResult {
@@ -200,9 +202,13 @@ export async function dispatchClientCommand(
   workspaces: ProtocolWorkspaceRepository,
   shuttingDown = false,
   jobs?: ProtocolJobs,
+  onSearchRefresh?: (request: SearchRefreshRequest) => void,
 ): Promise<DispatchResult> {
   if (shuttingDown) throw new AppError(ERROR_CODES.SHUTTING_DOWN);
 
+  const refreshSearch = (request: SearchRefreshRequest = {}): void => {
+    try { onSearchRefresh?.(request); } catch { /* Optional search never fails a completed source mutation. */ }
+  };
   const requireJobs = (): ProtocolJobs => {
     if (jobs === undefined) throw new AppError(ERROR_CODES.INTERNAL_ERROR);
     return jobs;
@@ -240,6 +246,7 @@ export async function dispatchClientCommand(
           ? {}
           : { acknowledgeWritableMounts: command.acknowledgeWritableMounts }),
       });
+      refreshSearch();
       const authoritative = workspaces.list();
       return {
         response: { type: "workspaces", requestId: command.requestId, workspaces: authoritative },
@@ -289,6 +296,7 @@ export async function dispatchClientCommand(
           ? {}
           : { acknowledgeWritableMounts: command.acknowledgeWritableMounts }),
       });
+      refreshSearch({ workspaceId: command.workspaceId });
       const authoritative = workspaces.list();
       return {
         response: { type: "workspaces", requestId: command.requestId, workspaces: authoritative },
@@ -303,6 +311,7 @@ export async function dispatchClientCommand(
         throw new AppError(ERROR_CODES.WORKSPACE_BUSY);
       }
       workspaces.delete(command.workspaceId);
+      refreshSearch();
       return {
         response: { type: "ack", requestId: command.requestId, command: command.type },
         workspaces: workspaces.list(),
@@ -360,6 +369,7 @@ export async function dispatchClientCommand(
         command.conversationId,
         command.title,
       );
+      refreshSearch({ workspaceId: conversation.workspaceId });
       return {
         response: {
           type: "state",
@@ -382,6 +392,7 @@ export async function dispatchClientCommand(
       rejectJobOwnedMutation(command.conversationId);
       const workspace = workspaces.requireAvailable(command.workspaceId);
       const conversations = await history.delete(workspace, command.conversationId);
+      refreshSearch({ workspaceId: command.workspaceId });
       return {
         response: { type: "ack", requestId: command.requestId, command: command.type },
         affectedWorkspaceId: command.workspaceId,
@@ -435,6 +446,7 @@ export async function dispatchClientCommand(
       const fork = await registry.fork(command.conversationId, command.entryId, policy);
       await registry.close(source.id);
       const conversations = await history.delete(workspace, source.id);
+      refreshSearch({ workspaceId: source.workspaceId });
       return {
         response: {
           type: "state",
@@ -544,6 +556,7 @@ export class WebSocketProtocol {
   readonly #maxInboundMessageBytes: number;
   readonly #outboundFlowOptions: OutboundFlowOptions;
   readonly #onInternalError: (error: unknown) => void;
+  readonly #onSearchRefresh: ((request: SearchRefreshRequest) => void) | undefined;
   readonly #flows = new Map<WebSocket, OutboundFlowController>();
   readonly #historySubscriptions = new Map<WebSocket, string>();
   readonly #historyRefreshes = new Map<string, WorkspaceRefreshState>();
@@ -567,6 +580,7 @@ export class WebSocketProtocol {
     }
     this.#outboundFlowOptions = options.outboundFlow ?? {};
     this.#onInternalError = options.onInternalError ?? (() => undefined);
+    this.#onSearchRefresh = options.onSearchRefresh;
     this.#onConnection = (socket) => this.#handleConnection(socket);
     this.#webSocketServer.on("connection", this.#onConnection);
     this.#unsubscribeRegistry = this.#registry.subscribe((event) => this.#handleRegistryEvent(event));
@@ -658,6 +672,7 @@ export class WebSocketProtocol {
         this.#workspaces,
         this.#shuttingDown,
         this.#jobs,
+        this.#onSearchRefresh,
       );
       this.#send(socket, result.response);
       if (command.type === "history.list") {

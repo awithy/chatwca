@@ -10,6 +10,7 @@ import {
   type ManagedNetworkConfig,
 } from "./network/config.js";
 import { loadJobConfig, type JobConfig } from "./job-config.js";
+import { loadSearchConfig, type SearchConfig } from "./search/config.js";
 import { loadWebSearchConfig, type WebSearchConfig } from "./web-search.js";
 import {
   loadHttpToolCatalog,
@@ -49,6 +50,8 @@ export interface ServerConfig {
   readonly managedNetwork: Readonly<ManagedNetworkConfig>;
   /** Complete server-only scheduled-job and trusted-hook configuration. */
   readonly jobs: Readonly<JobConfig>;
+  /** Optional derived conversation index; never a conversation runtime dependency. */
+  readonly search: Readonly<SearchConfig>;
   /** Optional parent-owned Brave Search tool configuration; the key is never public. */
   readonly webSearch: Readonly<WebSearchConfig>;
   /** Startup-only parent-owned HTTP tools and exact per-workspace grants. */
@@ -129,6 +132,7 @@ export function loadConfig(
     processCwd,
   });
   const jobs = loadJobConfig(environment);
+  const search = loadSearchConfig(environment);
   const webSearch = loadWebSearchConfig(environment);
   const httpTools = loadHttpToolCatalog(environment, processCwd);
 
@@ -162,6 +166,7 @@ export function loadConfig(
     sandbox,
     managedNetwork,
     jobs,
+    search,
     webSearch,
     httpTools,
   });

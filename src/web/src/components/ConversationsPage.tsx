@@ -14,7 +14,7 @@ import { ConversationHeader } from "./ConversationHeader.js";
 import { WorkspaceConversationPicker } from "./WorkspaceConversationPicker.js";
 import { WorkspaceSidebar } from "./WorkspaceSidebar.js";
 import type { WorkspaceFormValues } from "./WorkspaceForm.js";
-import { MessageTimeline } from "./MessageTimeline.js";
+import { MessageTimeline, type SearchMessageTarget } from "./MessageTimeline.js";
 import { NetworkBlockedNotices } from "./NetworkBlockedNotices.js";
 import {
   canCloseConversation,
@@ -28,6 +28,8 @@ export interface ConversationsPageProps {
   readonly chat: ChatViewState;
   readonly server: ServerStatus;
   readonly onOpenJobs: () => void;
+  readonly onOpenSearch?: () => void;
+  readonly searchTarget?: SearchMessageTarget | null;
   readonly onOpenJobRun: (jobId: string, runId: string) => void;
 }
 
@@ -68,7 +70,7 @@ function mobileContextLabel(conversation: ChatViewState["conversations"][string]
   return `${usage.percent === null ? "?" : `${usage.percent.toFixed(1)}%`}/${window}`;
 }
 
-export function ConversationsPage({ client, chat, server, onOpenJobs, onOpenJobRun }: ConversationsPageProps) {
+export function ConversationsPage({ client, chat, server, onOpenJobs, onOpenSearch, onOpenJobRun, searchTarget }: ConversationsPageProps) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [mobileActionsOpen, setMobileActionsOpen] = useState(false);
   const [mobileRenaming, setMobileRenaming] = useState(false);
@@ -539,6 +541,7 @@ export function ConversationsPage({ client, chat, server, onOpenJobs, onOpenJobR
           setSidebarOpen(false);
           onOpenJobs();
         }}
+        {...(onOpenSearch ? { onOpenSearch: () => { setSidebarOpen(false); onOpenSearch(); } } : {})}
         onSelectWorkspace={(workspaceId) => {
           void changeWorkspace(workspaceId).catch(() => undefined);
           setSidebarOpen(false);
@@ -802,7 +805,15 @@ export function ConversationsPage({ client, chat, server, onOpenJobs, onOpenJobR
                   </p>
                 </div>
               ) : (
-                <div className={`conversation-workspace${(selectedProjection?.networkBlocked.length ?? 0) > 0 ? " has-network-notices" : ""}`}>
+                <div className={`conversation-workspace${(selectedProjection?.networkBlocked.length ?? 0) > 0 ? " has-network-notices" : ""}${searchTarget?.conversationId === selectedConversation.id ? " has-search-notice" : ""}`}>
+                  {searchTarget?.conversationId === selectedConversation.id && (
+                    <div className="search-message-notice" role="status">
+                      <span>{selectedConversation.messages.some((message) => message.entryId === searchTarget.entryId)
+                        ? "Opened a cached search match."
+                        : "This cached message is no longer on the saved branch. The conversation may have changed; no branch was switched."}</span>
+                      {onOpenSearch && <button type="button" onClick={onOpenSearch}>Back to search results</button>}
+                    </div>
+                  )}
                   {(selectedProjection?.networkBlocked.length ?? 0) > 0 && (
                     <NetworkBlockedNotices
                       notices={selectedProjection?.networkBlocked ?? []}
@@ -811,6 +822,7 @@ export function ConversationsPage({ client, chat, server, onOpenJobs, onOpenJobR
                   )}
                   <MessageTimeline
                     conversationId={selectedConversation.id}
+                    focusEntryId={searchTarget?.conversationId === selectedConversation.id ? searchTarget.entryId : null}
                     messages={selectedConversation.messages}
                     notices={selectedProjection?.notices ?? []}
                     queue={selectedConversation.queue}

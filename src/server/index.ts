@@ -70,6 +70,8 @@ import {
 import { serveWebApp } from "./static.js";
 import { hasAllowedWebSocketOrigin } from "./websocket-boundary.js";
 import { WorkspaceRepository } from "./workspace-repository.js";
+import { SearchService, type SearchServiceOptions, type SearchServicePort } from "./search/service.js";
+import { mountSearchRoutes } from "./search/routes.js";
 
 interface PackageMetadata {
   readonly version?: unknown;
@@ -91,6 +93,7 @@ export interface ChatWcaProtocolServices {
   /** Required authority for every browser workspace and conversation lifecycle command. */
   readonly workspaces: ProtocolWorkspaceRepository;
   readonly jobs?: ProtocolJobs;
+  readonly search?: SearchServicePort;
   readonly maxInboundMessageBytes?: number;
   readonly outboundFlow?: OutboundFlowOptions;
   /** Production supplies the registry here so transport and Pi teardown share one bound. */
@@ -195,6 +198,7 @@ export function createChatWcaServer(
   // only after SQLite and shared Pi services initialize, then becomes ready
   // when its network listener is actually bound.
   let accepting = false;
+  const search = services?.search ?? new SearchService({ config: { ...config.search, mode: "disabled" }, registrations: { list: () => [] }, piAgentDirectory: "/" });
 
   app.get("/api/health", (_request, response) => {
     response.json({ ready: accepting, version: serverVersion });
@@ -215,6 +219,7 @@ export function createChatWcaServer(
       ),
       httpTools: publicHttpTools(config.httpTools),
       jobs: publicJobConfig(config.jobs),
+      search: search.capability(),
     });
   });
 
@@ -275,6 +280,7 @@ export function createChatWcaServer(
     },
   );
 
+  mountSearchRoutes(app, search, () => accepting);
   serveWebApp(app);
 
   const httpServer = createHttpServer(app);
@@ -320,6 +326,7 @@ export function createChatWcaServer(
           history: services.history,
           workspaces: services.workspaces,
           ...(services.jobs === undefined ? {} : { jobs: services.jobs }),
+          onSearchRefresh: (request) => { try { search.requestRefresh(request); } catch { /* Search failure never fails source mutations. */ } },
           maxInboundMessageBytes,
           ...(services.outboundFlow === undefined
             ? {}
@@ -342,7 +349,10 @@ export function createChatWcaServer(
   const shutdownOwner = services?.shutdown;
   const gracefulShutdown = new GracefulShutdown({
     gracePeriodMs: config.shutdownGraceMs,
-    beginShutdown: () => shutdownOwner?.beginShutdown(),
+    beginShutdown: () => {
+      void search.close();
+      shutdownOwner?.beginShutdown();
+    },
     stopAccepting: () => {
       accepting = false;
     },
@@ -374,7 +384,7 @@ export function createChatWcaServer(
         closeHttpServer(httpServer),
       ]);
     },
-    abortActive: () => shutdownOwner?.abortActive() ?? Promise.resolve(),
+    abortActive: async () => { await Promise.all([search.close(), shutdownOwner?.abortActive() ?? Promise.resolve()]); },
     disposeRuntimes: () => shutdownOwner?.dispose() ?? Promise.resolve(),
     disposeListeners: () => protocol?.dispose(),
     closeStorage: () => services?.closeStorage?.(),
@@ -439,6 +449,8 @@ export interface ChatWcaStartupOptions {
   ) => JobRepository;
   readonly createJobRunner?: (options: ConstructorParameters<typeof JobRunner>[0]) => JobRunner;
   readonly createJobScheduler?: (options: ConstructorParameters<typeof JobScheduler>[0]) => JobScheduler;
+  /** Optional search is constructed without IO and started only after listening; disabled mode never calls this factory. */
+  readonly createSearchService?: (options: SearchServiceOptions) => SearchServicePort;
   /** Injectable only to assert that startup performs no Pi history listing. */
   readonly listSessions?: SessionHistoryOptions["listSessions"];
   readonly serverVersion?: string;
@@ -506,6 +518,7 @@ export async function startChatWcaServer(
   let registry: ConversationRegistry | undefined;
   let coordinator: RuntimeCoordinator | undefined;
   let server: ChatWcaServer | undefined;
+  let search: SearchServicePort | undefined;
 
   try {
     const config = (options.loadConfiguration ?? loadConfig)();
@@ -708,6 +721,14 @@ export async function startChatWcaServer(
     // readiness. Dispatched catch-up work deliberately continues in parallel.
     await scheduler.start();
 
+    if (config.search.mode === "optional") {
+      search = (options.createSearchService ?? ((settings) => new SearchService(settings)))({ config: config.search, registrations: workspaces, piAgentDirectory,
+        getRerankContext: () => {
+          const globalDefaults = runtimeFactory.globalModelDefaults;
+          return { runtime: runtimeFactory.modelRuntime, ...(globalDefaults === undefined ? {} : { globalDefaults }) };
+        },
+      });
+    }
     server = createChatWcaServer(
       config,
       options.serverVersion ?? readServerVersion(),
@@ -717,6 +738,7 @@ export async function startChatWcaServer(
         images: registry,
         workspaces,
         jobs: jobService,
+        ...(search === undefined ? {} : { search }),
         shutdown: coordinator,
         closeStorage: () => database?.close(),
         sandboxFunctionalProbeSucceeded: functionalProbeSucceeded,
@@ -725,6 +747,7 @@ export async function startChatWcaServer(
       },
     );
     await (options.listen ?? listen)(server, config);
+    search?.start();
     return server;
   } catch (error) {
     if (server !== undefined) {
@@ -733,6 +756,7 @@ export async function startChatWcaServer(
     } else {
       // Construction failed before the HTTP shutdown owner existed. Unwind the
       // same jobs/hooks/registry ownership order when available.
+      void search?.close();
       if (coordinator !== undefined) {
         try { coordinator.beginShutdown(); } catch (cleanupError) { reportError(cleanupError); }
         await coordinator.abortActive().catch(reportError);

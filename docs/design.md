@@ -1,6 +1,6 @@
 # ChatWCA Design
 
-**Status:** Implemented
+**Status:** Core application implemented; optional conversation search in progress
 
 **Runtime:** Node.js 22.19+, TypeScript
 
@@ -14,7 +14,7 @@ The server defaults to `0.0.0.0` for compatibility and has no authentication or 
 
 On Linux, a workspace can use the Bubblewrap security profile specified in [`bubblewrap-design.md`](bubblewrap-design.md). Sandboxed tools can remain network-isolated or use the administrator-filtered managed-egress path specified in [`network-sandbox-design.md`](network-sandbox-design.md). These boundaries constrain coding tools; they do not authenticate clients, isolate the parent model runtime, or prevent workspace content from being sent to the configured model provider.
 
-A workspace is a user-named, canonical path to a directory with an immutable session-storage policy and optional named directory mounts exposed to sandboxed tools under `/mounts`. ChatWCA stores workspace definitions in its own SQLite database. The server does not scan Pi's global session history during startup or browser connection; it lists Pi sessions only for a workspace selected by the browser.
+A workspace is a user-named, canonical path to a directory with an immutable session-storage policy and optional named directory mounts exposed to sandboxed tools under `/mounts`. ChatWCA stores workspace definitions in its own SQLite database. Ordinary history listing reads only the browser-selected workspace; it never scans Pi's global history. Planned opt-in conversation search adds a background read-only index of registered workspaces; with search disabled, startup and browser connection do not scan history.
 
 Each conversation:
 
@@ -33,7 +33,7 @@ Each conversation:
 - Create, rename, update, list, and remove named workspaces.
 - Optionally store a workspace's Pi sessions under `<workspace>/.chatwca/sessions`.
 - List, open, switch, create, rename, and delete persisted conversations within a selected workspace.
-- Avoid scanning sessions belonging to unselected workspaces.
+- Avoid scanning unselected workspaces for ordinary history listing; allow explicit opt-in background conversation indexing.
 - Keep multiple conversations alive concurrently.
 - Associate every conversation with a registered workspace and explicit working directory.
 - Stream assistant text, thinking, tool calls, and tool results.
@@ -48,6 +48,7 @@ Each conversation:
 - Keep sandboxed tools network-isolated by default, with optional administrator-filtered managed egress.
 - Select managed-egress destinations through immutable, administrator-defined per-workspace policy sets.
 - Optionally expose a parent-owned Brave `web_search` tool without disclosing its credential to browsers, models, workspaces, or sandbox workers.
+- Add optional Global Search over saved conversations, with local lexical/vector retrieval and optional Pi/OpenAI reranking.
 
 ## 3. Non-goals
 
@@ -304,7 +305,7 @@ Existing conversations use:
 SessionManager.open(sessionFile)
 ```
 
-History for a selected workspace is discovered with `SessionManager.list(workspace.path, workspace.sessionDirectory ?? undefined)`. Normal startup, browser connection, workspace listing, and history refresh paths must never call `SessionManager.listAll()`. The application does not parse or rewrite Pi JSONL directly.
+History for a selected workspace is discovered with `SessionManager.list(workspace.path, workspace.sessionDirectory ?? undefined)`. Startup, browser connection, workspace listing, history refresh and search must never call `SessionManager.listAll()`. Ordinary history/open/delete use Pi APIs. Opt-in search reads JSONL directly for a derived index, but never rewrites source files.
 
 ### 7.2 Runtime replacement
 
@@ -337,7 +338,7 @@ Pi's session store is canonical for conversations. It already contains messages,
 
 ChatWCA's SQLite database is canonical only for workspace definitions and their storage policies. It does not contain messages, conversation summaries, session-file copies, or the browser's selected workspace. This separation avoids synchronization bugs and keeps sessions interoperable with the Pi CLI.
 
-The server does not list Pi sessions at process startup or merely because a browser connects. After a browser selects a workspace, it requests that workspace's history, and the server calls `SessionManager.list()` with the workspace path and configured session directory. Selecting another workspace replaces the browser's history projection with a separately scoped result. No automatic global discovery or migration scan is performed.
+With search disabled, the server does not scan Pi history at process startup or merely because a browser connects. After a browser selects a workspace, ordinary history requests call `SessionManager.list()` with that workspace's path and configured session directory. Selecting another workspace replaces that history projection. Planned opt-in search independently indexes registered stores in the background; it does not discover unregistered workspaces or migrate source files.
 
 History summaries contain:
 
@@ -737,6 +738,77 @@ An accepted prompt's later model failure is represented in the message/event str
 
 Provider credentials continue to use Pi's standard credential store and environment variables. ChatWCA never sends provider credentials to the browser or sandbox. In `optional` and `required` sandbox modes, startup validates Bubblewrap configuration and performs a functional probe. Enabling managed egress also validates its policy, native helper, proxies, bridges, and profile-specific probe. Invalid enabled security configuration prevents startup rather than weakening policy.
 
+### 17.4 Conversation search (simplified single-user plan)
+
+Search is a convenience feature for the one trusted operator, not a multi-tenant
+privacy or authorization boundary. Workspace scope is an ordinary search filter.
+Briefly stale results are acceptable; existing conversation-open behavior handles
+missing sessions or entries. No instant revocation or authoritative membership proof
+is required before displaying cached results.
+
+**Implemented lifecycle:** one process-owned worker performs every index mutation:
+workspace metadata sync, incremental document publication, complete-store absence
+pruning and rebuild. Start it asynchronously when search is enabled, then every
+15 minutes; manual refresh/rebuild coalesces into one pending request. App deletions
+and workspace changes request a refresh, not synchronous suppression/cleanup.
+Missing or incompletely enumerated stores never authorize pruning, but cached results
+can remain searchable with stale/unavailable status. Restart simply starts another
+pass; cached results do not wait for membership recovery.
+
+**Retain:** read-only version-3 saved-branch extraction, deterministic chunks, local
+Qwen 1,024-dimensional embeddings, exact-input reuse, model-space filtering, atomic
+per-document updates and existing IO bounds. SQLite owns registrations, Pi owns
+conversations, PostgreSQL is disposable derived state. Search failures cannot break
+chat or jobs. Migrations remain explicit through `npm run search:migrate`.
+
+**Drop from the production design:** workspace incarnations, path/session epochs,
+permanent suppression tombstones, cleanup tickets and revocation, separate cleanup
+queues, repeated pre-commit authority seals and recovery eligibility barriers.
+`SearchDocumentIndexer` now takes ordinary workspace/candidate/space/options without authority
+capabilities. Use existing repository operations directly from the serialized worker;
+do not wire `SearchIndexAuthority`, `SearchIndexCleanup` or the authority-dependent
+workspace synchronizer. Persistent run history, resumable scans, elaborate fairness
+and distributed-writer coordination are not v1 requirements.
+
+**Complexity budget and finish line:** the earlier authority/ticket foundations
+were excessive for this single-user feature. Keep the small architecture: one worker
+→ cached index → local search → optional reranking. The browser toggle/fallback
+increment and focused end-to-end synthetic validation are complete; seek explicit
+rollout approval. Do not add more
+infrastructure or guarantees; optional reranking must not block usable local search.
+Preserve source non-mutation, atomic replacement, model-space consistency, bounded
+IO/cancellation and isolation from chat/jobs. After approved rollout, separately remove
+unused foundations/obsolete tests and consolidate abstractions that do not earn their
+maintenance cost. Cleanup is not a release gate; further complexity needs evidence
+from actual use.
+
+**Current implementation:** configuration, PostgreSQL migrations/pool/repository,
+read-only sources/extraction/chunking, Ollama/signatures, per-document reconciliation,
+the serialized indexing/pruning worker with coalescing/status, and local hybrid
+retrieval with RRF/grouping, lexical fallback and bounded query admission are implemented
+and tested. Optional mode now starts schema compatibility checks and indexing
+asynchronously after listener readiness, with timer/manual/mutation refresh, bounded
+search/status/refresh/rebuild HTTP routes and cancellation/pool shutdown. Disabled mode
+constructs no search dependencies and scans no history. Synthetic server composition
+proves cached search across restart/source/provider failure and real mutation hooks.
+Browser Global Search now provides configured-mode desktop/mobile navigation, retained
+in-memory query/results/rerank selection, All/one-workspace scope, submit/cancel, freshness/status polling,
+refresh/confirmed rebuild and plain-text grouped excerpts. Existing conversation opening
+focuses the matching message; missing sessions/branch entries show stale-result notices
+without automatic branch switching. Synthetic browser tests cover these flows and outages.
+The superseded authority/cleanup/workspace-sync modules remain unwired. Optional Pi
+reranking is wired into queries/service/API after RRF collapse and before grouping,
+using the existing runtime/global model snapshot, default-on API requests, explicit
+opt-out and local fallback with stable reasons. The browser now has the default-on
+user toggle, disclosure/capability hint and safe applied/local-fallback labels driven
+by the actual response, not the next request's selection. Real browser-to-API/faux-Pi
+checks cover ordering, scopes, navigation, fallback and provider cancellation.
+Keep this workstation disabled until explicit rollout approval;
+tests do not authorize enabling it.
+
+See [search-design.md](search-design.md) for the current implementation plan and
+[search-operations.md](search-operations.md) for provisioning and existing adapter details.
+
 ## 18. Representative source layout
 
 ```text
@@ -800,7 +872,7 @@ native/network-helper/            # Rust outer/inner helper and fixed bridges
 
 Use temporary SQLite databases, temporary Pi sessions, and a fake model/provider to verify:
 
-- startup loads workspace rows without scanning Pi sessions;
+- search-disabled startup loads workspace rows without scanning Pi sessions;
 - selecting one workspace lists only that workspace's sessions;
 - cross-workspace open and delete requests are rejected;
 - create, prompt, persist, dispose, and reopen within a workspace;
@@ -846,6 +918,7 @@ Use temporary SQLite databases, temporary Pi sessions, and a fake model/provider
 12. **Managed egress** — schemas v4/v5, destination policies and named sets, HTTP/SOCKS5 proxies, native bridges, DNS pinning, audit events, probes, and fail-closed lifecycle.
 13. **Workspace policy UI** — responsive accessible modal, acknowledgements, stored/effective policy details, immutable badges, and network-blocked notices.
 14. **Brave web search** — optional server credential, bounded parent-owned custom tool, strict-profile disclosure, and abort/timeout handling.
+15. **Conversation search (finish and validate)** — local search/API, Global Search/message navigation and Pi reranking backend are implemented. Finish the browser toggle/fallback, validate end to end, then seek rollout approval; remove unused foundations afterward. See section 17.4. No new infrastructure.
 
 ## 21. Acceptance criteria
 
@@ -857,7 +930,7 @@ The current implemented design is complete when:
 - a user can create, edit, inspect, select, and remove a named workspace for any valid local directory;
 - workspace creation can select default-disabled workspace-local session storage, and that selection cannot later be changed;
 - the server does not call `SessionManager.listAll()` during startup, browser connection, or normal history refresh;
-- no Pi conversations are listed until the browser selects a workspace;
+- ordinary Pi history is listed only after browser workspace selection; opt-in search may index registered stores independently;
 - selecting a workspace lists only sessions associated with that workspace path;
 - a user can create a persistent conversation in the selected workspace;
 - a user can edit a conversation title and the Pi-native name survives browser and server restarts;

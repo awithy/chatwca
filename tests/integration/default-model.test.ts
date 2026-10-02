@@ -48,11 +48,23 @@ async function fixture() {
     serviceOptions: () => ({ settingsManager: SettingsManager.create(cwd, agentDir) }),
     sessionOptions: () => ({ noTools: "all" }),
   });
-  const policy = { workspaceId: cwd, cwd, sessionDirectory: sessionDir, securityProfile: "unrestricted" as const };
+  const policy = { workspaceId: cwd, cwd, sessionDirectory: sessionDir, securityProfile: "unrestricted" as const,
+    networkPolicy: null, networkPolicySetId: "default", effectiveNetworkPolicySetId: null, networkPolicySet: null, effectiveHttpTools: [] };
   return { cwd, faux, modelRuntime, setDefault, makeFactory, policy };
 }
 
 describe("global default model selection", () => {
+  it("exposes only a copied global startup model pair for optional search, not project settings or later edits", async () => {
+    const { cwd, setDefault, makeFactory } = await fixture();
+    await setDefault({ defaultProvider: "openai", defaultModel: "global-model", shellPath: "/private/shell" });
+    await writeFile(path.join(cwd, ".pi", "settings.json"), JSON.stringify({ defaultProvider: "project", defaultModel: "project-model" }));
+    const factory = await makeFactory();
+    expect(factory.globalModelDefaults).toEqual({ defaultProvider: "openai", defaultModel: "global-model" });
+    const copy = factory.globalModelDefaults as { defaultModel?: string }; copy.defaultModel = "mutated";
+    await setDefault({ defaultProvider: "openai-codex", defaultModel: "later-model" });
+    expect(factory.globalModelDefaults).toEqual({ defaultProvider: "openai", defaultModel: "global-model" });
+    expect((await makeFactory()).globalModelDefaults).toEqual({ defaultProvider: "openai-codex", defaultModel: "later-model" });
+  });
   it("overrides project and saved models without rewriting history, and remains fixed until restart", async () => {
     const { cwd, faux, setDefault, makeFactory, policy } = await fixture();
     const provider = faux.provider.id;

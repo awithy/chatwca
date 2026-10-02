@@ -53,6 +53,7 @@ export interface WorkspaceSidebarProps {
   readonly open: boolean;
   readonly onDismiss: () => void;
   readonly onOpenJobs: () => void;
+  readonly onOpenSearch?: () => void;
   readonly onSelectWorkspace: (workspaceId: string) => void;
   readonly onCreateWorkspace: (
     values: WorkspaceFormValues & { readonly acknowledgeWritableMounts?: true },
@@ -206,6 +207,7 @@ export function WorkspaceSidebar({
   open,
   onDismiss,
   onOpenJobs,
+  onOpenSearch,
   onSelectWorkspace,
   onCreateWorkspace,
   onUpdateWorkspace,
@@ -417,6 +419,7 @@ export function WorkspaceSidebar({
         <button type="button" onClick={onOpenJobs}>
           Jobs
         </button>
+        {onOpenSearch && <button type="button" onClick={onOpenSearch}>Global Search</button>}
       </nav>
 
       <section className="workspace-panel" aria-labelledby="workspace-list-heading">

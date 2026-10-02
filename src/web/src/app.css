@@ -3523,3 +3523,39 @@ pre {
   .jobs-table tr { grid-template-columns: 1fr; }
   .jobs-table th, .jobs-table td, .jobs-table td:last-child { grid-column: 1; }
 }
+
+/* Global search is isolated from the chat timeline and preserves plain source text. */
+.search-page { height: 100%; overflow-y: auto; padding: clamp(1rem, 3vw, 2.5rem); background: var(--bg); scrollbar-color: var(--border-control) transparent; }
+.search-header, .search-form, .search-status, .search-results { max-width: 72rem; }
+.search-header h1 { margin: 0.25rem 0; }
+.search-header > p:last-child, .search-result > p, .search-excerpt > p:first-child { color: var(--muted); }
+.search-form { display: flex; align-items: end; flex-wrap: wrap; gap: 0.75rem; margin: 1.5rem 0; }
+.search-form label, .search-workspace-field { display: grid; gap: 0.4rem; }
+.search-form label:first-child { flex: 1 1 20rem; }
+.search-form input[type=search], .search-form select { min-width: 0; width: 100%; padding: 0.7rem; border: 1px solid var(--border-control); border-radius: 0.5rem; background: var(--panel); color: var(--text); }
+.search-form .search-rerank { flex-basis: 100%; color: var(--muted); }
+.search-form .search-rerank label { display: flex; align-items: center; gap: 0.5rem; }
+.search-rerank p { margin: 0.4rem 0 0; font-size: 0.875rem; }
+.search-page button, .search-message-notice button { padding: 0.6rem 0.8rem; border: 1px solid var(--border-control); border-radius: 0.5rem; background: var(--panel-raised); color: var(--text); cursor: pointer; }
+.search-page button:disabled { cursor: not-allowed; opacity: 0.6; }
+.search-page button:hover:not(:disabled), .search-message-notice button:hover { border-color: var(--accent); }
+.search-status { border: 1px solid var(--border); border-radius: 0.6rem; padding: 1rem; background: var(--panel); }
+.search-status p { margin: 0.5rem 0; color: var(--muted); }
+.search-maintenance { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1rem; }
+.search-result-list { list-style: none; padding: 0; display: grid; gap: 1rem; }
+.search-result { padding: 1rem; border: 1px solid var(--border); border-radius: 0.6rem; background: var(--panel); overflow-wrap: anywhere; }
+.search-result h3 { margin-top: 0; }
+.search-excerpt { border-top: 1px solid var(--border); padding: 0.75rem 0; }
+.search-excerpt > p:first-child { font-size: 0.8rem; }
+.search-excerpt-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.search-mobile-navigation { display: none; }
+.search-message-notice { display: flex; align-items: center; flex-wrap: wrap; gap: 0.75rem; padding: 0.75rem 1rem; border-bottom: 1px solid var(--border); color: var(--muted); background: var(--panel); }
+.chat-message.is-search-match { outline: 2px solid var(--accent); outline-offset: -2px; }
+.conversation-workspace.has-search-notice { grid-template-rows: auto minmax(0, 1fr) auto; }
+.conversation-workspace.has-search-notice.has-network-notices { grid-template-rows: auto auto minmax(0, 1fr) auto; }
+@media (max-width: 720px) {
+  .search-mobile-navigation { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1rem; }
+  .search-mobile-navigation [aria-current=page] { border-color: var(--accent); }
+  .search-form { align-items: stretch; }
+  .search-form label, .search-workspace-field { flex: 1 1 100%; }
+}

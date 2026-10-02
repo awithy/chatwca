@@ -117,6 +117,52 @@ Optional pre/post scripts are trusted host automation. They run outside Bubblewr
 
 See the [scheduled-jobs operations runbook](docs/jobs-operations.md) for safe layouts, exact scheduling/restart behavior, systemd cleanup, rollout/rollback, backup/restore, stable errors, and incident response.
 
+## Conversation search
+
+The [conversation-search design](docs/search-design.md) is being implemented incrementally.
+Implemented foundations include startup-only configuration, a separate PostgreSQL 17/pgvector
+schema with explicit `npm run search:migrate` tooling, tested read-only scoped source,
+saved-branch extraction/message chunking, and a bounded local Ollama adapter with immutable
+model-digest signatures, plus an injectable atomic document/checkpoint repository with
+bounded transactions, paged scoped checkpoint/source-path lookup, and exact-input embedding
+reuse. The simplified per-document pipeline composes fingerprint skipping, reuse, cancellation,
+final source/model checks and atomic publication without authority capabilities. Older
+unwired authority/cleanup/workspace-preparation modules are superseded by the single-user
+plan and are not used by the new serialized `SearchIndexer`. Its explicitly invoked loop
+syncs registrations, indexes configured stores, prunes safely, coalesces refresh/rebuild,
+and reports in-memory progress/errors. The local query service now combines parameterized
+lexical/exact-vector retrieval, model-space filtering, RRF, grouped excerpts and lexical
+fallback, with bounded admission/cancellation and cached results across restart/source
+outages. Synthetic worker-to-query composition is tested on disposable PostgreSQL.
+Optional mode now initializes asynchronously after listener readiness, checks schema
+compatibility without DDL, starts the worker and a 15-minute refresh timer, and exposes
+`POST /api/search`, `GET /api/search/status`, and `POST /api/search/{refresh,rebuild}`.
+Successful workspace changes, deletion/rewind and conversation rename request refresh;
+search outages never fail those mutations or chat/job startup. Disabled mode constructs
+no search pool, scans no history and probes no dependencies. Browser **Global Search**
+is now implemented: select All or one workspace, submit/Enter, cancel, inspect freshness,
+refresh or confirm a rebuild, and open an excerpt's matching message. The page remains
+available through initialization/outages when optional mode is configured. Query/results
+and the default-on Pi reranking selection stay in browser memory across page navigation
+(not reload or local storage). Stale/deleted conversations
+or missing branch entries show a notice; no branch is switched automatically. Excerpts
+are rendered as plain text. The API now supports default-on optional Pi reranking
+through the configured native OpenAI/OpenAI-Codex runtime, with local fallback and
+safe capability/reason metadata. The browser toggle sends the selected preference;
+turn it off (`rerank: false`) to keep requests fully local. Results explicitly label
+applied reranking, opt-out or local fallback with safe reasons. Unavailable capability
+never blocks local search or changes the user's selection. Synthetic browser-to-real
+API/faux-Pi checks cover ordering, scopes, message navigation and cancellation.
+Search defaults to `CHATWCA_SEARCH_MODE=disabled`; enable optional mode only after
+explicit rollout approval and database provisioning. Isolated synthetic tests need
+no service restart. This workstation's approved rollout is live and verified,
+including real-history search/message navigation and Pi reranking; see
+`checkpoint.md` for current deployment status.
+
+See [search provisioning and configuration](docs/search-operations.md) for all
+`CHATWCA_SEARCH_*` settings, least-privilege database setup, and isolated test instructions.
+PostgreSQL remains disposable derived state, not an authority for conversations.
+
 ## Configuration
 
 When started through the server entry point, ChatWCA loads an optional `.env` file from the repository/current working directory before reading its configuration. Copy the included template and edit it:
@@ -127,7 +173,8 @@ cp .env.example .env
 
 For example, set `CHATWCA_HOST` to an IP address assigned to the server. Variables already present in the shell environment take precedence over values in `.env`. The `.env` file is gitignored so credentials and machine-specific settings are not committed.
 
-These are all environment variables interpreted by ChatWCA or explicitly passed through to its Pi runtime:
+The table below covers the current conversation/job/tool runtime settings. The in-progress
+`CHATWCA_SEARCH_*` settings are listed in the [search runbook](docs/search-operations.md#startup-only-configuration).
 
 | Variable | Default | Validation and behavior |
 |---|---:|---|
@@ -345,6 +392,9 @@ npm run test:native:architectures
 npm run test:sandbox-real
 ```
 
+Search schema tests are separately opt-in through `CHATWCA_SEARCH_TEST_DATABASE_URL`;
+use only a disposable pgvector database as described in the [search runbook](docs/search-operations.md#development-checks).
+
 The SDK smoke test uses temporary Pi state and a faux provider; it does not require paid credentials or network access. Browser tests use a deterministic fixture server. On a declared sandbox-capable Linux host, `npm run test:release-gates` runs the complete sequence above.
 
 ## Documentation
@@ -359,6 +409,8 @@ The SDK smoke test uses temporary Pi state and a faux provider; it does not requ
 - [Managed network design](docs/network-sandbox-design.md)
 - [Scheduled-jobs design](docs/jobs-design.md)
 - [Scheduled-jobs operations runbook](docs/jobs-operations.md)
+- [Conversation-search design (in progress)](docs/search-design.md)
+- [Search foundation/provisioning runbook](docs/search-operations.md)
 - [Implementation plan](plan.md)
 
 ## License

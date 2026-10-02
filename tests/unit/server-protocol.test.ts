@@ -25,6 +25,9 @@ const workspace: WorkspaceSummary = {
   sessionDirectory: null,
   securityProfile: "unrestricted",
   effectiveSecurityProfile: "unrestricted",
+  mounts: [], networkPolicy: "isolated", effectiveNetworkPolicy: "isolated",
+  networkPolicySetId: "default", effectiveNetworkPolicySetId: null, networkPolicyIssue: null,
+  enabledHttpTools: [], effectiveHttpTools: [],
   createdAt: 1,
   updatedAt: 1,
   available: true,
@@ -46,7 +49,7 @@ const state: ConversationState = {
   contextUsage: null,
   messages: [],
   queue: { steering: [], followUp: [] },
-  securityProfile: "unrestricted",
+  securityProfile: "unrestricted", networkPolicy: "isolated", networkPolicySetId: "default", effectiveNetworkPolicySetId: null, effectiveHttpTools: [],
 };
 const summary: ConversationSummary = {
   id: state.id,
@@ -60,6 +63,8 @@ const summary: ConversationSummary = {
   status: "idle",
   runnable: true,
 };
+
+const runtimePolicyFields = { networkPolicy: "isolated" as const, networkPolicySetId: "default", effectiveNetworkPolicySetId: null, networkPolicySet: null, effectiveHttpTools: [] };
 
 function services() {
   const create = vi.fn(async () => ({ id: state.id }));
@@ -102,6 +107,7 @@ function services() {
       cwd: workspace.path,
       sessionDirectory: workspace.sessionDirectory,
       securityProfile: "unrestricted" as const,
+      ...runtimePolicyFields,
     })),
     create: vi.fn((input) => {
       authoritative = [{ ...workspace, name: input.name, path: input.path }];
@@ -126,6 +132,27 @@ function command(value: object): ClientCommand {
 }
 
 describe("server WebSocket protocol", () => {
+  it.each([
+    { type: "workspace.create", name: "New", path: "/new", sessionStorage: "pi-default", securityProfile: "unrestricted" },
+    { type: "workspace.update", workspaceId: workspace.id, name: "Renamed" },
+    { type: "workspace.delete", workspaceId: workspace.id },
+    { type: "conversation.delete", workspaceId: workspace.id, conversationId: state.id },
+    { type: "conversation.rename", conversationId: state.id, title: "Renamed" },
+    { type: "conversation.rewind", conversationId: state.id, entryId: "entry-one" },
+  ])("requests eventual search refresh only after successful $type and ignores search outage", async (input) => {
+    const s = services(); const refresh = vi.fn(() => { throw new Error("search unavailable"); });
+    const result = await dispatchClientCommand(command({ ...input, requestId: "mutation" }), s.registry, s.history, s.workspaces, false, undefined, refresh);
+    expect(result.response).not.toHaveProperty("type", "error"); expect(refresh).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveBeenCalledWith(input.type === "workspace.create" || input.type === "workspace.delete" ? {} : { workspaceId: workspace.id });
+  });
+
+  it("failed source mutations and non-mutating commands never request search refresh", async () => {
+    const s = services(); const refresh = vi.fn(); s.calls.delete.mockRejectedValue(new Error("source delete failed"));
+    await expect(dispatchClientCommand(command({ type: "conversation.delete", requestId: "delete", workspaceId: workspace.id, conversationId: state.id }), s.registry, s.history, s.workspaces, false, undefined, refresh)).rejects.toThrow("source delete failed");
+    await dispatchClientCommand(command({ type: "workspace.list", requestId: "list" }), s.registry, s.history, s.workspaces, false, undefined, refresh);
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
   it("decodes closed workspace-aware commands and rejects invalid frames", () => {
     const valid = Buffer.from(JSON.stringify({
       type: "history.list",
@@ -175,6 +202,7 @@ describe("server WebSocket protocol", () => {
       affectedWorkspaceId: workspace.id,
     });
     expect(calls.create).toHaveBeenCalledWith({
+      ...runtimePolicyFields,
       workspaceId: workspace.id,
       cwd: workspace.path,
       sessionDirectory: null,
@@ -189,6 +217,7 @@ describe("server WebSocket protocol", () => {
     }), registry, history, workspaces);
     expect(history.resolve).toHaveBeenCalledWith(workspace, state.id);
     expect(calls.open).toHaveBeenCalledWith({
+      ...runtimePolicyFields,
       workspaceId: workspace.id,
       cwd: workspace.path,
       sessionDirectory: null,
@@ -400,6 +429,7 @@ describe("server WebSocket protocol", () => {
     });
     expect(workspaces.requireUsable).toHaveBeenCalledWith(workspace.id);
     expect(calls.fork).toHaveBeenCalledWith(state.id, "entry-1", {
+      ...runtimePolicyFields,
       workspaceId: workspace.id,
       cwd: workspace.path,
       sessionDirectory: null,
@@ -445,6 +475,7 @@ describe("server WebSocket protocol", () => {
     expect(workspaces.requireAvailable).toHaveBeenCalledWith(workspace.id);
     expect(history.resolve).toHaveBeenCalledWith(workspace, state.id);
     expect(calls.fork).toHaveBeenCalledWith(state.id, "entry-1", {
+      ...runtimePolicyFields,
       workspaceId: workspace.id,
       cwd: workspace.path,
       sessionDirectory: null,

@@ -1,6 +1,5 @@
 import { unlink } from "node:fs/promises";
 import { realpath } from "node:fs/promises";
-import path from "node:path";
 
 import {
   SessionManager,
@@ -17,7 +16,7 @@ import type {
   ConversationSummary,
   LiveConversationStatus,
 } from "../shared/protocol.js";
-import { inspectStoredCwd, resolveConversationCwd } from "./cwd.js";
+import { requireCanonicalSessionWorkspace, storedCwdOwnsWorkspace } from "./session-scope.js";
 
 const UNTITLED_CONVERSATION = "Untitled conversation";
 
@@ -209,7 +208,7 @@ export class SessionHistory {
   async #refreshIndex(
     workspace: SessionHistoryWorkspace,
   ): Promise<HistoryIndex> {
-    const canonicalWorkspace = await this.#requireCanonicalWorkspace(workspace);
+    const canonicalWorkspace = await requireCanonicalSessionWorkspace(workspace);
     let sessions: readonly SessionInfo[];
     try {
       sessions = canonicalWorkspace.sessionDirectory == null
@@ -252,24 +251,6 @@ export class SessionHistory {
     return index;
   }
 
-  async #requireCanonicalWorkspace(
-    workspace: SessionHistoryWorkspace,
-  ): Promise<SessionHistoryWorkspace> {
-    try {
-      const canonicalPath = await resolveConversationCwd(workspace.path);
-      if (path.resolve(canonicalPath) !== path.resolve(workspace.path)) {
-        throw new Error("Workspace path was not canonical");
-      }
-      return {
-        id: workspace.id,
-        path: canonicalPath,
-        sessionDirectory: workspace.sessionDirectory,
-      };
-    } catch (error) {
-      throw new AppError(ERROR_CODES.WORKSPACE_UNAVAILABLE, { cause: error });
-    }
-  }
-
   async #normalizeListedSession(
     workspace: SessionHistoryWorkspace,
     info: SessionInfo,
@@ -283,11 +264,7 @@ export class SessionHistory {
       return undefined;
     }
 
-    const cwdInspection = await inspectStoredCwd(info.cwd);
-    if (
-      !cwdInspection.runnable ||
-      path.resolve(cwdInspection.canonicalCwd) !== path.resolve(workspace.path)
-    ) {
+    if (!await storedCwdOwnsWorkspace(info.cwd, workspace)) {
       // SessionManager.list() is treated as discovery, not authority. A corrupt
       // or injected cross-workspace result cannot enter this workspace's cache.
       return undefined;

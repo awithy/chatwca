@@ -18,6 +18,7 @@ import {
 import { loadSandboxConfig } from "../../src/server/sandbox/config.js";
 import { loadManagedNetworkConfig } from "../../src/server/network/config.js";
 import { loadJobConfig } from "../../src/server/job-config.js";
+import { loadSearchConfig } from "../../src/server/search/config.js";
 import {
   DEFAULT_WEB_SEARCH_TIMEOUT_MS,
   loadWebSearchConfig,
@@ -42,6 +43,7 @@ describe("loadConfig", () => {
       sandbox: loadSandboxConfig({}),
       managedNetwork: loadManagedNetworkConfig({}, "disabled", { processCwd: cwd }),
       jobs: loadJobConfig({}),
+      search: loadSearchConfig({}),
       webSearch: loadWebSearchConfig({}),
       httpTools: loadHttpToolCatalog({}, cwd),
     });
@@ -81,6 +83,7 @@ describe("loadConfig", () => {
       sandbox: loadSandboxConfig({}),
       managedNetwork: loadManagedNetworkConfig({}, "disabled", { processCwd: cwd }),
       jobs: loadJobConfig({}),
+      search: loadSearchConfig({}),
       webSearch: {
         apiKey: "brave-secret",
         timeoutMs: 3500,

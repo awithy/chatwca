@@ -400,6 +400,9 @@ describe("public configuration schema", () => {
       },
     } as const;
     expect(Value.Check(PublicConfigSchema, config)).toBe(true);
+    const search = { mode: "optional", available: true, state: "ready", rerankAvailable: false };
+    expect(Value.Check(PublicConfigSchema, { ...config, search })).toBe(true);
+    expect(Value.Check(PublicConfigSchema, { ...config, search: { ...search, databaseUrl: "private credential" } })).toBe(false);
     expect(Value.Check(PublicConfigSchema, {
       ...config,
       managedEgress: { ...config.managedEgress, helperPath: "/private/helper" },
@@ -467,6 +470,8 @@ describe("workspace schemas", () => {
       requestId,
       workspaces: [{
         ...workspace,
+        mounts: [...workspace.mounts],
+        enabledHttpTools: [...workspace.enabledHttpTools],
         available: true,
         effectiveSecurityProfile: "unrestricted",
         effectiveNetworkPolicy: null,

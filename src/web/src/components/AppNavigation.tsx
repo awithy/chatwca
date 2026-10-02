@@ -1,8 +1,9 @@
-export type AppSection = "conversations" | "jobs";
+export type AppSection = "conversations" | "jobs" | "search";
 
 export interface AppNavigationProps {
   readonly section: AppSection;
   readonly connected: boolean;
+  readonly searchEnabled?: boolean;
   readonly onSelect: (section: AppSection) => void;
 }
 
@@ -25,7 +26,7 @@ function JobsIcon() {
   );
 }
 
-export function AppNavigation({ section, connected, onSelect }: AppNavigationProps) {
+export function AppNavigation({ section, connected, searchEnabled = false, onSelect }: AppNavigationProps) {
   return (
     <nav className="app-navigation" aria-label="Application sections">
       <div className="navigation-brand" aria-label="ChatWCA">W</div>
@@ -49,6 +50,13 @@ export function AppNavigation({ section, connected, onSelect }: AppNavigationPro
         <span className="navigation-icon" aria-hidden="true"><JobsIcon /></span>
         <span className="navigation-label">Jobs</span>
       </button>
+      {searchEnabled && (
+        <button type="button" className={section === "search" ? "is-selected" : ""}
+          aria-current={section === "search" ? "page" : undefined} title="Global Search" onClick={() => onSelect("search")}>
+          <span className="navigation-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><circle cx="10.5" cy="10.5" r="6.75" /><path d="m15.5 15.5 5 5" /></svg></span>
+          <span className="navigation-label">Global Search</span>
+        </button>
+      )}
       <span
         className={`navigation-connection${connected ? " is-connected" : ""}`}
         role="status"

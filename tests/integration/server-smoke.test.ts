@@ -24,6 +24,8 @@ async function startServer(images?: ConversationImageOwner): Promise<{
       CHATWCA_MAX_IMAGE_BYTES: "1024",
       CHATWCA_MAX_TOTAL_IMAGE_BYTES: "2048",
       PI_CODING_AGENT_DIR: "/private/pi-data",
+      CHATWCA_SEARCH_DATABASE_URL: "postgresql://search:search-private-password@127.0.0.1:1/chatwca_search",
+      CHATWCA_SEARCH_OLLAMA_URL: "http://127.0.0.1:1/private-ollama",
     },
     "/tmp",
   );
@@ -111,6 +113,7 @@ describe("server shell", () => {
       maxImages: 3,
       maxImageBytes: 1024,
       maxTotalImageBytes: 2048,
+      search: { mode: "disabled", available: false, state: "disabled", rerankAvailable: false },
       sandbox: {
         mode: "disabled",
         selectableProfiles: ["unrestricted"],
@@ -159,6 +162,8 @@ describe("server shell", () => {
     });
     expect(JSON.stringify(body)).not.toContain("/private/pi-data");
     expect(JSON.stringify(body)).not.toContain("/tmp/chatwca-smoke-data");
+    expect(JSON.stringify(body)).not.toContain("search-private-password");
+    expect(JSON.stringify(body)).not.toContain("private-ollama");
   });
 
   it("serves canonical conversation images with restrictive response headers", async () => {

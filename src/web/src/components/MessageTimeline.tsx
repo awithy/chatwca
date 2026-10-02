@@ -18,7 +18,10 @@ import { ToolCallCard } from "./ToolCallCard.js";
 
 const EMPTY_QUEUE: QueueState = { steering: [], followUp: [] };
 
+export interface SearchMessageTarget { readonly conversationId: string; readonly entryId: string }
+
 export interface MessageTimelineProps {
+  readonly focusEntryId?: string | null;
   readonly conversationId?: string;
   readonly messages: readonly NormalizedMessage[];
   readonly notices: readonly PositionedStatusNotice[];
@@ -216,6 +219,7 @@ function hasVisibleContent(
 
 export function MessageTimeline({
   conversationId,
+  focusEntryId = null,
   messages,
   notices,
   queue,
@@ -258,10 +262,21 @@ export function MessageTimeline({
 
   useEffect(() => {
     const timeline = timelineRef.current;
-    if (timeline !== null && followOutputRef.current) {
+    if (timeline !== null && followOutputRef.current && focusEntryId === null) {
       timeline.scrollTop = timeline.scrollHeight;
     }
-  }, [messages, notices, queue]);
+  }, [messages, notices, queue, focusEntryId]);
+
+  useEffect(() => {
+    if (focusEntryId === null) return;
+    const match = [...(timelineRef.current?.querySelectorAll<HTMLElement>("[data-entry-id]") ?? [])]
+      .find((element) => element.dataset.entryId === focusEntryId);
+    if (!match) return;
+    // Exact data comparison avoids constructing a selector from a source entry ID.
+    followOutputRef.current = false;
+    match.focus({ preventScroll: true });
+    match.scrollIntoView({ block: "center" });
+  }, [conversationId, focusEntryId]);
 
   function trackScroll(event: UIEvent<HTMLDivElement>): void {
     const timeline = event.currentTarget;
@@ -294,8 +309,9 @@ export function MessageTimeline({
           return (
             <React.Fragment key={message.entryId}>
               <article
-              className={`chat-message message-${message.role}${activeAssistant ? " is-streaming" : ""}`}
+              className={`chat-message message-${message.role}${activeAssistant ? " is-streaming" : ""}${message.entryId === focusEntryId ? " is-search-match" : ""}`}
               data-entry-id={message.entryId}
+              tabIndex={-1}
             >
               <header className="message-heading">
                 <strong>{message.role === "user" ? "You" : "Assistant"}</strong>

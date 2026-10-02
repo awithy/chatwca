@@ -14,6 +14,7 @@ export interface JobsPageProps {
   readonly state: ChatViewState;
   readonly config: PublicConfig | undefined;
   readonly onOpenConversations: () => void;
+  readonly onOpenSearch?: () => void;
   readonly onOpenConversation: (workspaceId: string, conversationId: string) => Promise<boolean>;
 }
 
@@ -21,7 +22,7 @@ function message(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
-export function JobsPage({ client, state, config, onOpenConversations, onOpenConversation }: JobsPageProps) {
+export function JobsPage({ client, state, config, onOpenConversations, onOpenSearch, onOpenConversation }: JobsPageProps) {
   const jobsConfig = config?.jobs;
   const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
   const mobileNavigationTrigger = useRef<HTMLButtonElement>(null);
@@ -190,6 +191,7 @@ export function JobsPage({ client, state, config, onOpenConversations, onOpenCon
               <button type="button" aria-current="page" onClick={() => setMobileNavigationOpen(false)}>
                 Jobs
               </button>
+              {onOpenSearch && <button type="button" onClick={() => { setMobileNavigationOpen(false); onOpenSearch(); }}>Global Search</button>}
             </nav>
           </aside>
         </>

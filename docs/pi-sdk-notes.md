@@ -14,6 +14,42 @@ These notes record the concrete SDK behavior on which ChatWCA relies. They are a
 - `ModelRuntime` has no disposal method in this version. It is safe to retain for the process lifetime.
 - An explicit `model` passed to `createAgentSessionFromServices()` takes precedence over both session-restored models and settings defaults. ChatWCA snapshots global `defaultProvider`/`defaultModel` at startup, resolves them in the profile-specific catalog, and passes that model explicitly on creation, open, and fork replacement. Incomplete/unavailable configured defaults fail with `model_unavailable`; absent defaults retain Pi automatic selection. The fork adapter does not reapply the source's model. Selecting the model this way does not rewrite historical messages or append a model change to a resumed source merely to construct a temporary fork runtime; subsequent assistant messages record the model actually used.
 
+## Optional conversation-search reranking adapter
+
+- `src/server/search/rerank.ts` calls only `ModelRuntime.getModel()`,
+  `hasConfiguredAuth()` and `completeSimple()`. Its caller supplies the existing
+  runtime plus a startup snapshot of the global default pair (or the paired search
+  override). No automatic model selection, AgentSession, tools, raw auth lookup,
+  credential copying or search-specific API key is used.
+- Supported provider/API pairs are `openai` with `openai-responses` or
+  `openai-completions`, and `openai-codex` with `openai-codex-responses`. Availability
+  checks use the local catalog/auth snapshot only. Unsupported/missing models or
+  missing auth retain local ordering without inference.
+- `completeSimple()` accepts `signal`, `timeoutMs`, `maxRetries: 0`,
+  `maxRetryDelayMs: 0`, `maxTokens`, `transport: "sse"` and `cacheRetention: "none"`.
+  `SimpleStreamOptions.reasoning` does **not** accept `"off"`; the adapter omits it
+  and lets the native provider apply its model's default/off behavior. The adapter
+  owns a deadline race even when injected completion IO ignores cancellation.
+- A single call receives only query and bounded role/text excerpts with request-local
+  opaque IDs. Only a successful exact JSON ID permutation changes ordering. Errors,
+  output limits, malformed/partial replies and own-deadline expiry retain original
+  candidate objects/order with a stable reason; caller cancellation, aggregate query
+  expiry and shutdown propagate instead of becoming successful fallback.
+- Synthetic tests exercise the actual pinned `ModelRuntime` auth/stream facade with
+  in-memory faux OpenAI/Codex providers, not live credentials or inference. Native
+  provider registration starts a local asynchronous refresh; tests await a complete
+  availability snapshot before asserting `hasConfiguredAuth()`.
+- The optional service now receives the existing `PiRuntimeFactory.modelRuntime`
+  and a copied global-only startup model pair asynchronously after listener readiness.
+  No extra ModelRuntime or SettingsManager is constructed for search. Query reranking
+  runs after RRF/overlap collapse and before grouping, within the aggregate deadline
+  and two-reader admission. API default-on/opt-out, capability and stable fallback
+  reasons are wired and synthetically tested through the actual pinned runtime facade.
+  The browser defaults on with an App-memory user toggle and safe applied/local-fallback
+  labels. Synthetic browser-to-real-API/faux-Pi checks cover ordering, opt-out, message
+  focus, fallback and cancellation reaching provider IO; workstation search
+  remains disabled.
+
 ## Strict sandbox resources and tools (Phase 6)
 
 The installed package and runtime exports were re-verified at `0.84.3` before implementing the strict adapter:
@@ -75,6 +111,24 @@ SessionManager.listAll(sessionDir?, onProgress?)
 `listAll()` does not take a CWD. It scans Pi's complete default session root, or the supplied session directory. It is an SDK capability, but ChatWCA normal operation does not call it. ChatWCA uses `SessionManager.list(workspace.path, workspace.sessionDirectory ?? undefined)` only after a browser selects a workspace, and repeats that same scoped listing to authorize open and delete operations. Startup, browser connection, and workspace listing do not list Pi sessions. `SessionInfo` includes `path`, `id`, `cwd`, optional `name`, optional `parentSessionPath`, `created`, `modified`, `messageCount`, `firstMessage`, and `allMessagesText`.
 
 There is no exported session-deletion API. Pi's own TUI tries the external `trash` command and falls back to `fs.unlink`. ChatWCA implements deletion at its filesystem boundary, but only after resolving the requested file through a fresh workspace-configured `SessionManager.list()` allow-set, verifying workspace ownership, and confirming that it is not live.
+
+### Conversation search implementation boundary
+
+The [search foundations](search-operations.md) now include configuration/schema tooling
+and read-only source/extraction/chunking adapters, but no service workers or search model
+runtime/credential access. They do not change these SDK history paths. Canonical
+workspace/header-CWD checks are shared through `session-scope.ts`.
+
+`tests/integration/search-session-source.test.ts` validates the exact default/local
+store convention, saved-branch reopen parity, compaction retention, multiple roots,
+transient live cursors, SDK forks, source bytes/mtime, and large image-bearing records.
+A user-only fork has a prospective path but remains undiscoverable until its first
+assistant response, just like a new session. Search never uses writable
+`SessionManager.open()`: the SDK's last persisted tree entry determines the saved leaf.
+Its internal default-directory helper creates missing stores and is not publicly
+exported, so search derives the pinned convention without touching the filesystem.
+Fresh scoped SDK listings remain the authority for open/delete. Background indexing
+and the new opt-in JSONL projection are not wired to application startup yet.
 
 ## Persistence and durability
 

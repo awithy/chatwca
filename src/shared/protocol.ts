@@ -391,6 +391,13 @@ export const PublicHttpToolSchema = strictObject({
 });
 export type PublicHttpTool = Static<typeof PublicHttpToolSchema>;
 
+export const PublicSearchConfigSchema = strictObject({
+  mode: Type.Union([Type.Literal("disabled"), Type.Literal("optional")]),
+  available: Type.Boolean(),
+  state: Type.Union([Type.Literal("disabled"), Type.Literal("initializing"), Type.Literal("ready"), Type.Literal("unavailable"), Type.Literal("closed")]),
+  rerankAvailable: Type.Boolean(),
+});
+
 export const PublicConfigSchema = strictObject({
   maxImages: Type.Integer({ minimum: 1 }),
   maxImageBytes: Type.Integer({ minimum: 1 }),
@@ -399,6 +406,7 @@ export const PublicConfigSchema = strictObject({
   managedEgress: PublicManagedEgressConfigSchema,
   httpTools: Type.Array(PublicHttpToolSchema, { maxItems: MAX_WORKSPACE_HTTP_TOOLS }),
   jobs: PublicJobsConfigSchema,
+  search: Type.Optional(PublicSearchConfigSchema),
 });
 export type PublicConfig = Static<typeof PublicConfigSchema>;
 

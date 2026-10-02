@@ -1,0 +1,21 @@
+name: chatwca-search
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: chatwca_search
+      POSTGRES_PASSWORD: ${CHATWCA_SEARCH_POSTGRES_ADMIN_PASSWORD:?Set a unique PostgreSQL administrator password}
+    ports:
+      - "127.0.0.1:${CHATWCA_SEARCH_POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d chatwca_search"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  postgres-data:

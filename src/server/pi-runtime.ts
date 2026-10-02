@@ -157,6 +157,8 @@ export interface PiConversationRuntimePort {
 export interface PiRuntimeFactoryPort {
   readonly modelRuntime: ModelRuntime;
   readonly strictModelRuntime: ModelRuntime;
+  /** Global-only startup defaults; absent on synthetic/alternative factories means no configured pair. */
+  readonly globalModelDefaults?: { readonly defaultProvider?: string; readonly defaultModel?: string };
   listAvailableModels(securityProfile?: RuntimeWorkspacePolicy["securityProfile"]): Promise<readonly PiModelCapability[]>;
   createPersistent(policy: Readonly<RuntimeWorkspacePolicy>): Promise<PiConversationRuntimePort>;
   openPersistent(
@@ -640,6 +642,11 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
 
   get strictModelRuntime(): ModelRuntime {
     return this.#strictModelRuntime;
+  }
+
+  get globalModelDefaults(): { readonly defaultProvider?: string; readonly defaultModel?: string } {
+    const { defaultProvider, defaultModel } = this.#globalSettings;
+    return { ...(defaultProvider === undefined ? {} : { defaultProvider }), ...(defaultModel === undefined ? {} : { defaultModel }) };
   }
 
   async listAvailableModels(

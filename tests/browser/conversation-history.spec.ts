@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { waitForConnected } from "./helpers.js";
+import { openConversationActions, waitForConnected } from "./helpers.js";
 
 const optional = process.env.CHATWCA_BROWSER_HISTORY_MODE === "optional";
 
@@ -79,6 +79,7 @@ for (const profile of ["unrestricted", "workspace-sandboxed"] as const) {
     await page.keyboard.press("Escape");
     await expect(mobile).not.toBeVisible();
     await page.setViewportSize({ width: 1280, height: 720 });
+    await openConversationActions(page);
     await page.locator(".conversation-header-actions").getByRole("button", { name: "Close", exact: true }).click();
 
     const idle = await edit(page, `${name} updated`);

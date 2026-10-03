@@ -335,7 +335,7 @@ export function Composer({
         <label className="visually-hidden" htmlFor="conversation-composer">Message</label>
         <textarea
           id="conversation-composer"
-          rows={3}
+          rows={2}
           value={draft}
           disabled={!canEdit}
           placeholder={status === "streaming" ? "Add guidance or queue the next prompt…" : undefined}

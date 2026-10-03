@@ -5,6 +5,7 @@ import { expect, test } from "@playwright/test";
 import {
   createConversation,
   deleteSelectedConversation,
+  openConversationActions,
   submitAndWait,
   waitForConnected,
 } from "./helpers.js";
@@ -64,6 +65,7 @@ test("keyboard focus and primary chat controls remain operable", async ({ page }
   await expect(page.getByText("1 follow-up")).toBeVisible();
   await page.getByRole("button", { name: "Abort" }).click();
   await expect(page.locator(".header-status")).toContainText("Idle");
+  await openConversationActions(page);
   await expect(page.getByRole("button", { name: "Close", exact: true })).toBeEnabled();
   await expect(page.getByRole("button", { name: "Delete", exact: true })).toBeEnabled();
   await deleteSelectedConversation(page);
@@ -200,6 +202,7 @@ test("long generated conversation titles do not push the chat workspace out of v
     };
   });
 
+  expect(layout.header.height).toBeLessThanOrEqual(36);
   expect(layout.header.right).toBeLessThanOrEqual(layout.page.right);
   expect(layout.content.right).toBeLessThanOrEqual(layout.page.right);
   expect(layout.composer.left).toBeGreaterThanOrEqual(layout.page.left);

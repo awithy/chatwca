@@ -1,6 +1,6 @@
 import { expect, test, type Page, type WebSocket as PlaywrightWebSocket } from "@playwright/test";
 
-import { submitAndWait, waitForConnected } from "./helpers.js";
+import { openConversationActions, submitAndWait, waitForConnected } from "./helpers.js";
 
 interface WireMessage {
   readonly type?: string;
@@ -175,6 +175,7 @@ test("enables and disables parent-owned HTTP tools per workspace", async ({ page
   await expect(tool).toBeChecked();
   await expect(tool).toBeDisabled();
   await page.getByRole("button", { name: "Cancel" }).click();
+  await openConversationActions(page);
   await page.getByRole("button", { name: "Close", exact: true }).click();
 
   await page.getByRole("button", { name: `Workspace actions for ${name}` }).click();
@@ -297,6 +298,7 @@ test("busy workspace mutation is rejected and removal retains closed sessions", 
   await page.getByRole("button", { name: `Remove workspace ${workspaceName}` }).click();
   await expect(page.getByRole("alert")).toContainText("Close the workspace's live conversations");
 
+  await openConversationActions(page);
   await page.getByRole("button", { name: "Close", exact: true }).click();
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: `Workspace actions for ${workspaceName}` }).click();

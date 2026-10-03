@@ -3,6 +3,7 @@ import { expect, test } from "@playwright/test";
 import {
   createConversation,
   deleteSelectedConversation,
+  openConversationActions,
   submitAndWait,
   waitForConnected,
 } from "./helpers.js";
@@ -47,13 +48,15 @@ test("create, switch, close, reopen, and delete selected-workspace conversations
   let alphaRow = sidebarConversations.getByRole("button", { name: new RegExp(alphaPrompt) });
   await expect(alphaRow).toContainText("Idle");
 
+  await openConversationActions(page);
   await page.getByRole("button", { name: "Edit conversation title" }).click();
-  await page.getByLabel("Conversation title").fill("Custom alpha title");
+  await page.getByLabel("Conversation title", { exact: true }).fill("Custom alpha title");
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Custom alpha title" })).toBeVisible();
   alphaRow = sidebarConversations.getByRole("button", { name: /Custom alpha title/ });
   await expect(alphaRow).toBeVisible();
 
+  await openConversationActions(page);
   await page.getByRole("button", { name: "New", exact: true }).click();
   await expect(page.getByRole("textbox", { name: "Message" })).toBeEnabled();
   await submitAndWait(page, betaPrompt);
@@ -63,6 +66,7 @@ test("create, switch, close, reopen, and delete selected-workspace conversations
   await expect(page.locator(".message-user")).toContainText(alphaPrompt);
 
   await betaRow.click();
+  await openConversationActions(page);
   await page.getByRole("button", { name: "Close", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Start in Browser workspace" })).toBeVisible();
   await expect(betaRow).toContainText("Closed");

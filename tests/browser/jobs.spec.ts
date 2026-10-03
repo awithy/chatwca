@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { openConversationActions } from "./helpers.js";
 
 async function openJobs(page: import("@playwright/test").Page): Promise<void> {
   await page.goto("/");
@@ -94,6 +95,7 @@ test("live runs lock mutation, retain disable and abort, escape hook output, and
   await expect(dialog.getByText("<script>alert('not html')</script>")).toBeVisible();
   await expect(dialog.locator("script")).toHaveCount(0);
   await dialog.getByRole("button", { name: "Open generated conversation" }).click();
+  await openConversationActions(page);
   await expect(page.getByText("Scheduled job · View run")).toBeVisible();
   await expect(page.getByLabel("Edit conversation title")).toBeDisabled();
   await expect(page.getByRole("button", { name: "Close", exact: true })).toBeDisabled();

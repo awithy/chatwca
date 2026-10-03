@@ -3,6 +3,7 @@ import { expect, test } from "@playwright/test";
 import {
   createConversation,
   deleteSelectedConversation,
+  openConversationActions,
   submitAndWait,
   waitForConnected,
 } from "./helpers.js";
@@ -88,6 +89,7 @@ test("managed badges and dismissible blocked notices survive reconnect and refre
   });
   await page.getByRole("button", { name: "Fork conversation from this message" }).click();
   await expect(page.locator(".security-badge")).toHaveText("Sandboxed · Managed egress");
+  await openConversationActions(page);
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "Delete", exact: true }).click();
   await sourceRow.click();
@@ -95,6 +97,7 @@ test("managed badges and dismissible blocked notices survive reconnect and refre
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "Rewind conversation to this message" }).click();
   await expect(page.locator(".security-badge")).toHaveText("Sandboxed · Managed egress");
+  await openConversationActions(page);
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "Delete", exact: true }).click();
 });

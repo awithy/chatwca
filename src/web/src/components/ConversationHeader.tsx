@@ -72,6 +72,10 @@ export function ConversationHeader({
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState(displayTitle);
   const titleInput = useRef<HTMLInputElement>(null);
+  const actionsMenu = useRef<HTMLDetailsElement>(null);
+  const actionsTrigger = useRef<HTMLElement>(null);
+  const [actionsOpen, setActionsOpen] = useState(false);
+  const actionsId = React.useId();
   const model = conversation?.model;
   const modelLabel = model === undefined
     ? "Loading model…"
@@ -119,6 +123,7 @@ export function ConversationHeader({
   useEffect(() => {
     setEditingTitle(false);
     setTitleDraft(displayTitle);
+    if (actionsMenu.current) actionsMenu.current.open = false;
   }, [summary.id]);
 
   useEffect(() => {
@@ -129,9 +134,30 @@ export function ConversationHeader({
     if (editingTitle) titleInput.current?.select();
   }, [editingTitle]);
 
+  useEffect(() => {
+    function dismissOnOutsideClick(event: PointerEvent): void {
+      if (event.target instanceof Node && !actionsMenu.current?.contains(event.target)) {
+        if (actionsMenu.current) actionsMenu.current.open = false;
+      }
+    }
+    document.addEventListener("pointerdown", dismissOnOutsideClick);
+    return () => document.removeEventListener("pointerdown", dismissOnOutsideClick);
+  }, []);
+
+  function closeActions(): void {
+    if (actionsMenu.current) actionsMenu.current.open = false;
+    actionsTrigger.current?.focus();
+  }
+
+  function runAction(action: () => void): void {
+    closeActions();
+    action();
+  }
+
   function cancelTitleEdit(): void {
     setTitleDraft(displayTitle);
     setEditingTitle(false);
+    actionsTrigger.current?.focus();
   }
 
   async function submitTitle(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -140,6 +166,7 @@ export function ConversationHeader({
     try {
       await onRename(normalizedDraft);
       setEditingTitle(false);
+      actionsTrigger.current?.focus();
     } catch {
       titleInput.current?.focus();
     }
@@ -155,39 +182,6 @@ export function ConversationHeader({
   return (
     <header className="conversation-header">
       <div className="conversation-heading">
-        <p className="conversation-workspace-name">
-          <span>{workspace.name}</span>
-          {!workspace.available ? (
-            <strong>Workspace unavailable</strong>
-          ) : !workspace.usable ? (
-            <strong>Workspace blocked by policy</strong>
-          ) : null}
-          {owner?.kind === "scheduled-job" && (
-            <button
-              type="button"
-              className="job-owner-badge"
-              onClick={() => onOpenJobRun(owner.jobId, owner.runId)}
-            >
-              Scheduled job · View run
-            </button>
-          )}
-          <span
-            className={`security-badge${securityProfile === undefined ? " security-loading" : securityProfile === "workspace-sandboxed" ? networkPolicy === "managed-egress" ? " security-managed" : " security-sandboxed" : " security-unrestricted"}`}
-            aria-label={`Conversation security: ${securityLabel}`}
-          >
-            {securityLabel}
-          </span>
-          {effectiveConversationTools.length > 0 && (
-            <span className="http-tools-badge conversation-tools-badge" title={historyLabel} aria-label={historyLabel}>
-              Conversation history
-            </span>
-          )}
-          {effectiveHttpTools.length > 0 && (
-            <span className="http-tools-badge" title={httpToolsLabel} aria-label={httpToolsLabel}>
-              HTTP tools · {String(effectiveHttpTools.length)}
-            </span>
-          )}
-        </p>
         {editingTitle ? (
           <form className="conversation-title-form" onSubmit={(event) => void submitTitle(event)}>
             <label className="visually-hidden" htmlFor="conversation-title-input">Conversation title</label>
@@ -216,70 +210,125 @@ export function ConversationHeader({
         ) : (
           <div className="conversation-title-row">
             <h1 title={displayTitle}>{displayTitle}</h1>
+          </div>
+        )}
+      </div>
+      <div className="conversation-header-end">
+        <span
+          className={`security-badge${securityProfile === undefined ? " security-loading" : securityProfile === "workspace-sandboxed" ? networkPolicy === "managed-egress" ? " security-managed" : " security-sandboxed" : " security-unrestricted"}`}
+          title={securityLabel}
+          aria-label={`Conversation security: ${securityLabel}`}
+        >
+          {securityLabel}
+        </span>
+        {effectiveConversationTools.length > 0 && (
+          <span className="http-tools-badge conversation-tools-badge" title={historyLabel} aria-label={historyLabel}>
+            Conversation history
+          </span>
+        )}
+        {effectiveHttpTools.length > 0 && (
+          <span className="http-tools-badge" title={httpToolsLabel} aria-label={httpToolsLabel}>
+            HTTP tools · {String(effectiveHttpTools.length)}
+          </span>
+        )}
+        <span className="conversation-context" title={contextTitle} aria-label={`Context: ${contextLabel}`}>
+          {contextLabel}
+        </span>
+        <span className={`header-status status-${statusClass}`}>
+          <i aria-hidden="true" />{status}
+        </span>
+        <details
+          ref={actionsMenu}
+          className="conversation-header-actions"
+          onToggle={(event) => setActionsOpen(event.currentTarget.open)}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.preventDefault();
+              event.stopPropagation();
+              closeActions();
+            }
+          }}
+          onBlur={(event) => {
+            if (event.relatedTarget instanceof Node && !event.currentTarget.contains(event.relatedTarget)) {
+              event.currentTarget.open = false;
+            }
+          }}
+        >
+          <summary
+            ref={actionsTrigger}
+            className="conversation-actions-trigger"
+            role="button"
+            aria-label="More conversation actions"
+            aria-expanded={actionsOpen}
+            aria-controls={actionsId}
+            title="Conversation details and actions"
+          >
+            <span aria-hidden="true">⋯</span>
+          </summary>
+          <div id={actionsId} className="conversation-actions-popover" role="group" aria-label="Conversation details and actions">
+            <div className="conversation-menu-details">
+              <p className="conversation-workspace-name">
+                <span>{workspace.name}</span>
+                {!workspace.available ? (
+                  <strong>Workspace unavailable</strong>
+                ) : !workspace.usable ? (
+                  <strong>Workspace blocked by policy</strong>
+                ) : null}
+              </p>
+              <p className="conversation-workspace-path" title={workspace.path}>{workspace.path}</p>
+              <dl className="conversation-facts">
+                <div>
+                  <dt>Model</dt>
+                  <dd title={model === null || model === undefined ? undefined : `${model.provider}/${model.id}`}>{modelLabel}</dd>
+                </div>
+                <div>
+                  <dt>Context</dt>
+                  <dd title={contextTitle}>{contextLabel}</dd>
+                </div>
+              </dl>
+            </div>
+            {owner?.kind === "scheduled-job" && (
+              <button type="button" className="job-owner-badge" onClick={() => runAction(() => onOpenJobRun(owner.jobId, owner.runId))}>
+                Scheduled job · View run
+              </button>
+            )}
             <button
-              className="edit-title-button"
               type="button"
               aria-label="Edit conversation title"
               disabled={!renameEnabled}
-              onClick={() => setEditingTitle(true)}
+              onClick={() => runAction(() => setEditingTitle(true))}
             >
-              <span aria-hidden="true">✎</span>
+              Rename
+            </button>
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={!connected || loading || actionPending !== null || !createEnabled}
+              title={createEnabled ? `Start a new conversation in ${workspace.name}` : "This workspace cannot start conversations"}
+              onClick={() => runAction(onCreate)}
+            >
+              {actionPending === "create" ? "Creating…" : "New"}
+            </button>
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={!connected || loading || actionPending !== null || !closeEnabled}
+              title={closeEnabled ? "Close this live session" : "Active runs must finish or be aborted before closing"}
+              onClick={() => runAction(onClose)}
+            >
+              {actionPending === "close" ? "Closing…" : "Close"}
+            </button>
+            <button
+              className="danger-button"
+              type="button"
+              disabled={!connected || loading || actionPending !== null || !deleteEnabled}
+              title={deleteEnabled ? "Delete this conversation permanently" : "Active runs cannot be deleted"}
+              onClick={() => runAction(onDelete)}
+            >
+              {actionPending === "delete" ? "Deleting…" : "Delete"}
             </button>
           </div>
-        )}
-        <p className="conversation-workspace-path" title={workspace.path}>
-          <span aria-hidden="true">⌁</span>
-          {workspace.path}
-        </p>
-      </div>
-      <div className="conversation-header-end">
-        <dl className="conversation-facts">
-          <div>
-            <dt>Model</dt>
-            <dd title={model === null || model === undefined ? undefined : `${model.provider}/${model.id}`}>
-              {modelLabel}
-            </dd>
-          </div>
-          <div>
-            <dt>Context</dt>
-            <dd title={contextTitle}>{contextLabel}</dd>
-          </div>
-          <div>
-            <dt>Status</dt>
-            <dd className={`header-status status-${statusClass}`}>
-              <i aria-hidden="true" />{status}
-            </dd>
-          </div>
-        </dl>
-        <div className="conversation-header-actions">
-          <button
-            className="secondary-button"
-            type="button"
-            disabled={!connected || loading || actionPending !== null || !createEnabled}
-            title={createEnabled ? `Start a new conversation in ${workspace.name}` : "This workspace cannot start conversations"}
-            onClick={onCreate}
-          >
-            {actionPending === "create" ? "Creating…" : "New"}
-          </button>
-          <button
-            className="secondary-button"
-            type="button"
-            disabled={!connected || loading || actionPending !== null || !closeEnabled}
-            title={closeEnabled ? "Close this live session" : "Active runs must finish or be aborted before closing"}
-            onClick={onClose}
-          >
-            {actionPending === "close" ? "Closing…" : "Close"}
-          </button>
-          <button
-            className="danger-button"
-            type="button"
-            disabled={!connected || loading || actionPending !== null || !deleteEnabled}
-            title={deleteEnabled ? "Delete this conversation permanently" : "Active runs cannot be deleted"}
-            onClick={onDelete}
-          >
-            {actionPending === "delete" ? "Deleting…" : "Delete"}
-          </button>
-        </div>
+        </details>
       </div>
     </header>
   );

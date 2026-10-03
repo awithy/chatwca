@@ -33,7 +33,22 @@ export async function submitAndWait(
   await expect(page.locator(".header-status")).toContainText("Idle");
 }
 
+export async function openConversationActions(page: Page): Promise<void> {
+  await expect(page.getByRole("button", { name: "More conversation actions" }).or(
+    page.getByRole("button", { name: "Open conversation actions" }),
+  )).toBeVisible();
+  const desktop = page.locator(".conversation-header-actions");
+  if (await desktop.isVisible()) {
+    if (await desktop.getAttribute("open") === null) {
+      await page.getByRole("button", { name: "More conversation actions" }).click();
+    }
+  } else if (!await page.getByRole("region", { name: "Conversation actions" }).isVisible()) {
+    await page.getByRole("button", { name: "Open conversation actions" }).click();
+  }
+}
+
 export async function deleteSelectedConversation(page: Page): Promise<void> {
+  await openConversationActions(page);
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "Delete", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Start in Browser workspace" })).toBeVisible();

@@ -12,6 +12,7 @@ import {
   canDeleteConversation,
 } from "./chat-interactions.js";
 import { conversationTitle } from "./conversation-list.js";
+import { CONVERSATION_HISTORY_DISCLOSURE } from "./conversation-history.js";
 
 export interface ConversationHeaderProps {
   readonly conversation: ConversationState | undefined;
@@ -100,6 +101,8 @@ export function ConversationHeader({
         ? "Sandboxed · Managed egress"
         : "Sandboxed · Network isolated"
       : "Unrestricted";
+  const effectiveConversationTools = conversation?.effectiveConversationTools ?? [];
+  const historyLabel = `Captured conversation history tools: ${effectiveConversationTools.join(", ")}. ${CONVERSATION_HISTORY_DISCLOSURE}`;
   const effectiveHttpTools = conversation?.effectiveHttpTools ?? [];
   const httpToolsLabel = effectiveHttpTools.length === 0
     ? "No parent-owned HTTP tools"
@@ -174,6 +177,11 @@ export function ConversationHeader({
           >
             {securityLabel}
           </span>
+          {effectiveConversationTools.length > 0 && (
+            <span className="http-tools-badge conversation-tools-badge" title={historyLabel} aria-label={historyLabel}>
+              Conversation history
+            </span>
+          )}
           {effectiveHttpTools.length > 0 && (
             <span className="http-tools-badge" title={httpToolsLabel} aria-label={httpToolsLabel}>
               HTTP tools · {String(effectiveHttpTools.length)}

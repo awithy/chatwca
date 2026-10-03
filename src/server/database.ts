@@ -4,7 +4,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 
 export const DATABASE_FILENAME = "chatwca.sqlite";
-export const DATABASE_SCHEMA_VERSION = 8;
+export const DATABASE_SCHEMA_VERSION = 9;
 export const DATABASE_BUSY_TIMEOUT_MS = 5_000;
 
 const JOB_SCHEMA = `
@@ -142,6 +142,8 @@ const INITIAL_SCHEMA = `
         substr(network_policy_set_id, 1, 1) GLOB '[a-z0-9]' AND
         substr(network_policy_set_id, -1, 1) GLOB '[a-z0-9]'
       ),
+    conversation_tools_enabled INTEGER NOT NULL DEFAULT 0
+      CHECK (typeof(conversation_tools_enabled) = 'integer' AND conversation_tools_enabled IN (0, 1)),
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
   );
@@ -308,6 +310,18 @@ function migrateVersionSeven(connection: Database.Database): void {
   })();
 }
 
+/** Stored built-in selection; migration grants no new tool authority. */
+function migrateVersionEight(connection: Database.Database): void {
+  connection.transaction(() => {
+    connection.exec(`
+      ALTER TABLE workspaces
+      ADD COLUMN conversation_tools_enabled INTEGER NOT NULL DEFAULT 0
+        CHECK (typeof(conversation_tools_enabled) = 'integer' AND conversation_tools_enabled IN (0, 1));
+    `);
+    connection.pragma("user_version = 9");
+  })();
+}
+
 /**
  * Create/open and initialize ChatWCA's SQLite database.
  *
@@ -367,9 +381,10 @@ export function openDatabase(
       migrateVersionSeven(connection);
     } else if (version === 7) {
       migrateVersionSeven(connection);
-    } else if (version !== DATABASE_SCHEMA_VERSION) {
+    } else if (version !== 8 && version !== DATABASE_SCHEMA_VERSION) {
       throw new UnsupportedDatabaseVersionError(version);
     }
+    if (version >= 1 && version <= 8) migrateVersionEight(connection);
 
     return new ChatWcaDatabase(connection, databasePath);
   } catch (error) {

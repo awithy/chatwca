@@ -21,6 +21,18 @@ export class SearchQueryError extends Error {
   constructor(readonly code: SearchQueryErrorCode) { super(code); }
 }
 
+export type ConversationReadErrorCode =
+  | "conversation_not_indexed"
+  | "conversation_entry_not_indexed"
+  | "conversation_cursor_invalid"
+  | "conversation_cursor_stale"
+  | "conversation_cache_invalid";
+
+/** Safe cached-read failures; never include source text or dependency diagnostics. */
+export class ConversationReadError extends Error {
+  constructor(readonly code: ConversationReadErrorCode) { super(code); }
+}
+
 export type SearchEmbeddingErrorCode =
   | "search_embedding_unavailable"
   | "search_embedding_invalid"

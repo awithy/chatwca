@@ -16,14 +16,15 @@ import { createSearchPool } from "../../src/server/search/postgres.js";
 import { sourceFingerprint } from "../../src/server/search/session-source.js";
 import { startFakeSearchOllama } from "../fixtures/search-ollama.js";
 import { searchAssistantEntry, searchJsonl, searchSessionHeader, searchUserEntry } from "../fixtures/search-session.js";
-import type { SearchServiceStatus } from "../../src/server/search/service.js";
+import { SearchService, type SearchServiceStatus } from "../../src/server/search/service.js";
+import { MAX_CONVERSATION_TOOL_BYTES } from "../../src/server/search/read-page.js";
 
 const testUrl = process.env.CHATWCA_SEARCH_TEST_DATABASE_URL;
 describe.skipIf(testUrl === undefined)("optional local search vertical slice with synthetic stores, SQLite, fake Ollama and disposable PostgreSQL", () => {
   const schema = `chatwca_search_server_${randomUUID().replaceAll("-", "")}`;
   let admin: Pool; let pool: Pool; let scopedUrl: string; let created = false;
   let root: string; let agent: string; let fake: Awaited<ReturnType<typeof startFakeSearchOllama>>;
-  let server: ChatWcaServer; let base: string; let workspaces: WorkspaceRepository; let file: string; let workspaceId: string;
+  let server: ChatWcaServer; let search: SearchService; let base: string; let workspaces: WorkspaceRepository; let file: string; let workspaceId: string;
   const runtimeFactory: PiRuntimeFactoryPort = { modelRuntime: {} as PiRuntimeFactoryPort["modelRuntime"], strictModelRuntime: {} as PiRuntimeFactoryPort["strictModelRuntime"],
     listAvailableModels: vi.fn(async () => []), createPersistent: vi.fn(async () => { throw new Error("Search must not create live conversations"); }),
     openPersistent: vi.fn(async () => { throw new Error("Search must not open live conversations"); }) };
@@ -38,6 +39,7 @@ describe.skipIf(testUrl === undefined)("optional local search vertical slice wit
       CHATWCA_SEARCH_EMBEDDING_TIMEOUT_MS: "2000", CHATWCA_SEARCH_INDEX_INTERVAL_MS: "900000", CHATWCA_SHUTDOWN_GRACE_MS: "1000" });
     server = await startChatWcaServer({ loadConfiguration: () => config, createRuntimeFactory: async () => runtimeFactory,
       createWorkspaceRepository: (connection) => { workspaces = new WorkspaceRepository(connection); return workspaces; },
+      createSearchService: (settings) => { search = new SearchService(settings); return search; },
       listen: async (createdServer) => { await new Promise<void>((resolve) => createdServer.httpServer.listen(0, "127.0.0.1", resolve)); } });
     base = `http://127.0.0.1:${(server.httpServer.address() as AddressInfo).port}`;
   }
@@ -94,6 +96,82 @@ describe.skipIf(testUrl === undefined)("optional local search vertical slice wit
     expect(JSON.stringify(result)).not.toMatch(/Hidden reasoning|sourcePath|sourceRevision|canonicalPath/u);
     expect(runtimeFactory.createPersistent).not.toHaveBeenCalled(); expect(runtimeFactory.openPersistent).not.toHaveBeenCalled();
   });
+  it("serves paginated cached reads through the process service, with freshness and no inference/source mutation or public read route", async () => {
+    const before = { bytes: await readFile(file), fingerprint: sourceFingerprint(await stat(file, { bigint: true })) };
+    const requests = fake.requests.length;
+    const first = await search.read({ workspaceId, sessionId: "session-first", limit: 1 });
+    expect(first).toMatchObject({ cached: true, workspaceId, sessionId: "session-first", generation: "1", indexedAt: expect.any(Number),
+      freshness: { state: "ready", indexing: false, lastSucceededAt: expect.any(Number) }, segments: [{ entryId: "u1", role: "user", text: "Chosen isolation approach" }] });
+    expect(first.nextCursor).not.toBeNull();
+    const next = await search.read({ workspaceId, sessionId: "session-first", cursor: first.nextCursor!, limit: 1 });
+    expect(next.segments).toMatchObject([{ entryId: "a1", role: "assistant", text: "Durable saved assistant evidence" }]);
+    expect(next.nextCursor).toBeNull();
+    expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThanOrEqual(MAX_CONVERSATION_TOOL_BYTES);
+    expect(JSON.stringify([first, next])).not.toMatch(/Hidden reasoning|sourcePath|sourceRevision|canonicalPath|databaseUrl/u);
+    expect(fake.requests).toHaveLength(requests);
+    expect(await readFile(file)).toEqual(before.bytes); expect(sourceFingerprint(await stat(file, { bigint: true }))).toEqual(before.fingerprint);
+    expect((await post("/read", { workspaceId, sessionId: "session-first" })).status).toBe(404);
+    expect(runtimeFactory.createPersistent).not.toHaveBeenCalled(); expect(runtimeFactory.openPersistent).not.toHaveBeenCalled();
+  });
+
+  it("reads retained cache with an unavailable directory/provider and never calls source workspace summary or tool-authority resolution", async () => {
+    const workspace = workspaces.listRegistrations().find(({ id }) => id === workspaceId)!;
+    await rename(workspace.path, `${workspace.path}-offline`);
+    const summaries = vi.spyOn(workspaces, "list").mockImplementation(() => { throw new Error("Unexpected source availability probe"); });
+    const usable = vi.spyOn(workspaces, "requireUsable").mockImplementation(async () => { throw new Error("Source sandbox policy unavailable"); });
+    fake.state.handler = (_request, response) => { response.writeHead(503).end("private provider diagnostic"); };
+    const requests = fake.requests.length;
+    const page = await search.read({ workspaceId, sessionId: "session-first", aroundEntryId: "a1" });
+    expect(page.segments.map(({ entryId }) => entryId)).toEqual(["u1", "a1"]);
+    expect(page).toMatchObject({ aroundEntryId: "a1", precedingContextReduced: false, cached: true });
+    expect(summaries).not.toHaveBeenCalled(); expect(usable).not.toHaveBeenCalled(); expect(fake.requests).toHaveLength(requests);
+    expect((await fetch(`${base}/api/health`)).status).toBe(200);
+  });
+
+  it("filters removed registrations immediately, even before the retained PostgreSQL cache is pruned", async () => {
+    const first = await search.read({ workspaceId, sessionId: "session-first", limit: 1 });
+    workspaces.delete(workspaceId);
+    expect((await pool.query("SELECT count(*)::integer AS count FROM search_documents WHERE session_id = 'session-first'")).rows[0]?.count).toBe(1);
+    await expect(search.read({ workspaceId, sessionId: "session-first", cursor: first.nextCursor! })).rejects.toThrow("search_scope_unavailable");
+    expect(await readFile(file, "utf8")).toContain("Durable saved assistant evidence");
+    expect((await fetch(`${base}/api/health`)).status).toBe(200);
+  });
+
+  it("preserves stale cursor errors through the service after a normal indexing publication", async () => {
+    const first = await search.read({ workspaceId, sessionId: "session-first", limit: 1 });
+    await appendFile(file, searchJsonl([searchUserEntry("u2", "a1", "New read evidence")])); await refresh("/refresh", { workspaceId });
+    await expect(search.read({ workspaceId, sessionId: "session-first", cursor: first.nextCursor! })).rejects.toThrow("conversation_cursor_stale");
+    const page = await search.read({ workspaceId, sessionId: "session-first", aroundEntryId: "u2" });
+    expect(page.generation).toBe("2"); expect(page.segments.map(({ entryId }) => entryId)).toEqual(["u1", "a1", "u2"]);
+    expect(page.freshness.state).toBe("ready");
+  });
+
+  it("isolates read database failures from chat readiness and recovers without recreating the service", async () => {
+    await pool.query("ALTER TABLE search_documents RENAME TO search_documents_offline");
+    try {
+      await expect(search.read({ workspaceId, sessionId: "session-first" })).rejects.toThrow("search_database_unavailable");
+      expect(search.freshness()).toMatchObject({ state: "unavailable", errorCode: "search_database_unavailable" });
+      expect(await (await fetch(`${base}/api/health`)).json()).toMatchObject({ ready: true });
+    } finally { await pool.query("ALTER TABLE search_documents_offline RENAME TO search_documents"); }
+    const recovered = await search.read({ workspaceId, sessionId: "session-first" });
+    expect(recovered.freshness).toMatchObject({ state: "ready", errorCode: null });
+    expect(recovered.segments[1]?.text).toBe("Durable saved assistant evidence");
+  });
+
+  it("shutdown cancels a read waiting on a database lock without waiting for its native deadline", async () => {
+    const locker = await pool.connect();
+    try {
+      await locker.query("BEGIN"); await locker.query("LOCK TABLE search_chunks IN ACCESS EXCLUSIVE MODE");
+      const pending = expect(search.read({ workspaceId, sessionId: "session-first" })).rejects.toThrow("search_cancelled");
+      await vi.waitFor(async () => {
+        const waiting = await pool.query("SELECT count(*)::integer AS count FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%coverage.last_ordinal%'");
+        expect(waiting.rows[0]?.count).toBeGreaterThan(0);
+      });
+      await server.shutdown(); await pending;
+      expect(search.capability().state).toBe("closed");
+    } finally { await locker.query("ROLLBACK"); locker.release(); }
+  });
+
   it("refresh skips unchanged documents, updates incremental input and rebuild forces rereading while reusing vectors", async () => {
     const embeds = () => fake.requests.filter((r) => r.path === "/api/embed"); const initial = embeds().length;
     await refresh(); expect(embeds()).toHaveLength(initial);

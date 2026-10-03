@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { AppError, ERROR_CODES } from "../../src/shared/errors.js";
-import type { ConversationOwner } from "../../src/shared/protocol.js";
+import { CONVERSATION_TOOL_NAMES, type ConversationOwner, type ConversationToolName } from "../../src/shared/protocol.js";
 import type { JobRunState, JobSummary } from "../../src/shared/jobs.js";
 import {
   JobRunner,
@@ -21,6 +21,8 @@ const policy: RuntimeWorkspacePolicy = Object.freeze({
   networkPolicySetId: "default",
   effectiveNetworkPolicySetId: null,
   networkPolicySet: null,
+  effectiveHttpTools: [],
+  effectiveConversationTools: [],
 });
 
 function runState(overrides: Partial<JobRunState> = {}): JobRunState {
@@ -229,6 +231,24 @@ describe("JobRunner", () => {
     ]);
     expect(f.jobsChanged).toHaveBeenCalledTimes(4);
     expect(f.runner.activeCount).toBe(0);
+  });
+
+  it("captures current history selections per occurrence before hooks can mutate caller-owned arrays", async () => {
+    const names: ConversationToolName[] = [...CONVERSATION_TOOL_NAMES];
+    const resolve = vi.fn(() => ({ ...policy, effectiveConversationTools: names }));
+    const selected = fixture({
+      definition: job({ preRunScript: "/hooks/pre.sh" }), requireUsable: resolve,
+      runHook: async () => { names.length = 0; return hookSuccess; },
+    });
+    await expect(selected.runner.run(selected.claim)).resolves.toMatchObject({ status: "succeeded" });
+    const captured = selected.registry.createJobConversation.mock.calls[0]![0];
+    expect(captured.effectiveConversationTools).toEqual(CONVERSATION_TOOL_NAMES);
+    expect(Object.isFrozen(captured.effectiveConversationTools)).toBe(true);
+    expect(resolve).toHaveBeenCalledOnce();
+    const next = fixture({ requireUsable: resolve });
+    await expect(next.runner.run(next.claim)).resolves.toMatchObject({ status: "succeeded" });
+    expect(next.registry.createJobConversation.mock.calls[0]![0].effectiveConversationTools).toEqual([]);
+    expect(resolve).toHaveBeenCalledTimes(2);
   });
 
   it("validates both hooks before capacity or side effects and blocks on current policy failures", async () => {

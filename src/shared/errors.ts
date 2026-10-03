@@ -87,7 +87,7 @@ const DEFAULT_MESSAGES: Readonly<Record<ErrorCode, string>> = {
   invalid_workspace_mount: "Each mount must name an existing accessible server directory and a unique /mounts destination.",
   duplicate_workspace_path: "That workspace path is already registered.",
   workspace_unavailable: "The workspace directory is unavailable.",
-  workspace_busy: "Close the workspace's live conversations before changing its path, mounts, security profile, network policy, destination policy, or removing it.",
+  workspace_busy: "Close the workspace's live conversations before changing its path, mounts, security profile, network policy, destination policy, tool access, or removing it.",
   sandbox_disabled: "Workspace sandboxing is disabled by the server.",
   sandbox_configuration_error: "The server sandbox configuration is invalid.",
   sandbox_unavailable: "Workspace sandboxing is unavailable.",

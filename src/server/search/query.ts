@@ -28,6 +28,21 @@ export interface SearchQueryResponse {
   readonly results: readonly SearchConversationResult[];
   readonly rerank: SearchResponse["rerank"];
 }
+/** Closed internal request validation, also used before injected service IO. */
+export function validateSearchQueryRequest(value: unknown): Required<SearchQueryRequest> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new SearchQueryError("search_query_invalid");
+  const request = value as Record<string, unknown>;
+  const query = validateSearchQuery(request.query);
+  const limit = request.limit === undefined ? 10 : request.limit;
+  const workspaceId = request.workspaceId ?? null;
+  if (Object.keys(request).some((key) => !["query", "workspaceId", "limit", "rerank"].includes(key)) ||
+      (request.rerank !== undefined && typeof request.rerank !== "boolean") ||
+      typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1 || limit > 20 ||
+      (workspaceId !== null && (typeof workspaceId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/u.test(workspaceId)))) {
+    throw new SearchQueryError("search_query_invalid");
+  }
+  return Object.freeze({ query, limit, workspaceId, rerank: request.rerank !== false });
+}
 interface Ranked { readonly candidate: SearchCandidate; score: number }
 const compareId = (a: string, b: string): number => a < b ? -1 : a > b ? 1 : 0;
 const conversationKey = (candidate: SearchCandidate): string => JSON.stringify([candidate.workspaceId, candidate.sessionId]);
@@ -95,13 +110,10 @@ export class SearchQueryService {
   }
   close(): void { this.closed = true; for (const controller of this.active) controller.abort(new SearchQueryError("search_cancelled")); }
 
-  async search(request: SearchQueryRequest, options: SearchEmbeddingOptions = {}): Promise<SearchQueryResponse> {
+  async search(input: SearchQueryRequest, options: SearchEmbeddingOptions = {}): Promise<SearchQueryResponse> {
     if (this.closed || options.signal?.aborted) throw new SearchQueryError("search_cancelled");
-    if (!request || typeof request !== "object") throw new SearchQueryError("search_query_invalid");
-    const query = validateSearchQuery(request.query); const limit = request.limit === undefined ? 10 : request.limit; const workspaceId = request.workspaceId ?? null;
-    if ((request.rerank !== undefined && typeof request.rerank !== "boolean") || !Number.isSafeInteger(limit) || limit < 1 || limit > 20 || (workspaceId !== null && (typeof workspaceId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/u.test(workspaceId)))) {
-      throw new SearchQueryError("search_query_invalid");
-    }
+    const request = validateSearchQueryRequest(input);
+    const { query, limit, workspaceId } = request;
     if (this.active.size >= MAX_SEARCH_CONCURRENT_QUERIES) throw new SearchQueryError("search_busy");
     let scopes;
     try {

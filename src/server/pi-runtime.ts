@@ -34,8 +34,10 @@ import type {
 } from "./sandbox/bwrap.js";
 import type { SandboxConfig } from "./sandbox/config.js";
 import {
+  CONVERSATION_TOOL_NAMES,
   WORKSPACE_MOUNT_NAME_PATTERN,
   WORKSPACE_MOUNT_SOURCE_MAX_LENGTH,
+  type ConversationToolName,
   type SandboxNetworkPolicy,
   type WorkspaceMount,
 } from "../shared/protocol.js";
@@ -59,6 +61,18 @@ import {
   type WebSearchToolOptions,
 } from "./web-search.js";
 import { createHttpTool, type CreateHttpToolOptions } from "./http-tool.js";
+import { createConversationReadTool, createConversationSearchTool } from "./search/tools.js";
+import { SearchQueryError } from "./search/errors.js";
+import type { SearchServicePort } from "./search/service.js";
+
+type ConversationToolService = Pick<SearchServicePort, "search" | "read" | "freshness">;
+// Synthetic/alternative factories may omit search. Selected tools still fail at
+// call time rather than breaking chat construction; this stub performs no IO.
+const DISABLED_CONVERSATION_SERVICE: ConversationToolService = {
+  async search() { throw new SearchQueryError("search_disabled"); },
+  async read() { throw new SearchQueryError("search_disabled"); },
+  freshness() { throw new SearchQueryError("search_disabled"); },
+};
 
 export interface PiModelCapability {
   readonly provider: string;
@@ -136,6 +150,7 @@ export interface PiConversationRuntimePort {
   readonly networkPolicySetId: string | null;
   readonly networkPolicySet: Readonly<CompiledNetworkPolicySet> | null;
   readonly effectiveHttpTools: readonly string[];
+  readonly effectiveConversationTools: readonly ConversationToolName[];
   readonly identity: PiRuntimeIdentity;
   readonly model: PiModelCapability | undefined;
   readonly supportsImages: boolean;
@@ -205,6 +220,8 @@ export interface PiRuntimeFactoryOptions {
   readonly webSearch?: Readonly<WebSearchToolOptions>;
   /** Injectable HTTP transport used only by tests. */
   readonly httpToolOptions?: Readonly<CreateHttpToolOptions>;
+  /** Process-owned cached-history service; readiness never changes tool selection. */
+  readonly search?: ConversationToolService;
 }
 
 let sharedModelRuntimePromise: Promise<ModelRuntime> | undefined;
@@ -279,6 +296,7 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
   readonly #networkPolicySetId: string | null;
   readonly #networkPolicySet: Readonly<CompiledNetworkPolicySet> | null;
   readonly #effectiveHttpTools: readonly string[];
+  readonly #effectiveConversationTools: readonly ConversationToolName[];
   readonly #sandboxController: SandboxController | undefined;
   readonly #managedNetwork: ManagedNetworkRuntimePort | undefined;
   readonly #eventListeners = new Set<AgentSessionEventListener>();
@@ -303,6 +321,7 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
     networkPolicySetId: string | null = null,
     networkPolicySet: Readonly<CompiledNetworkPolicySet> | null = null,
     effectiveHttpTools: readonly string[] = [],
+    effectiveConversationTools: readonly ConversationToolName[] = [],
   ) {
     const managedIdentityMatches =
       networkPolicy === "managed-egress" &&
@@ -331,6 +350,7 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
     this.#networkPolicySetId = networkPolicySetId;
     this.#networkPolicySet = networkPolicySet;
     this.#effectiveHttpTools = Object.freeze([...effectiveHttpTools]);
+    this.#effectiveConversationTools = Object.freeze([...effectiveConversationTools]);
     this.#sandboxController = sandboxController;
     this.#managedNetwork = managedNetwork;
     if (sandboxController !== undefined) {
@@ -387,6 +407,10 @@ export class PiConversationRuntime implements PiConversationRuntimePort {
 
   get effectiveHttpTools(): readonly string[] {
     return this.#effectiveHttpTools;
+  }
+
+  get effectiveConversationTools(): readonly ConversationToolName[] {
+    return this.#effectiveConversationTools;
   }
 
   declare readonly sandboxFileReader?: SandboxWorkspaceFileReaderPort;
@@ -594,6 +618,7 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
   readonly #sandbox: Readonly<PiSandboxRuntimeOptions> | undefined;
   readonly #webSearchTool: ToolDefinition<any, any> | undefined;
   readonly #httpToolOptions: Readonly<CreateHttpToolOptions>;
+  readonly #search: ConversationToolService;
   readonly #globalSettings: ReturnType<SettingsManager["getGlobalSettings"]>;
 
   private constructor(
@@ -613,6 +638,7 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
       ? undefined
       : createWebSearchTool(options.webSearch);
     this.#httpToolOptions = options.httpToolOptions ?? {};
+    this.#search = options.search ?? DISABLED_CONVERSATION_SERVICE;
     this.#globalSettings = structuredClone(globalSettings);
   }
 
@@ -710,6 +736,14 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
   }
 
   async #canonicalPolicy(policy: Readonly<RuntimeWorkspacePolicy>): Promise<RuntimeWorkspacePolicy> {
+    // Capture selections before asynchronous filesystem preflight. The SDK
+    // reconstruction closure below retains this copy for the runtime lifetime.
+    const effectiveConversationTools = Object.freeze([...(policy.effectiveConversationTools ?? [])]);
+    if (effectiveConversationTools.length !== 0 &&
+        (effectiveConversationTools.length !== CONVERSATION_TOOL_NAMES.length ||
+          effectiveConversationTools.some((name, index) => name !== CONVERSATION_TOOL_NAMES[index]))) {
+      throw new AppError(ERROR_CODES.WORKSPACE_UNAVAILABLE);
+    }
     const cwd = await resolveConversationCwd(policy.cwd);
     const networkPolicy = policy.networkPolicy ??
       (policy.securityProfile === "workspace-sandboxed" ? "isolated" : null);
@@ -785,6 +819,7 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
       effectiveNetworkPolicySetId,
       networkPolicySet,
       effectiveHttpTools: Object.freeze([...(policy.effectiveHttpTools ?? [])]),
+      effectiveConversationTools,
     });
   }
 
@@ -898,6 +933,10 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
         const parentTools = [
           ...(this.#webSearchTool === undefined ? [] : [this.#webSearchTool]),
           ...workspaceHttpTools,
+          ...(policy.effectiveConversationTools.length === 0 ? [] : [
+            createConversationSearchTool(this.#search),
+            createConversationReadTool(this.#search),
+          ]),
         ];
         let services: AgentSessionServices;
         let configurableSessionOptions: PiSessionOptions;
@@ -909,6 +948,7 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
             policy.mounts,
             this.#webSearchTool !== undefined,
             workspaceHttpConfigs,
+            policy.effectiveConversationTools.length > 0,
           );
           services = {
             cwd: "/workspace",
@@ -1021,6 +1061,7 @@ export class PiRuntimeFactory implements PiRuntimeFactoryPort {
         policy.effectiveNetworkPolicySetId,
         policy.networkPolicySet,
         policy.effectiveHttpTools.map(({ name }) => name),
+        policy.effectiveConversationTools,
       );
       // Keep the startup observer until the fully owning wrapper has installed
       // its replayable fatal subscription; there is no unobserved proxy gap.

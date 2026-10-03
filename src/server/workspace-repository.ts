@@ -20,6 +20,7 @@ import {
   toAppError,
 } from "../shared/errors.js";
 import {
+  CONVERSATION_TOOL_NAMES,
   HTTP_TOOL_NAME_PATTERN,
   MAX_WORKSPACE_HTTP_TOOLS,
   MAX_WORKSPACE_MOUNTS,
@@ -27,6 +28,7 @@ import {
   NETWORK_POLICY_SET_ID_PATTERN,
   WORKSPACE_MOUNT_NAME_PATTERN,
   WORKSPACE_MOUNT_SOURCE_MAX_LENGTH,
+  type ConversationToolName,
   type ManagedEgressMode,
   type NetworkPolicySetId,
   type SandboxMode,
@@ -55,6 +57,7 @@ interface WorkspaceRow {
   readonly security_profile: WorkspaceSecurityProfile;
   readonly network_policy: SandboxNetworkPolicy;
   readonly network_policy_set_id: NetworkPolicySetId;
+  readonly conversation_tools_enabled: number;
   readonly created_at: number;
   readonly updated_at: number;
 }
@@ -143,6 +146,8 @@ export interface WorkspaceRepositoryOptions {
   readonly sandboxAdmission?: Pick<SandboxWorkspaceAdmission, "admit" | "admitMount">;
   /** Startup-frozen definitions used to validate selections and resolve runtime grants. */
   readonly httpTools?: Readonly<HttpToolCatalog>;
+  /** Startup mode only; readiness/outages never change selected authority. */
+  readonly searchMode?: "disabled" | "optional";
 }
 
 export interface RuntimeWorkspacePolicy {
@@ -158,6 +163,8 @@ export interface RuntimeWorkspacePolicy {
   readonly networkPolicySet: CompiledNetworkPolicySet | null;
   /** Immutable effective parent-owned definitions captured for this runtime. */
   readonly effectiveHttpTools: readonly Readonly<HttpToolConfig>[];
+  /** Immutable mode-derived history tool selection; independent of readiness. */
+  readonly effectiveConversationTools: readonly ConversationToolName[];
 }
 
 export interface CreateWorkspaceInput {
@@ -169,6 +176,7 @@ export interface CreateWorkspaceInput {
   readonly networkPolicy?: SandboxNetworkPolicy;
   readonly networkPolicySetId?: NetworkPolicySetId;
   readonly enabledHttpTools?: readonly string[];
+  readonly conversationToolsEnabled?: boolean;
   readonly acknowledgeWritableMounts?: true;
 }
 
@@ -180,6 +188,7 @@ export interface UpdateWorkspaceInput {
   readonly networkPolicy?: SandboxNetworkPolicy;
   readonly networkPolicySetId?: NetworkPolicySetId;
   readonly enabledHttpTools?: readonly string[];
+  readonly conversationToolsEnabled?: boolean;
   readonly acknowledgeSecurityDowngrade?: true;
   readonly acknowledgeNetworkExposure?: true;
   readonly acknowledgeWritableMounts?: true;
@@ -199,6 +208,9 @@ function workspaceFromRow(
   if (row.network_policy !== "isolated" && row.network_policy !== "managed-egress") {
     throw new AppError(ERROR_CODES.DATABASE_ERROR);
   }
+  if (row.conversation_tools_enabled !== 0 && row.conversation_tools_enabled !== 1) {
+    throw new AppError(ERROR_CODES.DATABASE_ERROR);
+  }
   if (!isStructurallyValidPolicySetId(row.network_policy_set_id)) {
     throw new AppError(ERROR_CODES.DATABASE_ERROR);
   }
@@ -213,6 +225,7 @@ function workspaceFromRow(
     networkPolicy: row.network_policy,
     networkPolicySetId: row.network_policy_set_id,
     enabledHttpTools: [...enabledHttpTools],
+    conversationToolsEnabled: row.conversation_tools_enabled === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -224,7 +237,7 @@ function isStructurallyValidPolicySetId(input: unknown): input is NetworkPolicyS
     new RegExp(NETWORK_POLICY_SET_ID_PATTERN, "u").test(input);
 }
 
-function compareWorkspaces(left: Workspace, right: Workspace): number {
+function compareWorkspaces(left: Pick<Workspace, "id" | "name">, right: Pick<Workspace, "id" | "name">): number {
   const leftName = left.name.toLowerCase();
   const rightName = right.name.toLowerCase();
   if (leftName < rightName) return -1;
@@ -264,13 +277,14 @@ export class WorkspaceRepository {
   readonly #sandboxAdmission: Pick<SandboxWorkspaceAdmission, "admit" | "admitMount">;
   readonly #networkPolicySets: ReadonlyMap<string, CompiledNetworkPolicySet>;
   readonly #httpToolByName: ReadonlyMap<string, Readonly<HttpToolConfig>>;
+  readonly #searchMode: "disabled" | "optional";
   readonly #listStatement: Database.Statement<[], WorkspaceRow>;
   readonly #getStatement: Database.Statement<[string], WorkspaceRow>;
   readonly #insertStatement: Database.Statement<
-    [string, string, string, WorkspaceSessionStorage, WorkspaceSecurityProfile, SandboxNetworkPolicy, NetworkPolicySetId, number, number]
+    [string, string, string, WorkspaceSessionStorage, WorkspaceSecurityProfile, SandboxNetworkPolicy, NetworkPolicySetId, number, number, number]
   >;
   readonly #updateStatement: Database.Statement<
-    [string, string, WorkspaceSecurityProfile, SandboxNetworkPolicy, NetworkPolicySetId, number, string]
+    [string, string, WorkspaceSecurityProfile, SandboxNetworkPolicy, NetworkPolicySetId, number, number, string]
   >;
   readonly #deleteStatement: Database.Statement<[string]>;
   readonly #listMountsStatement: Database.Statement<[string], WorkspaceMountRow>;
@@ -304,24 +318,25 @@ export class WorkspaceRepository {
     this.#httpToolByName = new Map(
       (options.httpTools?.tools ?? []).map((tool) => [tool.name, tool]),
     );
+    this.#searchMode = options.searchMode ?? "disabled";
     this.#sandboxAdmission = options.sandboxAdmission ?? new SandboxWorkspaceAdmission();
 
     try {
       this.#listStatement = connection.prepare<[], WorkspaceRow>(
-        "SELECT id, name, path, session_storage, security_profile, network_policy, network_policy_set_id, created_at, updated_at FROM workspaces",
+        "SELECT id, name, path, session_storage, security_profile, network_policy, network_policy_set_id, conversation_tools_enabled, created_at, updated_at FROM workspaces",
       );
       this.#getStatement = connection.prepare<[string], WorkspaceRow>(
-        "SELECT id, name, path, session_storage, security_profile, network_policy, network_policy_set_id, created_at, updated_at FROM workspaces WHERE id = ?",
+        "SELECT id, name, path, session_storage, security_profile, network_policy, network_policy_set_id, conversation_tools_enabled, created_at, updated_at FROM workspaces WHERE id = ?",
       );
       this.#insertStatement = connection.prepare<
-        [string, string, string, WorkspaceSessionStorage, WorkspaceSecurityProfile, SandboxNetworkPolicy, NetworkPolicySetId, number, number]
+        [string, string, string, WorkspaceSessionStorage, WorkspaceSecurityProfile, SandboxNetworkPolicy, NetworkPolicySetId, number, number, number]
       >(
-        "INSERT INTO workspaces (id, name, path, session_storage, security_profile, network_policy, network_policy_set_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO workspaces (id, name, path, session_storage, security_profile, network_policy, network_policy_set_id, conversation_tools_enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       );
       this.#updateStatement = connection.prepare<
-        [string, string, WorkspaceSecurityProfile, SandboxNetworkPolicy, NetworkPolicySetId, number, string]
+        [string, string, WorkspaceSecurityProfile, SandboxNetworkPolicy, NetworkPolicySetId, number, number, string]
       >(
-        "UPDATE workspaces SET name = ?, path = ?, security_profile = ?, network_policy = ?, network_policy_set_id = ?, updated_at = ? WHERE id = ?",
+        "UPDATE workspaces SET name = ?, path = ?, security_profile = ?, network_policy = ?, network_policy_set_id = ?, conversation_tools_enabled = ?, updated_at = ? WHERE id = ?",
       );
       this.#deleteStatement = connection.prepare<[string]>(
         "DELETE FROM workspaces WHERE id = ?",
@@ -356,6 +371,13 @@ export class WorkspaceRepository {
     return this.#database(() => this.#listStatement.all()
       .map((row) => this.#summary(this.#workspaceFromRow(row)))
       .sort(compareWorkspaces));
+  }
+
+  /** Stored session scopes only: no filesystem probes or runtime-policy evaluation. */
+  listRegistrations(): readonly Readonly<Pick<Workspace, "id" | "name" | "path" | "sessionDirectory">>[] {
+    return this.#database(() => Object.freeze(this.#listStatement.all().map((row) => Object.freeze({
+      id: row.id, name: row.name, path: row.path, sessionDirectory: workspaceSessionDirectory(row.path, row.session_storage),
+    })).sort(compareWorkspaces)));
   }
 
   get(workspaceId: string): WorkspaceSummary {
@@ -417,6 +439,7 @@ export class WorkspaceRepository {
       networkPolicySet: evaluation.effectiveNetworkPolicySetId === null
         ? null
         : this.#networkPolicySets.get(evaluation.effectiveNetworkPolicySetId) ?? null,
+      effectiveConversationTools: Object.freeze(this.#conversationTools(workspace)),
       effectiveHttpTools: Object.freeze(workspace.enabledHttpTools.flatMap((name) => {
         const tool = this.#httpToolByName.get(name);
         return tool === undefined ? [] : [tool];
@@ -426,6 +449,9 @@ export class WorkspaceRepository {
 
   create(input: CreateWorkspaceInput): WorkspaceSummary {
     const name = this.#validName(input.name);
+    const conversationToolsEnabled = this.#validConversationToolsEnabled(
+      input.conversationToolsEnabled === undefined ? false : input.conversationToolsEnabled,
+    );
     const sessionStorage = this.#validSessionStorage(
       input.sessionStorage ?? "pi-default",
     );
@@ -489,6 +515,7 @@ export class WorkspaceRepository {
             securityProfile,
             networkPolicy,
             networkPolicySetId,
+            conversationToolsEnabled ? 1 : 0,
             now,
             now,
           );
@@ -521,6 +548,7 @@ export class WorkspaceRepository {
       networkPolicy,
       networkPolicySetId,
       enabledHttpTools: [...enabledHttpTools],
+      conversationToolsEnabled,
       createdAt: now,
       updatedAt: now,
     });
@@ -538,11 +566,15 @@ export class WorkspaceRepository {
       changes.mounts === undefined &&
       changes.networkPolicy === undefined &&
       changes.networkPolicySetId === undefined &&
-      changes.enabledHttpTools === undefined
+      changes.enabledHttpTools === undefined &&
+      changes.conversationToolsEnabled === undefined
     ) {
       throw new AppError(ERROR_CODES.INVALID_COMMAND);
     }
 
+    const conversationToolsEnabled = changes.conversationToolsEnabled === undefined
+      ? current.conversationToolsEnabled
+      : this.#validConversationToolsEnabled(changes.conversationToolsEnabled);
     const securityProfile = changes.securityProfile === undefined
       ? current.securityProfile
       : this.#validSecurityProfile(changes.securityProfile);
@@ -666,6 +698,7 @@ export class WorkspaceRepository {
             securityProfile,
             networkPolicy,
             networkPolicySetId,
+            conversationToolsEnabled ? 1 : 0,
             now,
             workspaceId,
           );
@@ -706,6 +739,7 @@ export class WorkspaceRepository {
       networkPolicy,
       networkPolicySetId,
       enabledHttpTools: [...enabledHttpTools],
+      conversationToolsEnabled,
       updatedAt: now,
     });
   }
@@ -763,6 +797,11 @@ export class WorkspaceRepository {
       throw new AppError(ERROR_CODES.DATABASE_ERROR);
     }
     return workspaceFromRow(row, Object.freeze(mounts), Object.freeze(enabledHttpTools));
+  }
+
+  #validConversationToolsEnabled(input: unknown): boolean {
+    if (typeof input !== "boolean") throw new AppError(ERROR_CODES.INVALID_COMMAND);
+    return input;
   }
 
   #validHttpTools(input: readonly string[]): readonly string[] {
@@ -899,6 +938,7 @@ export class WorkspaceRepository {
       networkPolicy,
       networkPolicySetId: DEFAULT_NETWORK_POLICY_SET_ID,
       enabledHttpTools: [],
+      conversationToolsEnabled: false,
       createdAt: 0,
       updatedAt: 0,
     };
@@ -1130,6 +1170,11 @@ export class WorkspaceRepository {
     };
   }
 
+  #conversationTools(workspace: Workspace): ConversationToolName[] {
+    return workspace.conversationToolsEnabled && this.#searchMode === "optional"
+      ? [...CONVERSATION_TOOL_NAMES] : [];
+  }
+
   #summary(workspace: Workspace): WorkspaceSummary {
     const available = this.#isAvailable(workspace);
     const evaluation = this.#evaluatePolicy(workspace);
@@ -1137,6 +1182,7 @@ export class WorkspaceRepository {
       ...workspace,
       enabledHttpTools: [...workspace.enabledHttpTools],
       effectiveHttpTools: workspace.enabledHttpTools.filter((name) => this.#httpToolByName.has(name)),
+      effectiveConversationTools: this.#conversationTools(workspace),
       available,
       ...evaluation,
       usable: available && evaluation.usable,

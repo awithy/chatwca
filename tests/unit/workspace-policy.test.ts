@@ -101,6 +101,7 @@ describe("workspace security policy", () => {
           effectiveNetworkPolicySetId: null,
           networkPolicySet: null,
           effectiveHttpTools: [],
+          effectiveConversationTools: [],
         });
       } else {
         await expect(repository.requireUsable("workspace-1")).rejects.toMatchObject({

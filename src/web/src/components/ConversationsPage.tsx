@@ -14,6 +14,7 @@ import { ConversationHeader } from "./ConversationHeader.js";
 import { WorkspaceConversationPicker } from "./WorkspaceConversationPicker.js";
 import { WorkspaceSidebar } from "./WorkspaceSidebar.js";
 import type { WorkspaceFormValues } from "./WorkspaceForm.js";
+import { CONVERSATION_HISTORY_DISCLOSURE } from "./conversation-history.js";
 import { MessageTimeline, type SearchMessageTarget } from "./MessageTimeline.js";
 import { NetworkBlockedNotices } from "./NetworkBlockedNotices.js";
 import {
@@ -209,6 +210,7 @@ export function ConversationsPage({ client, chat, server, onOpenJobs, onOpenSear
       networkPolicy: values.networkPolicy,
       networkPolicySetId: values.networkPolicySetId,
       enabledHttpTools: [...values.enabledHttpTools],
+      conversationToolsEnabled: values.conversationToolsEnabled,
       ...(values.acknowledgeWritableMounts === true
         ? { acknowledgeWritableMounts: true as const }
         : {}),
@@ -229,6 +231,7 @@ export function ConversationsPage({ client, chat, server, onOpenJobs, onOpenSear
       readonly networkPolicy?: WorkspaceFormValues["networkPolicy"];
       readonly networkPolicySetId?: string;
       readonly enabledHttpTools?: readonly string[];
+      readonly conversationToolsEnabled?: boolean;
       readonly acknowledgeSecurityDowngrade?: true;
       readonly acknowledgeNetworkExposure?: true;
       readonly acknowledgeWritableMounts?: true;
@@ -252,6 +255,8 @@ export function ConversationsPage({ client, chat, server, onOpenJobs, onOpenSear
       ...(values.enabledHttpTools === undefined
         ? {}
         : { enabledHttpTools: [...values.enabledHttpTools] }),
+      ...(values.conversationToolsEnabled === undefined
+        ? {} : { conversationToolsEnabled: values.conversationToolsEnabled }),
       ...(values.acknowledgeSecurityDowngrade === true
         ? { acknowledgeSecurityDowngrade: true as const }
         : {}),
@@ -535,6 +540,7 @@ export function ConversationsPage({ client, chat, server, onOpenJobs, onOpenSear
         publicSandboxConfig={server.config?.sandbox}
         publicManagedEgressConfig={server.config?.managedEgress}
         publicHttpTools={server.config?.httpTools}
+        publicSearchConfig={server.config?.search}
         open={sidebarOpen}
         onDismiss={() => setSidebarOpen(false)}
         onOpenJobs={() => {
@@ -660,7 +666,13 @@ export function ConversationsPage({ client, chat, server, onOpenJobs, onOpenSear
                       <div><dt>HTTP tools</dt><dd>{selectedConversation === undefined
                         ? "—"
                         : selectedConversation.effectiveHttpTools.join(", ") || "None"}</dd></div>
+                      <div className="mobile-conversation-history-fact"><dt>Conversation history tools</dt><dd>{selectedConversation === undefined
+                        ? "—"
+                        : selectedConversation.effectiveConversationTools.join(", ") || "None"}</dd></div>
                     </dl>
+                    {selectedConversation?.effectiveConversationTools.length ? (
+                      <p className="workspace-form-help mobile-conversation-history-disclosure">{CONVERSATION_HISTORY_DISCLOSURE}</p>
+                    ) : null}
                     <div className="mobile-conversation-actions">
                       {mobileOwner?.kind === "scheduled-job" && (
                         <button

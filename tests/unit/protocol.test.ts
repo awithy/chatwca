@@ -157,6 +157,7 @@ const conversationState = {
   networkPolicySetId: "default",
   effectiveNetworkPolicySetId: null,
   effectiveHttpTools: [],
+  effectiveConversationTools: [],
 } as const;
 
 describe("ClientCommandSchema", () => {
@@ -417,6 +418,23 @@ describe("public configuration schema", () => {
   });
 });
 
+describe("conversation history workspace commands", () => {
+  const create = { type: "workspace.create", requestId, name: "History", path: "/history", sessionStorage: "pi-default", securityProfile: "unrestricted" };
+  const update = { type: "workspace.update", requestId, workspaceId: "workspace-1" };
+  it("accepts omitted/boolean selection and rejects coercion and unknown fields", () => {
+    for (const base of [create, update]) {
+      expect(Value.Check(ClientCommandSchema, base)).toBe(true);
+      for (const enabled of [false, true]) {
+        expect(Value.Check(ClientCommandSchema, { ...base, conversationToolsEnabled: enabled })).toBe(true);
+      }
+      for (const invalid of [null, 0, 1, "true", [], {}]) {
+        expect(Value.Check(ClientCommandSchema, { ...base, conversationToolsEnabled: invalid })).toBe(false);
+      }
+      expect(Value.Check(ClientCommandSchema, { ...base, conversationToolsEnabled: true, effectiveConversationTools: ["conversation_read"] })).toBe(false);
+    }
+  });
+});
+
 describe("workspace schemas", () => {
   const workspace = {
     id: "workspace-1",
@@ -429,6 +447,7 @@ describe("workspace schemas", () => {
     networkPolicy: "isolated",
     networkPolicySetId: "default",
     enabledHttpTools: [],
+    conversationToolsEnabled: false,
     createdAt: 10,
     updatedAt: 20,
   } as const;
@@ -444,6 +463,7 @@ describe("workspace schemas", () => {
         effectiveNetworkPolicySetId: null,
         networkPolicyIssue: null,
         effectiveHttpTools: [],
+        effectiveConversationTools: [],
         usable: true,
         policyIssue: null,
       }),
@@ -457,11 +477,27 @@ describe("workspace schemas", () => {
         effectiveNetworkPolicySetId: null,
         networkPolicyIssue: null,
         effectiveHttpTools: [],
+        effectiveConversationTools: [],
         usable: true,
         policyIssue: null,
         privateMetadata: "no",
       }),
     ).toBe(false);
+  });
+
+  it("requires boolean stored selection and closed effective history names", () => {
+    const summary = {
+      ...workspace, conversationToolsEnabled: true,
+      available: true, effectiveSecurityProfile: "unrestricted", effectiveNetworkPolicy: null,
+      effectiveNetworkPolicySetId: null, networkPolicyIssue: null, effectiveHttpTools: [],
+      effectiveConversationTools: ["conversation_search", "conversation_read"], usable: true, policyIssue: null,
+    };
+    expect(Value.Check(WorkspaceSummarySchema, summary)).toBe(true);
+    for (const names of [["bash"], ["conversation_read", "conversation_read"], [...summary.effectiveConversationTools, "conversation_read"]]) {
+      expect(Value.Check(WorkspaceSummarySchema, { ...summary, effectiveConversationTools: names })).toBe(false);
+    }
+    expect(Value.Check(WorkspaceSummarySchema, { ...summary, conversationToolsEnabled: 1 })).toBe(false);
+    expect(Value.Check(WorkspaceSchema, { ...workspace, conversationToolsEnabled: undefined })).toBe(false);
   });
 
   it("types workspace command successes as exact correlated responses", () => {
@@ -478,6 +514,7 @@ describe("workspace schemas", () => {
         effectiveNetworkPolicySetId: null,
         networkPolicyIssue: null,
         effectiveHttpTools: [],
+        effectiveConversationTools: [],
         usable: true,
         policyIssue: null,
       }],
@@ -563,6 +600,8 @@ describe("ServerMessageSchema", () => {
             networkPolicyIssue: null,
             enabledHttpTools: ["network_brain_search"],
             effectiveHttpTools: ["network_brain_search"],
+            conversationToolsEnabled: false,
+            effectiveConversationTools: [],
             createdAt: 1,
             updatedAt: 2,
             available: true,

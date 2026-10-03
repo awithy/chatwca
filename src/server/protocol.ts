@@ -90,6 +90,7 @@ export interface ProtocolWorkspaceRepository {
     readonly networkPolicy?: WorkspaceSummary["networkPolicy"];
     readonly networkPolicySetId?: WorkspaceSummary["networkPolicySetId"];
     readonly enabledHttpTools?: readonly string[];
+    readonly conversationToolsEnabled?: boolean;
     readonly acknowledgeWritableMounts?: true;
   }): WorkspaceSummary;
   update(workspaceId: string, changes: UpdateWorkspaceInput): WorkspaceSummary;
@@ -242,6 +243,9 @@ export async function dispatchClientCommand(
         ...(command.enabledHttpTools === undefined
           ? {}
           : { enabledHttpTools: command.enabledHttpTools }),
+        ...(command.conversationToolsEnabled === undefined
+          ? {}
+          : { conversationToolsEnabled: command.conversationToolsEnabled }),
         ...(command.acknowledgeWritableMounts === undefined
           ? {}
           : { acknowledgeWritableMounts: command.acknowledgeWritableMounts }),
@@ -259,6 +263,7 @@ export async function dispatchClientCommand(
       const networkPolicy = command.networkPolicy;
       const networkPolicySetId = command.networkPolicySetId;
       const enabledHttpTools = command.enabledHttpTools;
+      const conversationToolsEnabled = command.conversationToolsEnabled;
       if (
         (
           command.path !== undefined ||
@@ -266,7 +271,8 @@ export async function dispatchClientCommand(
           mounts !== undefined ||
           networkPolicy !== undefined ||
           networkPolicySetId !== undefined ||
-          enabledHttpTools !== undefined
+          enabledHttpTools !== undefined ||
+          conversationToolsEnabled !== undefined
         ) &&
         registry.hasLiveWorkspace(command.workspaceId)
       ) {
@@ -286,6 +292,7 @@ export async function dispatchClientCommand(
           ? {}
           : { networkPolicySetId }),
         ...(enabledHttpTools === undefined ? {} : { enabledHttpTools }),
+        ...(conversationToolsEnabled === undefined ? {} : { conversationToolsEnabled }),
         ...(command.acknowledgeSecurityDowngrade === undefined
           ? {}
           : { acknowledgeSecurityDowngrade: command.acknowledgeSecurityDowngrade }),

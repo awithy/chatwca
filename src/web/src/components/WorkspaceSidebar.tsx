@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import type {
   ConversationSummary,
   LiveConversationStatus,
+  PublicConfig,
   PublicHttpTool,
   PublicManagedEgressConfig,
   PublicSandboxConfig,
@@ -22,6 +23,7 @@ import {
   type WorkspaceFormValues,
 } from "./WorkspaceForm.js";
 import { WorkspaceDialog } from "./WorkspaceDialog.js";
+import { CONVERSATION_HISTORY_DISCLOSURE, conversationHistoryAvailability } from "./conversation-history.js";
 
 interface WorkspaceUpdateValues {
   readonly name: string;
@@ -31,6 +33,7 @@ interface WorkspaceUpdateValues {
   readonly networkPolicy?: SandboxNetworkPolicy;
   readonly networkPolicySetId?: string;
   readonly enabledHttpTools?: readonly string[];
+  readonly conversationToolsEnabled?: boolean;
   readonly acknowledgeSecurityDowngrade?: true;
   readonly acknowledgeNetworkExposure?: true;
   readonly acknowledgeWritableMounts?: true;
@@ -50,6 +53,7 @@ export interface WorkspaceSidebarProps {
   readonly publicSandboxConfig: PublicSandboxConfig | undefined;
   readonly publicManagedEgressConfig: PublicManagedEgressConfig | undefined;
   readonly publicHttpTools: readonly PublicHttpTool[] | undefined;
+  readonly publicSearchConfig?: PublicConfig["search"];
   readonly open: boolean;
   readonly onDismiss: () => void;
   readonly onOpenJobs: () => void;
@@ -157,6 +161,8 @@ export function workspaceUpdatePlan(workspace: WorkspaceSummary, values: Workspa
       ...(networkPolicyChanged ? { networkPolicy: values.networkPolicy } : {}),
       ...(networkPolicySetChanged ? { networkPolicySetId: values.networkPolicySetId } : {}),
       ...(httpToolsChanged ? { enabledHttpTools: selectedHttpTools } : {}),
+      ...(values.conversationToolsEnabled === workspace.conversationToolsEnabled
+        ? {} : { conversationToolsEnabled: values.conversationToolsEnabled }),
       ...(downgrade ? { acknowledgeSecurityDowngrade: true } : {}),
       ...(addsNetworkExposure ? { acknowledgeNetworkExposure: true } : {}),
       ...(addsWritableMounts ? { acknowledgeWritableMounts: true } : {}),
@@ -204,6 +210,7 @@ export function WorkspaceSidebar({
   publicSandboxConfig,
   publicManagedEgressConfig,
   publicHttpTools,
+  publicSearchConfig,
   open,
   onDismiss,
   onOpenJobs,
@@ -459,11 +466,14 @@ export function WorkspaceSidebar({
                 networkPolicyIssue: formMode.workspace.networkPolicyIssue,
                 enabledHttpTools: formMode.workspace.enabledHttpTools,
                 effectiveHttpTools: formMode.workspace.effectiveHttpTools,
+                conversationToolsEnabled: formMode.workspace.conversationToolsEnabled,
+                effectiveConversationTools: formMode.workspace.effectiveConversationTools,
               },
             } : {})}
             publicSandboxConfig={publicSandboxConfig}
             publicManagedEgressConfig={publicManagedEgressConfig}
             publicHttpTools={publicHttpTools}
+            publicSearchConfig={publicSearchConfig}
             securityControlsLocked={formMode.type === "edit" && liveWorkspaceIds.has(formMode.workspace.id)}
             submitting={submitting}
             error={workspaceError}
@@ -580,6 +590,20 @@ export function WorkspaceSidebar({
                       .map((name) => <code key={name}>{name}</code>)}</dd>
               </div>
               <div>
+                <dt>Stored conversation history</dt>
+                <dd>{formMode.workspace.conversationToolsEnabled ? "Enabled" : "Disabled"}</dd>
+              </div>
+              <div>
+                <dt>Effective conversation tools</dt>
+                <dd className="workspace-info-values">{formMode.workspace.effectiveConversationTools.length === 0
+                  ? "None"
+                  : formMode.workspace.effectiveConversationTools.map((name) => <code key={name}>{name}</code>)}</dd>
+              </div>
+              <div>
+                <dt>Conversation history availability</dt>
+                <dd>{conversationHistoryAvailability(publicSearchConfig)}</dd>
+              </div>
+              <div>
                 <dt>Session storage</dt>
                 <dd>{storageLabel(formMode.workspace)}</dd>
               </div>
@@ -649,6 +673,7 @@ export function WorkspaceSidebar({
               <p><strong>Writable files:</strong> The workspace, including <code>.git</code>, and every read-write mount can be modified. Sandboxing does not prevent harmful edits, hooks, or build scripts.</p>
               <p><strong>Managed network:</strong> {publicManagedEgressConfig?.disclosureWarning ?? "Tools may transmit workspace content to configured destinations."}</p>
               <p><strong>Parent-owned HTTP tools:</strong> Enabled tools run in the ChatWCA server outside sandbox networking and may transmit readable workspace content to their fixed endpoints. They do not give workspace processes general network access.</p>
+              <p><strong>Conversation history:</strong> {CONVERSATION_HISTORY_DISCLOSURE}</p>
               <p><strong>Remote model:</strong> {publicSandboxConfig?.remoteProviderWarning ?? "Workspace content may be sent to the configured model provider."}</p>
               <p><strong>No resource quotas:</strong> The sandbox does not isolate CPU, memory, or disk denial-of-service.</p>
             </div>

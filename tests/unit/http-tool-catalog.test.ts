@@ -95,6 +95,12 @@ describe("HTTP tool catalog", () => {
     })).toThrow(/tool names must be unique/);
   });
 
+  it.each(["conversation_search", "conversation_read"])("reserves %s regardless of search mode", (name) => {
+    const document = networkBrainDocument(); document.tools[0]!.name = name;
+    expect(() => loadHttpToolCatalog({ CHATWCA_TOOL_CATALOG: temporaryCatalog(document).file }))
+      .toThrow(/non-reserved lowercase tool name/);
+  });
+
   it("rejects malformed tools and catalog files", () => {
     expect(() => loadHttpToolCatalog({ CHATWCA_TOOL_CATALOG: " " })).toThrow(ConfigurationError);
     expect(() => loadHttpToolCatalog({ CHATWCA_TOOL_CATALOG: "/missing/tools.json" })).toThrow(

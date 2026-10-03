@@ -28,7 +28,7 @@ afterEach(() => {
 });
 
 describe("openDatabase", () => {
-  it("creates nested storage and initializes the version-eight schema", () => {
+  it("creates nested storage and initializes the version-nine schema", () => {
     const dataDir = path.join(temporaryDirectory(), "nested", "data");
     const database = openDatabase(dataDir);
 
@@ -57,6 +57,7 @@ describe("openDatabase", () => {
       expect.objectContaining({ name: "security_profile", notnull: 1, pk: 0 }),
       expect.objectContaining({ name: "network_policy", notnull: 1, pk: 0 }),
       expect.objectContaining({ name: "network_policy_set_id", notnull: 1, pk: 0 }),
+      expect.objectContaining({ name: "conversation_tools_enabled", notnull: 1, pk: 0 }),
       expect.objectContaining({ name: "created_at", notnull: 1, pk: 0 }),
       expect.objectContaining({ name: "updated_at", notnull: 1, pk: 0 }),
     ]);
@@ -64,7 +65,7 @@ describe("openDatabase", () => {
     database.close();
   });
 
-  it("accepts and preserves an existing version-eight database", () => {
+  it("accepts and preserves an existing version-nine database", () => {
     const dataDir = temporaryDirectory();
     const first = openDatabase(dataDir);
     first.connection
@@ -85,6 +86,7 @@ describe("openDatabase", () => {
       security_profile: "unrestricted",
       network_policy: "isolated",
       network_policy_set_id: "default",
+      conversation_tools_enabled: 0,
       created_at: 10,
       updated_at: 20,
     });
@@ -122,6 +124,7 @@ describe("openDatabase", () => {
       security_profile: "unrestricted",
       network_policy: "isolated",
       network_policy_set_id: "default",
+      conversation_tools_enabled: 0,
     });
     expect(
       migrated.connection.pragma("user_version", { simple: true }),
@@ -395,6 +398,66 @@ describe("openDatabase", () => {
     migrated.close();
   });
 
+  it("migrates version-eight rows with history tools off and preserves HTTP selections", () => {
+    const dataDir = temporaryDirectory();
+    const filename = path.join(dataDir, DATABASE_FILENAME);
+    const legacy = new Database(filename);
+    legacy.exec(`
+      CREATE TABLE workspaces (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL UNIQUE,
+        session_storage TEXT NOT NULL DEFAULT 'pi-default',
+        security_profile TEXT NOT NULL DEFAULT 'unrestricted',
+        network_policy TEXT NOT NULL DEFAULT 'isolated',
+        network_policy_set_id TEXT NOT NULL DEFAULT 'default',
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE workspace_http_tools (
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        tool_name TEXT NOT NULL, PRIMARY KEY (workspace_id, tool_name)
+      );
+      INSERT INTO workspaces VALUES
+        ('v8', 'Version 8', '/work/v8', 'workspace', 'workspace-sandboxed', 'isolated', 'default', 1, 2);
+      INSERT INTO workspace_http_tools VALUES ('v8', 'network_brain_search');
+      PRAGMA user_version = 8;
+    `);
+    legacy.close();
+    const migrated = openDatabase(dataDir);
+    expect(migrated.connection.prepare("SELECT * FROM workspaces").get()).toEqual({
+      id: "v8", name: "Version 8", path: "/work/v8", session_storage: "workspace",
+      security_profile: "workspace-sandboxed", network_policy: "isolated",
+      network_policy_set_id: "default", created_at: 1, updated_at: 2, conversation_tools_enabled: 0,
+    });
+    expect(migrated.connection.prepare("SELECT * FROM workspace_http_tools").all())
+      .toEqual([{ workspace_id: "v8", tool_name: "network_brain_search" }]);
+    expect(migrated.connection.pragma("user_version", { simple: true })).toBe(9);
+    migrated.close();
+  });
+
+  it("constrains the stored history selection to non-null integer booleans", () => {
+    const opened = openDatabase(temporaryDirectory(), ":memory:");
+    const insert = opened.connection.prepare(`
+      INSERT INTO workspaces (id, name, path, conversation_tools_enabled, created_at, updated_at)
+      VALUES (?, 'Selection', ?, ?, 1, 2)
+    `);
+    for (const [index, invalid] of [null, -1, 2, 0.5, "true"].entries()) {
+      expect(() => insert.run(`invalid-${index}`, `/invalid-${index}`, invalid)).toThrow();
+    }
+    for (const enabled of [0, 1]) insert.run(`valid-${enabled}`, `/valid-${enabled}`, enabled);
+    opened.close();
+  });
+
+  it("rolls back failed 8-to-9 migration without advancing user_version", () => {
+    const dataDir = temporaryDirectory();
+    const filename = path.join(dataDir, DATABASE_FILENAME);
+    const broken = new Database(filename);
+    broken.exec("CREATE TABLE workspaces (id TEXT PRIMARY KEY, conversation_tools_enabled INTEGER); PRAGMA user_version = 8;");
+    broken.close();
+    expect(() => openDatabase(dataDir)).toThrow(/duplicate column name/);
+    const inspected = new Database(filename);
+    expect(inspected.pragma("user_version", { simple: true })).toBe(8);
+    inspected.close();
+  });
+
   it("creates constrained job tables, foreign keys, and scheduling indexes", () => {
     const database = openDatabase(temporaryDirectory(), ":memory:");
     const connection = database.connection;
@@ -529,14 +592,14 @@ describe("openDatabase", () => {
     const dataDir = temporaryDirectory();
     const filename = path.join(dataDir, DATABASE_FILENAME);
     const unsupported = new Database(filename);
-    unsupported.pragma("user_version = 9");
+    unsupported.pragma("user_version = 10");
     unsupported.close();
 
     expect(() => openDatabase(dataDir)).toThrow(
       UnsupportedDatabaseVersionError,
     );
     expect(() => openDatabase(dataDir)).toThrow(
-      /schema version 9; expected 8/,
+      /schema version 10; expected 9/,
     );
 
     const afterFailure = new Database(filename);

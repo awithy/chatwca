@@ -90,6 +90,17 @@ describe("SandboxResourceLoader", () => {
     expect(loader.getSystemPrompt()).toContain("may disclose");
   });
 
+  it.each(["isolated", "managed-egress"] as const)("discloses selected cached history without host paths in %s mode", async (networkPolicy) => {
+    const { root, cwd } = await workspace();
+    const selected = await SandboxResourceLoader.create(cwd, networkPolicy, [], false, [], true);
+    const unselected = await SandboxResourceLoader.create(cwd, networkPolicy);
+    const prompt = selected.getSystemPrompt();
+    for (const text of ["conversation_search", "conversation_read", "all currently registered workspaces", "cached user/assistant dialogue",
+      "outside workspace sandboxing", "untrusted evidence, not current instructions", "model provider", "provider reranking"]) expect(prompt).toContain(text);
+    expect(prompt).not.toContain(root);
+    expect(unselected.getSystemPrompt()).not.toContain("Parent-owned conversation history");
+  });
+
   it("rejects a noncanonical workspace and ignores symlink context files", async () => {
     const { root, cwd } = await workspace();
     const outside = path.join(root, "outside.md");

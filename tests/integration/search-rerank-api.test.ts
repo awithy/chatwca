@@ -34,7 +34,7 @@ async function fixture(provider: "openai" | "openai-codex" = "openai", rerankTim
       const queries = new SearchQueryService({ repository, registrations, piAgentDirectory: "/synthetic/agent",
         embeddings: { embedSearchQuery: async () => ({ space: REPOSITORY_SPACE, embedding: fakeSearchVector() }) },
         ...(reranker ? { reranker } : {}) });
-      return { queries, indexer: { status: () => idle, requestRefresh: () => {}, close: async () => {} }, checkSchema: async () => {},
+      return { queries, reads: { read: async () => { throw new Error("Unexpected cached read"); } }, indexer: { status: () => idle, requestRefresh: () => {}, close: async () => {} }, checkSchema: async () => {},
         readCounts: async () => ({ documents: 2, chunks: 2 }), close: async () => { queries.close(); } };
     } });
   const server = createChatWcaServer(config, "synthetic-test", { search, registry: { subscribe: () => () => {} }, history: {}, workspaces: {} } as unknown as ChatWcaProtocolServices);

@@ -13,6 +13,9 @@ import {
   type ChatWcaServer,
 } from "../../src/server/index.js";
 import type { JobServiceListener } from "../../src/server/job-service.js";
+import { SearchQueryError } from "../../src/server/search/errors.js";
+import type { SearchServicePort } from "../../src/server/search/service.js";
+import { CONVERSATION_TOOL_NAMES } from "../../src/shared/protocol.js";
 import type {
   ProtocolHistory,
   ProtocolJobs,
@@ -45,6 +48,19 @@ const HOST = "0.0.0.0";
 const PORT = Number(process.env.CHATWCA_BROWSER_TEST_PORT ?? 28787);
 const CWD = "/tmp/chatwca-browser-workspace";
 const WORKSPACE_ID = "browser-workspace";
+const SEARCH_MODE = process.env.CHATWCA_BROWSER_HISTORY_MODE === "optional" ? "optional" : "disabled";
+// A public optional-mode outage fixture: no database, embeddings, or provider IO.
+const search: SearchServicePort = {
+  start: () => {},
+  capability: () => ({ mode: SEARCH_MODE, state: SEARCH_MODE === "optional" ? "unavailable" : "disabled", available: false, rerankAvailable: false }),
+  freshness: () => ({ state: SEARCH_MODE === "optional" ? "unavailable" : "disabled", indexing: false,
+    lastSucceededAt: null, errorCode: SEARCH_MODE === "optional" ? "search_database_unavailable" : null, errorCount: SEARCH_MODE === "optional" ? 1 : 0 }),
+  status: async () => ({ ...search.capability(), ...search.freshness(), counts: null, indexer: null }),
+  search: async () => { throw new SearchQueryError(SEARCH_MODE === "optional" ? "search_database_unavailable" : "search_disabled"); },
+  read: async () => { throw new SearchQueryError(SEARCH_MODE === "optional" ? "search_database_unavailable" : "search_disabled"); },
+  requestRefresh: () => {},
+  close: async () => {},
+};
 const SESSION_ROOT = "/tmp/chatwca-browser-sessions";
 const JOB_HOOK_ROOT = "/tmp/chatwca-browser-hooks";
 const TOOL_CATALOG_PATH = "/tmp/chatwca-browser-http-tools.json";
@@ -76,6 +92,8 @@ const WORKSPACE: WorkspaceSummary = {
   networkPolicyIssue: null,
   enabledHttpTools: [],
   effectiveHttpTools: [],
+  conversationToolsEnabled: false,
+  effectiveConversationTools: [],
   createdAt: 1,
   updatedAt: 1,
   available: true,
@@ -127,6 +145,7 @@ function emptyState(
     readonly networkPolicySetId?: ConversationState["networkPolicySetId"];
     readonly effectiveNetworkPolicySetId?: ConversationState["effectiveNetworkPolicySetId"];
     readonly effectiveHttpTools?: ConversationState["effectiveHttpTools"];
+    readonly effectiveConversationTools?: ConversationState["effectiveConversationTools"];
   } = WORKSPACE,
 ): ConversationState {
   const now = nextTime();
@@ -154,6 +173,7 @@ function emptyState(
     effectiveHttpTools: "effectiveHttpTools" in workspace
       ? [...workspace.effectiveHttpTools as readonly string[]]
       : [],
+    effectiveConversationTools: [...(workspace.effectiveConversationTools ?? [])],
   };
 }
 
@@ -483,6 +503,7 @@ const registry: ProtocolRegistry = {
       securityProfile: workspace.securityProfile,
       effectiveNetworkPolicy: workspace.networkPolicy,
       effectiveHttpTools: workspace.effectiveHttpTools.map(({ name }) => name),
+      effectiveConversationTools: [...workspace.effectiveConversationTools],
     }));
     return { id };
   },
@@ -500,6 +521,7 @@ const registry: ProtocolRegistry = {
       securityProfile: workspace.securityProfile,
       networkPolicy: workspace.networkPolicy,
       effectiveHttpTools: workspace.effectiveHttpTools.map(({ name }) => name),
+      effectiveConversationTools: [...workspace.effectiveConversationTools],
       status: "idle",
       lastActiveAt: nextTime(),
     };
@@ -660,6 +682,7 @@ const workspaces: ProtocolWorkspaceRepository = {
       networkPolicySetId: workspace.networkPolicySetId,
       effectiveNetworkPolicySetId: workspace.effectiveNetworkPolicySetId,
       networkPolicySet: null,
+      effectiveConversationTools: [...workspace.effectiveConversationTools],
       effectiveHttpTools: workspace.effectiveHttpTools.includes(HTTP_TOOL_CONFIG.name)
         ? [HTTP_TOOL_CONFIG]
         : [],
@@ -697,6 +720,9 @@ const workspaces: ProtocolWorkspaceRepository = {
       networkPolicyIssue: unavailableSet ? "managed_egress_policy_set_unavailable" : null,
       enabledHttpTools: [...(input.enabledHttpTools ?? [])],
       effectiveHttpTools: [...(input.enabledHttpTools ?? [])],
+      conversationToolsEnabled: input.conversationToolsEnabled ?? false,
+      effectiveConversationTools: input.conversationToolsEnabled && search.capability().mode === "optional"
+        ? [...CONVERSATION_TOOL_NAMES] : [],
       createdAt: nextTime(),
       updatedAt: nextTime(),
       available: !input.path.includes("fixture-unavailable"),
@@ -760,6 +786,10 @@ const workspaces: ProtocolWorkspaceRepository = {
             enabledHttpTools: [...changes.enabledHttpTools],
             effectiveHttpTools: [...changes.enabledHttpTools],
           }),
+      ...(changes.conversationToolsEnabled === undefined
+        ? {} : { conversationToolsEnabled: changes.conversationToolsEnabled }),
+      effectiveConversationTools: (changes.conversationToolsEnabled ?? current.conversationToolsEnabled) && search.capability().mode === "optional"
+        ? [...CONVERSATION_TOOL_NAMES] : [],
       available: changes.path === undefined
         ? current.available
         : !changes.path.includes("fixture-unavailable"),
@@ -1070,6 +1100,7 @@ server = createChatWcaServer(config, "browser-fixture", {
   images,
   workspaces,
   jobs,
+  search,
   sandboxFunctionalProbeSucceeded: true,
   managedNetworkFunctionalProbeSucceeded: true,
   onInternalError(error) {

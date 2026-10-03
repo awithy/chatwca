@@ -239,6 +239,107 @@ complete enumeration; the worker independently validates the directory witness b
 absence pruning. Persistent run history is deferred; the timer/API now invoke the
 same worker. Browser Global Search invokes these routes.
 
+## Cached conversation reader (internal)
+
+`SearchServicePort.read()` returns a cached dialogue page plus compact service
+freshness. It is an internal service method, not a public HTTP route. Pi tool
+factories, workspace/runtime selection and browser controls are implemented.
+Production registrations come from
+`WorkspaceRepository.listRegistrations()`, a SQLite-only scope projection with no
+filesystem probes or runtime-policy evaluation. Every call re-resolves the current
+workspace/source revision, including cursor continuations. Removed registrations
+are excluded; source-directory and provider outages do not block retained cache.
+
+`search/read-repository.ts` selects metadata and bounded text from one read-only
+repeatable-read snapshot. `search/read-page.ts` validates spans/overlaps and returns
+UTF-8-safe segments, exact bigint generations and bounded continuation tokens.
+Focused reads include their anchor in the first page and explicitly report omitted
+preceding context. Titles use the same 512-code-point display projection as search,
+with a separate truncation flag; dialogue is never shortened without pagination.
+
+Two reads are admitted without a queue, independently of search queries. The
+service's fixed 10-second aggregate deadline and caller/shutdown cancellation race
+even non-cooperative injected readers; native PostgreSQL transactions retain their
+stricter five-second deadline. Serialized pages reserve 4 KiB of the 48 KiB tool
+budget for freshness/tool metadata. Chunk transport is conservatively row-bounded
+under the 128-row/1-MiB limits, including focused context selection and lookahead.
+Read-specific missing-entry, invalid/stale-cursor and cache-integrity failures remain
+safe errors rather than successful empty transcripts or general database outages.
+
+## Conversation tools
+
+`search/tools.ts` defines parent-owned `conversation_search` / `conversation_read`
+Pi tools that call internal services, not HTTP endpoints. Both use closed schemas,
+compact complete JSON, safe error codes, cancellation and evidence-oriented prompt
+instructions. Historical dialogue is untrusted data, never current instructions.
+SQLite schema v9 stores one default-off workspace selection. In optional search mode,
+selected sessions advertise both tools even during initialization or dependency outages;
+calls return safe availability errors until recovery. Disabled mode preserves the stored
+selection but grants no executable history tools. Conversation state projects the immutable
+captured names. Both names are reserved against HTTP catalog collisions. Add/Edit Workspace
+has one default-off Conversation history checkbox with global cached-history, parent execution
+and provider-use disclosure. It locks while live; disabled mode permits removing an idle stored
+selection but not enabling a new one. Workspace Info shows stored/effective/availability state;
+desktop and mobile conversation disclosures use captured names, not current workspace metadata.
+This feature was deployed on this workstation following explicit approval on
+2026-10-03. Health/search readiness, both sandbox startup probes, schema-v9 migration
+and the served UI were verified; all 15 existing workspaces retained default-off
+selection. No production agent history call or paid inference was used for this check.
+
+Startup constructs search before runtime factories and scheduler catch-up, without IO.
+The lazy rerank callback obtains the existing runtime/global defaults after construction.
+Initialization still starts only after listener readiness. No worker receives history
+requests, session-file access, PostgreSQL credentials, or a general parent RPC.
+
+Search defaults to five conversations, all current registrations and optional
+provider reranking, with explicit opt-out and unchanged fallback metadata. Freshness
+is added. The tool measures its entire serialized Pi result, including text escaping
+and details; it removes whole lowest-ranked excerpts/groups until it fits 48 KiB.
+`reduction` reports `reduced`, `omittedConversations` and `omittedExcerpts` relative
+to the grouped service response. Details contain only a cached marker, not duplicate
+transcripts. Browser search retains its existing default and output budget.
+
+Read requests a conservative internal 22-KiB page budget, leaving room for JSON-in-text
+escaping and freshness within the complete 48-KiB result. The reader still owns exact
+pagination and focused-context reduction; the tool never clips serialized JSON,
+dialogue or continuation metadata. Internal non-tool reads retain the 44-KiB default.
+The page-budget option is not accepted in model-facing request parameters.
+
+```sh
+npx vitest run tests/unit/conversation-tools.test.ts tests/unit/search-query.test.ts tests/unit/search-service.test.ts tests/unit/search-read-repository.test.ts tests/unit/search-read-page.test.ts
+npx vitest run tests/integration/conversation-runtime.test.ts tests/unit/conversation-registry.test.ts tests/unit/job-runner.test.ts tests/unit/startup.test.ts tests/unit/sandbox-resources.test.ts tests/unit/http-tool-catalog.test.ts
+```
+
+`conversation-runtime.test.ts` uses actual pinned Pi sessions and faux providers with
+synthetic cache IO and sandbox process startup. Separate real Bubblewrap acceptance in
+`sandbox-conversation-runtime.test.ts` covers isolated and managed-egress sessions with
+synthetic cache IO/faux providers. It verifies selected parent search/read calls, exact
+pagination, absent unselected tools, protected history/credential stores and symlink
+escapes, sanitized database environment, distinct network namespaces and unchanged
+source canaries. No production history, database or paid inference is used. Run it on
+a sandbox-capable host (builds only local worker/helper artifacts):
+
+```sh
+npm run test:sandbox-real
+```
+
+Focused browser checks use the production UI/protocol with in-memory workspaces and either
+disabled search or an optional-mode dependency outage; they do not perform real search IO:
+
+```sh
+npx playwright test tests/browser/conversation-history.spec.ts
+CHATWCA_BROWSER_HISTORY_MODE=optional npx playwright test tests/browser/conversation-history.spec.ts
+```
+
+Run both modes: each deliberately skips the other mode's cases. Coverage includes defaults,
+provider/global-history disclosure, stored versus effective state, live locking and name-only
+updates, idle removal, reopen selections, and mobile captured-name disclosure. Real Bubblewrap
+history-tool acceptance, local release gates and the opt-in disposable PG17/pgvector
+integration suite passed. The full default-mode browser suite and optional-mode history
+cases passed. The resource-stress case remains separately opt-in and was not run.
+See `../checkpoint.md` for counts and the approved 2026-10-03 deployment record.
+Future deployment/restarts still require explicit approval.
+
 ## Serialized indexing worker
 
 `search/indexer.ts` supplies the one `SearchIndexer` for all maintenance writes.
@@ -507,7 +608,7 @@ The PostgreSQL integration suites are explicitly opt-in. Point
 already provisioned and schema-creation permission:
 
 ```sh
-npx vitest run tests/integration/search-schema.test.ts tests/integration/search-repository.test.ts tests/integration/search-document-indexer.test.ts tests/integration/search-indexer.test.ts
+npx vitest run tests/integration/search-schema.test.ts tests/integration/search-repository.test.ts tests/integration/search-read-repository.test.ts tests/integration/search-retrieval.test.ts tests/integration/search-document-indexer.test.ts tests/integration/search-indexer.test.ts tests/integration/search-server.test.ts
 ```
 
 Each run creates/drops its own random schema. Tests validate idempotence, schema
@@ -563,8 +664,11 @@ curl --fail http://10.35.0.34:8787/api/search/status
 Check `/api/config.search` is optional/ready, reload the browser and validate useful
 one/all-workspace search, exact excerpt navigation and actual applied/local-fallback
 rerank labels. Let the production initial pass finish; it reuses existing cached work.
-Do not run a second indexer alongside it. Current counts, protected secret/backup paths
-and deployment/usage-assessment state are recorded in `../checkpoint.md`.
+Do not run a second indexer alongside it. The Conversation history agent tools
+were separately approved and deployed on 2026-10-03; validation and deployment details
+are recorded in `../checkpoint.md`. That check reported **281 conversations / 3,237
+chunks across 15 workspaces**, all unchanged and zero errors. The historical rollout
+counts above are not a current health probe.
 
 Retired modules and obsolete tests are removed. No cleanup tickets,
 suppression recovery or membership barrier. Missing/incomplete stores still never

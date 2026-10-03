@@ -24,7 +24,7 @@ const idle: SearchIndexerStatus = { state: "idle", pending: false, workspaceId: 
 function workspace(id: string): WorkspaceSummary {
   return { id, name: `Synthetic ${id}`, path: `/synthetic/${id}`, sessionStorage: "workspace", sessionDirectory: `/synthetic/${id}/sessions`,
     securityProfile: "unrestricted", effectiveSecurityProfile: "unrestricted", mounts: [], networkPolicy: "isolated", effectiveNetworkPolicy: null,
-    networkPolicySetId: "default", effectiveNetworkPolicySetId: null, networkPolicyIssue: null, enabledHttpTools: [], effectiveHttpTools: [],
+    networkPolicySetId: "default", effectiveNetworkPolicySetId: null, networkPolicyIssue: null, enabledHttpTools: [], effectiveHttpTools: [], conversationToolsEnabled: false, effectiveConversationTools: [],
     createdAt: 1, updatedAt: 1, available: true, usable: true, policyIssue: null };
 }
 async function fixture(page: Page, provider: "openai" | "openai-codex" = "openai", timeout = 2_000) {
@@ -38,7 +38,7 @@ async function fixture(page: Page, provider: "openai" | "openai-codex" = "openai
     sessionFile: `${rows[i]!.sessionDirectory}/${candidate.sessionId}.jsonl`, title: candidate.title, cwd: rows[i]!.path,
     model: { id: "synthetic", provider: "browser-fixture", name: "Synthetic model", supportsImages: false }, status: "idle",
     createdAt: 1, lastActiveAt: 2, revision: 1, durable: true, contextUsage: null, queue: { steering: [], followUp: [] }, securityProfile: "unrestricted",
-    networkPolicy: null, networkPolicySetId: "default", effectiveNetworkPolicySetId: null, effectiveHttpTools: [],
+    networkPolicy: null, networkPolicySetId: "default", effectiveNetworkPolicySetId: null, effectiveHttpTools: [], effectiveConversationTools: [],
     messages: [{ entryId: candidate.entryId, role: "user", forkEligible: true, timestamp: 1, blocks: [{ type: "text", text: candidate.text }] }] }));
   const unavailable = (): never => { throw new Error("Unsupported synthetic fixture operation"); };
   const requireWorkspace = (id: string) => rows.find((row) => row.id === id) ?? unavailable();
@@ -46,7 +46,7 @@ async function fixture(page: Page, provider: "openai" | "openai-codex" = "openai
   const workspaces: ProtocolWorkspaceRepository = {
     list: () => rows, requireAvailable: requireWorkspace,
     requireUsable: (id) => { const row = requireWorkspace(id); return { workspaceId: id, cwd: row.path, sessionDirectory: row.sessionDirectory,
-      securityProfile: "unrestricted", networkPolicy: null, networkPolicySetId: "default", effectiveNetworkPolicySetId: null, networkPolicySet: null, effectiveHttpTools: [] }; },
+      securityProfile: "unrestricted", networkPolicy: null, networkPolicySetId: "default", effectiveNetworkPolicySetId: null, networkPolicySet: null, effectiveHttpTools: [], effectiveConversationTools: [] }; },
     create: unavailable, update: unavailable, delete: unavailable,
   };
   const opened = new Set<string>();
@@ -74,7 +74,7 @@ async function fixture(page: Page, provider: "openai" | "openai-codex" = "openai
           return { lexical: scoped, vector: request.vector ? scoped : [] };
         } },
         embeddings: { embedSearchQuery: async () => ({ space: REPOSITORY_SPACE, embedding: fakeSearchVector() }) }, ...(reranker ? { reranker } : {}) });
-      return { queries, indexer: { status: () => idle, requestRefresh: () => {}, close: async () => {} }, checkSchema: async () => {},
+      return { queries, reads: { read: async () => { throw new Error("Unexpected cached read"); } }, indexer: { status: () => idle, requestRefresh: () => {}, close: async () => {} }, checkSchema: async () => {},
         readCounts: async () => ({ documents: 2, chunks: 2 }), close: async () => { queries.close(); } };
     } });
   const server = createChatWcaServer(config, "synthetic-browser", { search, registry, history, workspaces });

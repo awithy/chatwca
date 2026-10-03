@@ -9,9 +9,9 @@ This document maps every criterion in [`bubblewrap-design.md`](bubblewrap-design
 | 1 | Requested and effective profiles persist/project. | `tests/unit/database.test.ts`, `workspace-repository.test.ts`, `workspace-policy.test.ts`; `tests/browser/workspace-sandbox.spec.ts`. |
 | 2 | Browser commands cannot exceed mode or approved roots. | `tests/unit/protocol.test.ts`, `server-protocol.test.ts`, `workspace-policy.test.ts`, `sandbox-config.test.ts`; browser mode tests. |
 | 3 | Required mode sandboxes every usable conversation. | `tests/unit/workspace-policy.test.ts`, `workspace-repository.test.ts`; required-mode browser test. |
-| 4 | Every enabled sandbox tool uses the per-conversation worker. | `tests/integration/sandbox-pi-contract.test.ts` checks exact seven app-owned execute functions; `sandbox-pi-runtime.test.ts` performs a real tool call through Bubblewrap. |
+| 4 | Every enabled sandbox coding tool uses the per-conversation worker. | `tests/integration/sandbox-pi-contract.test.ts` checks exact seven app-owned execute functions; `sandbox-pi-runtime.test.ts` performs a real tool call through Bubblewrap. |
 | 5 | No model-directed path/process runs in the parent. | `tests/unit/sandbox-tools.test.ts`, `sandbox-worker-fs.test.ts`, `conversation-registry.test.ts` (sandbox Markdown images); real escape matrix in `sandbox-attack-concurrency.test.ts`. Code review boundary: only typed `SandboxController` operations are captured by sandbox tools. |
-| 6 | No arbitrary extension or unapproved tool in strict sessions. | `tests/integration/sandbox-pi-contract.test.ts`, `tests/unit/sandbox-resources.test.ts`, `tests/integration/pi-runtime.test.ts`. |
+| 6 | No arbitrary extension or unapproved tool in strict sessions. | `tests/integration/sandbox-pi-contract.test.ts`, `tests/unit/sandbox-resources.test.ts`, `tests/integration/pi-runtime.test.ts`; selected/unselected history pair in `conversation-runtime.test.ts` and real `sandbox-conversation-runtime.test.ts`. |
 | 7 | Tool processes receive no parent credentials/Pi variables. | Startup and per-worker probe validation in `sandbox-probe.test.ts`; parent sentinel and `/proc/*/environ` attack in `sandbox-attack-concurrency.test.ts`. |
 | 8 | Synthetic root mounts only workspace, `/usr`, approved process-wide read-only paths, and validated workspace-specific `/mounts/<name>` directories with exact access. | `tests/unit/sandbox-bwrap.test.ts`; real startup probe and read-only mount write rejection in the attack suite; deployment profile spike. |
 | 9 | ChatWCA data, Pi state, and session stores remain absent. | Real SQLite/WAL/SHM, Pi credential/global-session, workspace-session, unrelated directory, and canary attacks in `sandbox-attack-concurrency.test.ts`; startup hidden-path probe. |
@@ -39,13 +39,14 @@ This document maps every criterion in [`bubblewrap-design.md`](bubblewrap-design
 | Process burst/large allocation cleanup | Guarded test in `sandbox-attack-concurrency.test.ts`, enabled only by `CHATWCA_SANDBOX_RESOURCE_STRESS=1` in the isolated `sandbox-linux` CI VM. It uses a finite 64-descendant burst and 128 MiB allocation; it verifies cleanup and deliberately makes no quota claim. |
 | Multiple workers/concurrent unrestricted parent work | Three real workers plus concurrent parent file operation in attack suite. |
 | Remote faux provider through parent | `tests/integration/sandbox-pi-runtime.test.ts`. |
+| Selected parent history tools without worker history/credential access | Real isolated and managed-egress `sandbox-conversation-runtime.test.ts`: selected/unselected tool sets, parent search/read, exact continuation, protected stores/symlink escapes, sanitized database environment, distinct network namespaces and unchanged source canary. No production cache or paid inference. |
 
 ## Definition of Done cross-check
 
 - Schema/profile policy: criteria 1–3.
 - Real pre-listen probe: criteria 7–9 and 11; startup ordering is asserted in `tests/unit/startup.test.ts`.
 - Worker-only tools and workspace images: criteria 4–5.
-- Exactly seven strict tools/resources: criterion 6.
+- Exactly seven worker-backed coding tools plus explicitly granted app-owned parent tools; strict resources: criterion 6.
 - Namespace contents, `.chatwca`, network, and read-only/read-write mounts: criteria 7–11.
 - Cleanup for abort, timeout, failure, close, eviction, fork rollback, and shutdown: criteria 12–14.
 - No fallback and concurrent isolation: criteria 12 and 15.

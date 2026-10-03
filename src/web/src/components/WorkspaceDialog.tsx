@@ -2,6 +2,7 @@ import * as React from "react";
 import { useId, type RefObject } from "react";
 
 import type {
+  PublicConfig,
   PublicHttpTool,
   PublicManagedEgressConfig,
   PublicSandboxConfig,
@@ -19,6 +20,7 @@ export interface WorkspaceDialogProps {
   readonly publicSandboxConfig: PublicSandboxConfig;
   readonly publicManagedEgressConfig: PublicManagedEgressConfig;
   readonly publicHttpTools: readonly PublicHttpTool[];
+  readonly publicSearchConfig?: PublicConfig["search"];
   readonly securityControlsLocked: boolean;
   readonly submitting: boolean;
   readonly error: string | null;
@@ -33,6 +35,7 @@ export function WorkspaceDialog({
   publicSandboxConfig,
   publicManagedEgressConfig,
   publicHttpTools,
+  publicSearchConfig,
   securityControlsLocked,
   submitting,
   error,
@@ -56,6 +59,7 @@ export function WorkspaceDialog({
         publicSandboxConfig={publicSandboxConfig}
         publicManagedEgressConfig={publicManagedEgressConfig}
         publicHttpTools={publicHttpTools}
+        publicSearchConfig={publicSearchConfig}
         securityControlsLocked={securityControlsLocked}
         submitting={submitting}
         error={error}

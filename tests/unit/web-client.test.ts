@@ -78,6 +78,8 @@ const workspace = {
   networkPolicyIssue: null,
   enabledHttpTools: [],
   effectiveHttpTools: [],
+  conversationToolsEnabled: false,
+  effectiveConversationTools: [],
   createdAt: 1,
   updatedAt: 1,
   available: true,
@@ -106,6 +108,7 @@ function conversation(revision = 0): ConversationState {
     networkPolicySetId: "default",
     effectiveNetworkPolicySetId: null,
     effectiveHttpTools: [],
+    effectiveConversationTools: [],
   };
 }
 

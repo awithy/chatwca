@@ -20,7 +20,8 @@ import { JobRepository } from "../../src/server/job-repository.js";
 import { JobRunner } from "../../src/server/job-runner.js";
 import { JobScheduler } from "../../src/server/job-scheduler.js";
 import { WorkspaceRepository } from "../../src/server/workspace-repository.js";
-import { SearchService } from "../../src/server/search/service.js";
+import { SearchService, type SearchServicePort } from "../../src/server/search/service.js";
+import { createConversationSearchTool } from "../../src/server/search/tools.js";
 import type {
   SandboxWorkerArtifact,
   ValidatedSandboxHost,
@@ -108,7 +109,8 @@ describe("production startup wiring", () => {
     const readDefaults = vi.fn(() => defaults); Object.defineProperty(runtimeFactory, "globalModelDefaults", { get: readDefaults });
     let getContext: import("../../src/server/search/service.js").SearchServiceOptions["getRerankContext"];
     const resources = { indexer: { requestRefresh: vi.fn(), status: vi.fn(() => { throw new Error("status is not needed"); }), close: vi.fn(async () => {}) },
-      queries: { search: vi.fn(async () => { throw new Error("uninitialized"); }), close: vi.fn() }, checkSchema, readCounts: vi.fn(async () => ({ documents: 0, chunks: 0 })), close: vi.fn(async () => {}) };
+      queries: { search: vi.fn(async () => { throw new Error("uninitialized"); }), close: vi.fn() },
+      reads: { read: vi.fn(async () => { throw new Error("uninitialized"); }) }, checkSchema, readCounts: vi.fn(async () => ({ documents: 0, chunks: 0 })), close: vi.fn(async () => {}) };
     const server = await startChatWcaServer({ loadConfiguration: () => loaded, createRuntimeFactory: async () => runtimeFactory,
       createSearchService: (settings) => { getContext = settings.getRerankContext; expect(readDefaults).not.toHaveBeenCalled(); service = new SearchService({ ...settings, createResources: () => resources }); return service; },
       listen: async (created) => { expect(checkSchema).not.toHaveBeenCalled(); expect(readDefaults).not.toHaveBeenCalled(); await bindEphemeral(created); } });
@@ -118,6 +120,43 @@ describe("production startup wiring", () => {
     const address = server.httpServer.address() as AddressInfo;
     expect(await (await fetch(`http://127.0.0.1:${address.port}/api/health`)).json()).toMatchObject({ ready: true });
     await server.shutdown(); expect(service).toBeDefined(); expect(resources.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("composes search before catch-up runtimes without starting dependency IO or gating readiness", async () => {
+    const root = temporaryDirectory(); const workspacePath = path.join(root, "workspace"); mkdirSync(workspacePath);
+    const base = config(root); const loaded = { ...base, search: { ...base.search, mode: "optional" as const, databaseUrl: "postgresql://synthetic:private@127.0.0.1:1/cache" } };
+    const createResources = vi.fn(() => { throw new Error("Synthetic dependency outage"); });
+    let search: SearchServicePort | undefined;
+    const runtimeFactory = fakeRuntimeFactory();
+    vi.mocked(runtimeFactory.createPersistent).mockImplementation(async (policy) => {
+      expect(policy.effectiveConversationTools).toEqual(["conversation_search", "conversation_read"]);
+      expect(createResources).not.toHaveBeenCalled();
+      const tool = createConversationSearchTool(search!);
+      await expect(tool.execute("catch-up", { query: "earlier decision" }, undefined, undefined, {} as never)).rejects.toThrow("search_initializing");
+      throw new Error("Synthetic runtime stops after verifying selected tool");
+    });
+    const server = await startChatWcaServer({
+      loadConfiguration: () => loaded,
+      openDatabase: (dataDir) => {
+        const database = openDatabase(dataDir);
+        database.connection.prepare(`INSERT INTO workspaces (id, name, path, conversation_tools_enabled, created_at, updated_at)
+          VALUES ('workspace', 'Workspace', ?, 1, 0, 0)`).run(realpathSync(workspacePath));
+        database.connection.exec(`INSERT INTO jobs (id, name, workspace_id, prompt, schedule_kind, interval_minutes,
+          anchor_at, enabled, next_run_at, created_at, updated_at)
+          VALUES ('job', 'Job', 'workspace', 'run', 'interval', 60, 0, 1, 0, 0, 0)`);
+        return database;
+      },
+      createSearchService: (settings) => { search = new SearchService({ ...settings, createResources }); return search; },
+      createRuntimeFactory: async (_config, service) => { expect(service).toBe(search); expect(service).toBeDefined(); return runtimeFactory; },
+      listen: async (created) => {
+        await vi.waitFor(() => expect(runtimeFactory.createPersistent).toHaveBeenCalledOnce());
+        expect(createResources).not.toHaveBeenCalled(); await bindEphemeral(created);
+      },
+    });
+    runningServers.push(server);
+    await vi.waitFor(() => expect(search?.capability().state).toBe("unavailable"));
+    const address = server.httpServer.address() as AddressInfo;
+    expect(await (await fetch(`http://127.0.0.1:${address.port}/api/health`)).json()).toMatchObject({ ready: true });
   });
 
   it("bind failure closes optional search before starting any probes", async () => {

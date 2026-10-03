@@ -13,6 +13,7 @@ import type {
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AppError, ERROR_CODES } from "../../src/shared/errors.js";
+import { CONVERSATION_TOOL_NAMES, type ConversationToolName } from "../../src/shared/protocol.js";
 import type { CompiledNetworkPolicySet } from "../../src/server/network/config.js";
 import { compileDestinationPolicy } from "../../src/server/network/policy.js";
 import {
@@ -71,6 +72,7 @@ interface FakeSessionOptions {
   readonly networkPolicy?: "isolated" | "managed-egress" | null;
   readonly networkPolicySetId?: string | null;
   readonly networkPolicySet?: CompiledNetworkPolicySet | null;
+  readonly effectiveConversationTools?: readonly ConversationToolName[];
 }
 
 function fakeSession(
@@ -120,6 +122,7 @@ class FakeRuntime implements PiConversationRuntimePort {
   readonly networkPolicy: "isolated" | "managed-egress" | null;
   networkPolicySetId: string | null;
   networkPolicySet: CompiledNetworkPolicySet | null;
+  effectiveConversationTools: readonly ConversationToolName[];
   readonly supportsImages = false;
   disposed = false;
   teardownComplete = false;
@@ -161,6 +164,7 @@ class FakeRuntime implements PiConversationRuntimePort {
     this.networkPolicySet = this.networkPolicy === "managed-egress"
       ? sessionOptions.networkPolicySet ?? defaultPolicySet
       : null;
+    this.effectiveConversationTools = Object.freeze([...(sessionOptions.effectiveConversationTools ?? [])]);
     this.session = fakeSession(identity, sessionOptions);
   }
 
@@ -264,6 +268,47 @@ function managedOwnership(
 }
 
 describe("ConversationRegistry", () => {
+  it.each(["create", "open", "job"] as const)("captures immutable history names before admitting %s", async (operation) => {
+    const root = await temporaryRoot(); const cwd = path.join(root, "workspace"); const sourceFile = path.join(root, "source.jsonl");
+    await mkdir(cwd); await writeFile(sourceFile, "source");
+    const names: ConversationToolName[] = [...CONVERSATION_TOOL_NAMES];
+    const policy = { ...ownership(cwd), effectiveConversationTools: names };
+    const runtime = new FakeRuntime(identity("source", sourceFile, cwd), { effectiveConversationTools: names });
+    const factory = new FakeFactory(); factory.createPersistent.mockResolvedValue(runtime); factory.openPersistent.mockResolvedValue(runtime);
+    const registry = new ConversationRegistry({ runtimeFactory: factory });
+    try {
+      const lease = operation === "job" ? await registry.reserveRuntimeCapacity() : undefined;
+      const creation = operation === "create" ? registry.create(policy) : operation === "open" ? registry.open(policy, sourceFile)
+        : registry.createJobConversation(policy, { kind: "scheduled-job", jobId: "job", runId: "run" }, lease!);
+      names.length = 0;
+      const record = await creation;
+      expect(record.effectiveConversationTools).toEqual(CONVERSATION_TOOL_NAMES);
+      expect(Object.isFrozen(record.effectiveConversationTools)).toBe(true);
+      const forwarded = operation === "open" ? factory.openPersistent.mock.calls[0]![0] : factory.createPersistent.mock.calls[0]![0];
+      expect(forwarded.effectiveConversationTools).toEqual(CONVERSATION_TOOL_NAMES);
+      expect(Object.isFrozen(forwarded.effectiveConversationTools)).toBe(true);
+      expect((await registry.getState(record.id)).effectiveConversationTools).toEqual(CONVERSATION_TOOL_NAMES);
+    } finally { await registry.dispose(); }
+  });
+
+  it("rejects a runtime with different history authority and locks replacement authority drift", async () => {
+    const root = await temporaryRoot(); const cwd = path.join(root, "workspace"); await mkdir(cwd);
+    const sourceFile = path.join(root, "source.jsonl"); await writeFile(sourceFile, "source");
+    const policy = { ...ownership(cwd), effectiveConversationTools: CONVERSATION_TOOL_NAMES };
+    const factory = new FakeFactory(); const registry = new ConversationRegistry({ runtimeFactory: factory });
+    try {
+      const missing = new FakeRuntime(identity("missing", sourceFile, cwd)); factory.createPersistent.mockResolvedValue(missing);
+      await expect(registry.create(policy)).rejects.toMatchObject({ code: ERROR_CODES.SESSION_UNAVAILABLE });
+      expect(missing.disposed).toBe(true);
+      const selected = new FakeRuntime(identity("selected", sourceFile, cwd), { effectiveConversationTools: CONVERSATION_TOOL_NAMES });
+      factory.createPersistent.mockResolvedValue(selected); const record = await registry.create(policy);
+      selected.effectiveConversationTools = [];
+      selected.replace(identity("replacement", path.join(root, "replacement.jsonl"), cwd));
+      expect(record.status).toBe("error"); expect(record.runtimeFailureTerminal).toBe(true);
+      expect(record.effectiveConversationTools).toEqual(CONVERSATION_TOOL_NAMES);
+    } finally { await registry.dispose(); }
+  });
+
   describe.each(["isolated", "managed-egress"] as const)("%s workspace mounts", (networkPolicy) => {
     it.each(["create", "open", "job", "fork"] as const)(
       "forwards an immutable mount snapshot when admitting %s runtimes",

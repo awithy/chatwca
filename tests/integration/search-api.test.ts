@@ -17,6 +17,7 @@ async function fixture(enabled = true) {
       errorCode: null, counts: { documents: 1, chunks: 2 }, indexer: null })),
     search: vi.fn<SearchServicePort["search"]>(async (request) => ({ cached: true, mode: "lexical", warnings: [], rerank: { requested: request.rerank !== false, applied: false, reason: request.rerank === false ? "not_requested" : "unavailable" }, results: [{ workspaceId: "one", workspaceName: "Synthetic workspace",
       sessionId: "synthetic-session", title: "Synthetic title", modifiedAt: 123, excerpts: [{ entryId: "entry-one", role: "user", timestamp: 123, text: "<script>plain source</script>", truncated: false, indexedAt: 124 }] }] })),
+    read: vi.fn<SearchServicePort["read"]>(async () => { throw new Error("Unexpected cached read HTTP call"); }),
     requestRefresh: vi.fn<SearchServicePort["requestRefresh"]>(), close: vi.fn(async () => {}),
   };
   const services = enabled ? { search, registry: { subscribe: () => () => {} }, history: {}, workspaces: {} } as unknown as ChatWcaProtocolServices : undefined;

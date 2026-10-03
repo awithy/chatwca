@@ -415,7 +415,7 @@ export interface ChatWcaStartupOptions {
   readonly createWorkspaceRepository?: (
     connection: ChatWcaDatabase["connection"],
     config: Readonly<ServerConfig>,
-  ) => ProtocolWorkspaceRepository;
+  ) => ProtocolWorkspaceRepository & Pick<WorkspaceRepository, "listRegistrations">;
   readonly loadSandboxWorkerArtifact?: () => Promise<Readonly<SandboxWorkerArtifact>>;
   readonly validateSandboxHost?: (
     config: Readonly<ServerConfig["sandbox"]>,
@@ -439,6 +439,7 @@ export interface ChatWcaStartupOptions {
   }) => Promise<Readonly<SandboxFunctionalProbeResult>>;
   readonly createRuntimeFactory?: (
     config: Readonly<ServerConfig>,
+    search?: SearchServicePort,
   ) => Promise<PiRuntimeFactoryPort>;
   /** Lifecycle seams used by startup ordering/failure tests. */
   readonly createJobRepository?: (
@@ -588,6 +589,7 @@ export async function startChatWcaServer(
           networkPolicySets: loadedConfig.managedNetwork.policySets,
         },
         httpTools: loadedConfig.httpTools,
+        searchMode: loadedConfig.search.mode,
       }))
     )(database.connection, config);
     const hookPaths = new JobHookPathAdmission({
@@ -620,9 +622,24 @@ export async function startChatWcaServer(
       conversationAvailable: (conversationId) => registry?.get(conversationId) !== undefined,
     })))(database.connection, config, workspaces, hookPaths);
 
-    const runtimeFactory = await (
+    // Construct the IO-free service before any runtime (including scheduler
+    // catch-up). Initialization remains deferred until listener readiness. The
+    // lazy model callback avoids a service/factory construction dependency cycle.
+    let runtimeFactory: PiRuntimeFactoryPort | undefined;
+    if (config.search.mode === "optional") {
+      search = (options.createSearchService ?? ((settings) => new SearchService(settings)))({
+        config: config.search, registrations: { list: () => workspaces.listRegistrations() }, piAgentDirectory,
+        getRerankContext: () => {
+          if (runtimeFactory === undefined) throw new Error("Pi runtime is not constructed");
+          const globalDefaults = runtimeFactory.globalModelDefaults;
+          return { runtime: runtimeFactory.modelRuntime, ...(globalDefaults === undefined ? {} : { globalDefaults }) };
+        },
+      });
+    }
+    runtimeFactory = await (
       options.createRuntimeFactory ??
-      ((loadedConfig) => PiRuntimeFactory.create({
+      ((loadedConfig, searchService) => PiRuntimeFactory.create({
+        ...(searchService === undefined ? {} : { search: searchService }),
         ...(loadedConfig.piCodingAgentDir === undefined
           ? {}
           : { agentDir: loadedConfig.piCodingAgentDir }),
@@ -651,7 +668,7 @@ export async function startChatWcaServer(
               },
             }),
       }))
-    )(config);
+    )(config, search);
 
     const history = new SessionHistory({
       ...(options.listSessions === undefined
@@ -721,14 +738,6 @@ export async function startChatWcaServer(
     // readiness. Dispatched catch-up work deliberately continues in parallel.
     await scheduler.start();
 
-    if (config.search.mode === "optional") {
-      search = (options.createSearchService ?? ((settings) => new SearchService(settings)))({ config: config.search, registrations: workspaces, piAgentDirectory,
-        getRerankContext: () => {
-          const globalDefaults = runtimeFactory.globalModelDefaults;
-          return { runtime: runtimeFactory.modelRuntime, ...(globalDefaults === undefined ? {} : { globalDefaults }) };
-        },
-      });
-    }
     server = createChatWcaServer(
       config,
       options.serverVersion ?? readServerVersion(),

@@ -9,6 +9,7 @@ import type {
   WorkspaceSummary,
 } from "../../src/shared/protocol.js";
 import { WorkspaceForm } from "../../src/web/src/components/WorkspaceForm.js";
+import { conversationHistoryAvailability } from "../../src/web/src/components/conversation-history.js";
 import {
   WorkspaceSidebar,
   networkPolicyIssueLabel,
@@ -67,6 +68,8 @@ const workspace: WorkspaceSummary = {
   networkPolicyIssue: null,
   enabledHttpTools: [],
   effectiveHttpTools: [],
+  conversationToolsEnabled: false,
+  effectiveConversationTools: [],
   createdAt: 1,
   updatedAt: 2,
   available: true,
@@ -110,6 +113,7 @@ function renderForm(
     publicSandboxConfig,
     publicManagedEgressConfig: managedConfig,
     publicHttpTools: httpTools,
+    publicSearchConfig: { mode: "optional", state: "ready", available: true, rerankAvailable: true },
     securityControlsLocked: false,
     submitting: false,
     error: null,
@@ -405,6 +409,59 @@ describe("workspace form", () => {
     expect(html).toContain("Uncheck it to remove the selection");
     expect(html).toContain("Close this workspace’s live conversations before changing HTTP tool access");
     expect(html).toMatch(/<fieldset[^>]*class="workspace-http-tools-control"[^>]*disabled=""/);
+  });
+
+  it("defaults history off and discloses global cached dialogue, parent execution and provider use", () => {
+    const html = renderForm(optionalConfig);
+    expect(html).toMatch(/type="checkbox" aria-label="Enable conversation history"\s*\/>/);
+    expect(html).toContain("cached user/assistant dialogue from all registered workspaces");
+    expect(html).toContain("outside workspace sandboxing");
+    expect(html).toContain("model provider; search may also use optional provider reranking");
+    expect(html).toContain("conversation_search");
+    expect(html).toContain("conversation_read");
+  });
+
+  it("locks history authority while live without dropping the stored/effective selection", () => {
+    const html = renderForm(optionalConfig, {
+      mode: "edit", initialValues: { ...workspace, conversationToolsEnabled: true,
+        effectiveConversationTools: ["conversation_search", "conversation_read"] },
+      securityControlsLocked: true,
+    });
+    expect(html).toMatch(/class="workspace-conversation-tools-control"[^>]*disabled=""/);
+    expect(html).toContain('aria-label="Enable conversation history" checked=""');
+    expect(html).toContain("before changing conversation history access");
+    expect(html).toContain("Stored conversation history</dt><dd>Enabled");
+    expect(html).toContain("Effective conversation tools</dt><dd>conversation_search, conversation_read");
+  });
+
+  it("preserves an unavailable selection and permits removal, but not a new disabled-mode grant", () => {
+    const publicSearchConfig = { mode: "disabled", state: "disabled", available: false, rerankAvailable: false } as const;
+    const html = renderForm(optionalConfig, { mode: "edit", publicSearchConfig,
+      initialValues: { ...workspace, conversationToolsEnabled: true } });
+    expect(html).toContain('aria-label="Enable conversation history" checked=""');
+    expect(html).not.toMatch(/aria-label="Enable conversation history"[^>]*disabled/);
+    expect(html).toContain("stored selection is retained");
+    expect(html).toContain("Uncheck to remove the stored selection");
+    expect(html).toContain("Effective conversation tools</dt><dd>None");
+    expect(renderForm(optionalConfig, { publicSearchConfig })).toMatch(/aria-label="Enable conversation history" disabled=""/);
+    expect(renderForm(optionalConfig, { publicSearchConfig: undefined })).toContain("search configuration unavailable");
+  });
+
+  it.each(["initializing", "unavailable", "closed"] as const)("keeps history selectable in optional %s state", (state) => {
+    const publicSearchConfig = { mode: "optional", state, available: false, rerankAvailable: false } as const;
+    const html = renderForm(optionalConfig, { publicSearchConfig });
+    expect(html).not.toMatch(/aria-label="Enable conversation history"[^>]*disabled/);
+    expect(conversationHistoryAvailability(publicSearchConfig)).toContain("selected tools remain granted but calls may fail");
+  });
+
+  it("sends true/false history changes and omits unchanged authority for live name-only edits", () => {
+    const selected = { ...workspace, conversationToolsEnabled: true };
+    expect(workspaceUpdatePlan(workspace, { ...workspace, conversationToolsEnabled: true }).changes)
+      .toStrictEqual({ name: workspace.name, conversationToolsEnabled: true });
+    expect(workspaceUpdatePlan(selected, { ...selected, conversationToolsEnabled: false }).changes)
+      .toStrictEqual({ name: workspace.name, conversationToolsEnabled: false });
+    expect(workspaceUpdatePlan(selected, { ...selected, name: "Renamed" }).changes)
+      .toStrictEqual({ name: "Renamed" });
   });
 
   it("implements disabled, optional, and required profile semantics", () => {

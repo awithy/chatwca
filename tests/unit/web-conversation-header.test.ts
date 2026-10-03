@@ -123,6 +123,26 @@ describe("conversation header context usage", () => {
     expect(managed).toContain(">Sandboxed · Managed egress</span>");
   });
 
+  it("discloses captured history tools rather than current workspace selections", () => {
+    const props = {
+      summary, workspace, loading: false, connected: true, actionPending: null,
+      onRename: async () => undefined, onCreate: () => undefined,
+      onClose: () => undefined, onDelete: () => undefined,
+    };
+    const selected = renderToStaticMarkup(createElement(ConversationHeader, {
+      ...props, conversation: { ...conversation(null), effectiveConversationTools: ["conversation_search", "conversation_read"] },
+    }));
+    expect(selected).toContain("Captured conversation history tools: conversation_search, conversation_read");
+    expect(selected).toContain("all registered workspaces");
+    expect(selected).toContain("outside workspace sandboxing");
+    expect(selected).toContain("model provider");
+    const unselected = renderToStaticMarkup(createElement(ConversationHeader, {
+      ...props, workspace: { ...workspace, conversationToolsEnabled: true, effectiveConversationTools: ["conversation_search", "conversation_read"] },
+      conversation: { ...conversation(null), effectiveConversationTools: [] },
+    }));
+    expect(unselected).not.toContain("conversation-tools-badge");
+  });
+
   it("shows Pi-style percentage and compact context-window metrics", () => {
     const html = renderHeader({
       tokens: 14_144,

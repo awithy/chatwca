@@ -47,15 +47,65 @@ These notes record the concrete SDK behavior on which ChatWCA relies. They are a
   reasons are wired and synthetically tested through the actual pinned runtime facade.
   The browser defaults on with an App-memory user toggle and safe applied/local-fallback
   labels. Synthetic browser-to-real-API/faux-Pi checks cover ordering, opt-out, message
-  focus, fallback and cancellation reaching provider IO; workstation search
-  remains disabled.
+  focus, fallback and cancellation reaching provider IO. Existing Global Search and
+  reranking are deployed; the new agent history tools below are not.
+
+## Conversation history tools
+
+- `src/server/search/tools.ts` uses the pinned `defineTool()` contract, parallel
+  execution, TypeBox closed object schemas and prompt snippets/guidelines. Tools
+  call the process-owned service directly and do not retain SDK filesystem tools,
+  use HTTP loopback, or create sessions/model runtimes.
+- The pinned `validateToolArguments()` facade accepts the schemas, rejects unknown
+  fields and enforces read focus/cursor mutual exclusion. Its string-length check
+  counts UTF-16 units: the query schema permits up to 4,096 units, while internal
+  request validation enforces the actual 2,048-code-point / 8-KiB limit. This avoids
+  rejecting a valid maximum-length astral-Unicode query before service validation.
+- Outputs are compact complete JSON in one text block; details contain only
+  `{ cached: true }`. The complete serialized Pi result is capped at 48 KiB,
+  including text escaping and details. Read uses a conservative 22-KiB internal
+  page budget so reader-owned cursors remain exact. Search removes whole trailing
+  excerpts/groups and reports counts rather than invoking raw truncation helpers
+  or writing transcript spill files.
+- Safe service codes become thrown tool errors; unexpected dependency messages,
+  stacks and causes are not passed through. Cancellation is checked before/after
+  service IO. Synthetic tool tests exercise schemas through the actual pinned Pi
+  validation facade, the existing query path and exact cached-page continuation.
+- `PiRuntimeFactory` injects the process-owned service and constructs the selected
+  pair through `parentTools` in both profiles. Strict sessions explicitly allow the
+  pair beside worker-backed coding tools and disclose cached cross-workspace history,
+  parent execution, provider use, and untrusted-evidence handling in their prompt.
+- `effectiveConversationTools` is copied before asynchronous factory preflight,
+  retained by the SDK reconstruction closure, frozen in registry/job snapshots,
+  and projected in conversation state. Open/fork/rewind/replacement checks reject
+  authority drift. Job occurrences resolve and capture the current workspace policy.
+- Startup constructs the IO-free search service before the runtime factory and
+  scheduler catch-up, using a lazy model-context callback to avoid a cycle. Search
+  still starts only after listener readiness; initializing/dependency failures are
+  call-time errors, never a tool-selection or chat-readiness toggle.
+- `tests/integration/conversation-runtime.test.ts` exercises actual pinned Pi tool
+  sets and faux-provider calls in unrestricted, isolated and managed-egress profiles,
+  with synthetic sandbox process startup/cache IO. It covers absent selection,
+  outages/recovery without reopen, immutable preflight/SDK reconstruction, source-
+  preserving forks, protocol rewind, and current selections on reopen.
+- `tests/integration/sandbox-conversation-runtime.test.ts` adds real Bubblewrap
+  acceptance for isolated and managed-egress sessions with faux providers and synthetic
+  cache IO. Selected tools execute in the parent with exact cursor continuation;
+  unselected tools are absent. A real workspace process still cannot access protected
+  history/credential stores, symlink escapes, parent database environment or the parent's
+  network namespace. The source canary remains unchanged. These tests are included in
+  `npm run test:sandbox-real`; no production history, database or paid inference is used.
+- Browser controls and captured-name disclosures are implemented and tested in disabled
+  and optional-outage modes. Local release gates, disposable PG17/pgvector integration
+  and real Bubblewrap acceptance passed. Explicitly approved workstation deployment
+  completed on 2026-10-03; selections remain default-off. See `../checkpoint.md`.
 
 ## Strict sandbox resources and tools (Phase 6)
 
 The installed package and runtime exports were re-verified at `0.84.3` before implementing the strict adapter:
 
 - `createReadToolDefinition`, `createWriteToolDefinition`, `createEditToolDefinition`, `createBashToolDefinition`, `createLsToolDefinition`, `createGrepToolDefinition`, and `createFindToolDefinition` are exported. ChatWCA uses them only to obtain pinned names, labels, descriptions, TypeBox schemas, prompt snippets/guidelines, and edit argument preparation; none of their `execute` functions or TUI renderers are retained.
-- `createAgentSessionFromServices()` accepts both `customTools` and a `tools` allowlist. In 0.84.3 a custom definition replaces the same-name built-in in the final registry, while the allowlist filters built-in, extension, and SDK tools. Sandboxed sessions pass the same explicit seven names in both places and contract-test `session.agent.state.tools`.
+- `createAgentSessionFromServices()` accepts both `customTools` and a `tools` allowlist. In 0.84.3 a custom definition replaces the same-name built-in in the final registry, while the allowlist filters built-in, extension, and SDK tools. Sandboxed sessions pass the same seven worker-backed coding names plus explicitly selected app-owned parent tool names in both places and contract-test `session.agent.state.tools`.
 - `ResourceLoader` is a small public interface, and `createExtensionRuntime()` is exported. The strict loader follows the SDK's `examples/sdk/12-full-control.ts` pattern rather than wrapping `DefaultResourceLoader`; therefore package, extension, skill, prompt, theme, system/append-prompt, and ancestor-context discovery never starts.
 - A custom system prompt is still followed by Pi's `Current working directory: ...` line. Strict `AgentSessionServices.cwd` is consequently `/workspace`, while the parent-owned `SessionManager` and `AgentSessionRuntime` retain the canonical host workspace for persistence and ownership checks.
 - `SettingsManager.inMemory()` performs no settings file I/O. ChatWCA snapshots only safe administrator global model/thinking/retry/compaction/transport fields and omits project, package, resource, tool, shell, proxy, and session-path fields.
@@ -114,10 +164,12 @@ There is no exported session-deletion API. Pi's own TUI tries the external `tras
 
 ### Conversation search implementation boundary
 
-The [search foundations](search-operations.md) now include configuration/schema tooling
-and read-only source/extraction/chunking adapters, but no service workers or search model
-runtime/credential access. They do not change these SDK history paths. Canonical
-workspace/header-CWD checks are shared through `session-scope.ts`.
+The [search implementation](search-operations.md) includes read-only scoped source
+adapters, one serialized saved-branch indexer, cached query/read services and optional
+reranking through the existing model runtime. Indexing and cached reading never create
+agent sessions; no raw credentials are copied into search or workers. These additions
+do not change the SDK history paths. Canonical workspace/header-CWD checks are shared
+through `session-scope.ts`.
 
 `tests/integration/search-session-source.test.ts` validates the exact default/local
 store convention, saved-branch reopen parity, compaction retention, multiple roots,
@@ -127,8 +179,9 @@ assistant response, just like a new session. Search never uses writable
 `SessionManager.open()`: the SDK's last persisted tree entry determines the saved leaf.
 Its internal default-directory helper creates missing stores and is not publicly
 exported, so search derives the pinned convention without touching the filesystem.
-Fresh scoped SDK listings remain the authority for open/delete. Background indexing
-and the new opt-in JSONL projection are not wired to application startup yet.
+Fresh scoped SDK listings remain the authority for open/delete. Optional-mode background
+indexing starts asynchronously after listener readiness. Agent history tools use only
+cached PostgreSQL text; they never read live JSONL or use writable SDK session APIs.
 
 ## Persistence and durability
 

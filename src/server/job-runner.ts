@@ -122,6 +122,7 @@ function freezePolicy(policy: RuntimeWorkspacePolicy): RuntimeWorkspacePolicy {
       ? {}
       : { mounts: Object.freeze(policy.mounts.map((mount) => Object.freeze({ ...mount }))) }),
     effectiveHttpTools: Object.freeze([...(policy.effectiveHttpTools ?? [])]),
+    effectiveConversationTools: Object.freeze([...(policy.effectiveConversationTools ?? [])]),
   });
 }
 

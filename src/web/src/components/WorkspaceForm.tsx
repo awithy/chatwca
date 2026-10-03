@@ -7,6 +7,8 @@ import {
   workspaceMountGuestPath,
 } from "../../../shared/protocol.js";
 import type {
+  PublicConfig,
+  ConversationToolName,
   PublicHttpTool,
   PublicManagedEgressConfig,
   PublicNetworkPolicySet,
@@ -18,6 +20,8 @@ import type {
   WorkspaceSessionStorage,
 } from "../../../shared/protocol.js";
 
+import { CONVERSATION_HISTORY_DISCLOSURE, conversationHistoryAvailability } from "./conversation-history.js";
+
 export interface WorkspaceFormValues {
   readonly name: string;
   readonly path: string;
@@ -27,6 +31,7 @@ export interface WorkspaceFormValues {
   readonly networkPolicy: SandboxNetworkPolicy;
   readonly networkPolicySetId: string;
   readonly enabledHttpTools: readonly string[];
+  readonly conversationToolsEnabled: boolean;
 }
 
 export interface WorkspaceFormInitialValues extends WorkspaceFormValues {
@@ -35,6 +40,7 @@ export interface WorkspaceFormInitialValues extends WorkspaceFormValues {
   readonly effectiveNetworkPolicySetId: string | null;
   readonly networkPolicyIssue: WorkspaceNetworkPolicyIssue;
   readonly effectiveHttpTools: readonly string[];
+  readonly effectiveConversationTools: readonly ConversationToolName[];
 }
 
 export interface WorkspaceFormProps {
@@ -44,6 +50,7 @@ export interface WorkspaceFormProps {
   readonly publicSandboxConfig: PublicSandboxConfig;
   readonly publicManagedEgressConfig: PublicManagedEgressConfig;
   readonly publicHttpTools: readonly PublicHttpTool[];
+  readonly publicSearchConfig?: PublicConfig["search"];
   /** A live runtime makes path/profile/network/set/tool changes server-invalid; name remains editable. */
   readonly securityControlsLocked: boolean;
   readonly submitting: boolean;
@@ -91,6 +98,7 @@ export function WorkspaceForm({
   publicSandboxConfig,
   publicManagedEgressConfig,
   publicHttpTools = [],
+  publicSearchConfig,
   securityControlsLocked,
   submitting,
   error,
@@ -126,6 +134,10 @@ export function WorkspaceForm({
   const [enabledHttpTools, setEnabledHttpTools] = useState<readonly string[]>(
     initialValues?.enabledHttpTools ?? [],
   );
+  const [conversationToolsEnabled, setConversationToolsEnabled] = useState(
+    initialValues?.conversationToolsEnabled ?? false,
+  );
+  const historySelectable = publicSearchConfig?.mode === "optional";
   const [validationError, setValidationError] = useState<{
     readonly field: "name" | "path" | "mounts";
     readonly message: string;
@@ -148,6 +160,7 @@ export function WorkspaceForm({
   const networkHelpId = `${formId}-network-help`;
   const setHelpId = `${formId}-set-help`;
   const httpToolsHelpId = `${formId}-http-tools-help`;
+  const historyHelpId = `${formId}-history-help`;
   const availableHttpToolNames = new Set(publicHttpTools.map(({ name }) => name));
   const unavailableHttpTools = enabledHttpTools.filter((name) => !availableHttpToolNames.has(name));
 
@@ -167,6 +180,7 @@ export function WorkspaceForm({
       networkPolicy,
       networkPolicySetId,
       enabledHttpTools: [...enabledHttpTools],
+      conversationToolsEnabled,
     };
     if (values.name.length === 0) {
       setValidationError({ field: "name", message: "Enter a workspace name." });
@@ -240,7 +254,7 @@ export function WorkspaceForm({
       />
       <p className="workspace-form-help" id={pathHelpId}>
         {pathLocked
-          ? "Close this workspace’s live conversations before changing its directory, filesystem mounts, security profile, network type, destination policy, or HTTP tools."
+          ? "Close this workspace’s live conversations before changing its directory, filesystem mounts, security profile, network type, destination policy, or tool access."
           : "The server must be able to read and search this directory."}
       </p>
 
@@ -525,6 +539,34 @@ export function WorkspaceForm({
           <p className="workspace-form-warning">Close this workspace’s live conversations before changing HTTP tool access.</p>
         )}
       </fieldset>
+      <fieldset
+        className="workspace-conversation-tools-control"
+        disabled={submitting || securityControlsLocked}
+        aria-describedby={historyHelpId}
+      >
+        <legend>Conversation history</legend>
+        <p className="workspace-form-help" id={historyHelpId}>{CONVERSATION_HISTORY_DISCLOSURE}</p>
+        <label className={`workspace-http-tool-option${historySelectable ? "" : " is-unavailable"}`}>
+          <input
+            type="checkbox"
+            aria-label="Enable conversation history"
+            checked={conversationToolsEnabled}
+            disabled={!historySelectable && !conversationToolsEnabled}
+            onChange={(event) => setConversationToolsEnabled(event.target.checked)}
+          />
+          <span>
+            <strong>Enable conversation history{historySelectable ? "" : " — unavailable"}</strong>
+            <small><code>conversation_search</code> and <code>conversation_read</code></small>
+          </span>
+        </label>
+        <p className="workspace-form-help" role="status">{conversationHistoryAvailability(publicSearchConfig)}</p>
+        {!historySelectable && conversationToolsEnabled && (
+          <p className="workspace-form-help">Uncheck to remove the stored selection. It cannot be enabled while search is unavailable.</p>
+        )}
+        {securityControlsLocked && (
+          <p className="workspace-form-warning">Close this workspace’s live conversations before changing conversation history access.</p>
+        )}
+      </fieldset>
       {editing && initialValues !== undefined && (
         <dl className="workspace-profile-summary">
           <div><dt>Stored profile</dt><dd>{securityProfileLabel(initialValues.securityProfile)}</dd></div>
@@ -536,6 +578,8 @@ export function WorkspaceForm({
           <div className="workspace-profile-summary-wide"><dt>Network policy issue</dt><dd>{networkPolicyIssueText(initialValues.networkPolicyIssue)}</dd></div>
           <div><dt>Stored HTTP tools</dt><dd>{initialValues.enabledHttpTools?.join(", ") || "None"}</dd></div>
           <div><dt>Effective HTTP tools</dt><dd>{initialValues.effectiveHttpTools?.join(", ") || "None"}</dd></div>
+          <div><dt>Stored conversation history</dt><dd>{initialValues.conversationToolsEnabled ? "Enabled" : "Disabled"}</dd></div>
+          <div><dt>Effective conversation tools</dt><dd>{initialValues.effectiveConversationTools?.join(", ") || "None"}</dd></div>
         </dl>
       )}
       {publicSandboxConfig.mode === "required" && (

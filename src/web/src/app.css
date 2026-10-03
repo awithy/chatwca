@@ -493,6 +493,7 @@ pre {
 
 .destination-policy-control,
 .workspace-mounts-control,
+.workspace-conversation-tools-control,
 .workspace-http-tools-control {
   display: grid;
   gap: 0.45rem;
@@ -511,6 +512,7 @@ pre {
 }
 
 .workspace-mounts-control legend,
+.workspace-conversation-tools-control legend,
 .workspace-http-tools-control legend {
   padding: 0 0.35rem;
   color: var(--text);
@@ -522,6 +524,7 @@ pre {
   max-width: 38rem;
 }
 
+.workspace-conversation-tools-control,
 .workspace-http-tools-control {
   gap: 0.65rem;
   margin-top: 0.15rem;
@@ -581,6 +584,7 @@ pre {
   background: var(--warning-bg);
 }
 
+.workspace-conversation-tools-control:disabled .workspace-http-tool-option,
 .workspace-http-tools-control:disabled .workspace-http-tool-option {
   cursor: not-allowed;
   opacity: 0.72;
@@ -1435,6 +1439,19 @@ pre {
   font-size: 0.72rem;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.mobile-conversation-history-fact {
+  grid-column: 1 / -1;
+}
+
+.mobile-conversation-history-fact dd {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.mobile-conversation-history-disclosure {
+  margin: 0.6rem 0.8rem 0.25rem;
 }
 
 .mobile-conversation-actions {

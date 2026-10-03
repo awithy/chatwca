@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SearchRepositoryDatabase, type SearchRepositoryTransaction } from "../../src/server/search/database.js";
-import { SearchRepositoryError } from "../../src/server/search/errors.js";
+import { ConversationReadError, SearchRepositoryError } from "../../src/server/search/errors.js";
 import type { SearchDatabaseConnection, SearchDatabasePool } from "../../src/server/search/migrations.js";
 
 function deferred<T>() {
@@ -39,6 +39,15 @@ describe("aggregate bounded repository transactions", () => {
     const calls = client.query.mock.calls.length;
     await expect(saved!.query("UPDATE should_never_run")).rejects.toThrow("search_cancelled");
     expect(client.query.mock.calls).toHaveLength(calls);
+  });
+
+  it("starts snapshot reads before any statement and preserves safe read failures after rollback", async () => {
+    const { db, client } = fixture();
+    const error = new ConversationReadError("conversation_entry_not_indexed");
+    await expect(db.transaction(async () => { throw error; }, {}, "snapshot")).rejects.toBe(error);
+    expect(client.query.mock.calls[0]?.[0]).toBe("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    expect(client.query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+    expect(client.release).toHaveBeenCalledExactlyOnceWith(false);
   });
 
   it("cannot dispatch a late data statement after COMMIT begins, even if its setup query was already pending", async () => {

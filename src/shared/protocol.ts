@@ -410,6 +410,12 @@ export const PublicConfigSchema = strictObject({
 });
 export type PublicConfig = Static<typeof PublicConfigSchema>;
 
+export const CONVERSATION_TOOL_NAMES = Object.freeze(["conversation_search", "conversation_read"] as const);
+export const ConversationToolNameSchema = Type.Union([
+  Type.Literal("conversation_search"), Type.Literal("conversation_read"),
+]);
+export type ConversationToolName = Static<typeof ConversationToolNameSchema>;
+
 export const WorkspaceSchema = strictObject({
   id: IdentifierSchema,
   name: NonEmptyStringSchema,
@@ -424,6 +430,7 @@ export const WorkspaceSchema = strictObject({
     maxItems: MAX_WORKSPACE_HTTP_TOOLS,
     uniqueItems: true,
   }),
+  conversationToolsEnabled: Type.Boolean(),
   createdAt: Type.Number({ minimum: 0 }),
   updatedAt: Type.Number({ minimum: 0 }),
 });
@@ -462,6 +469,8 @@ export const WorkspaceSummarySchema = strictObject({
   }),
   createdAt: Type.Number({ minimum: 0 }),
   updatedAt: Type.Number({ minimum: 0 }),
+  conversationToolsEnabled: Type.Boolean(),
+  effectiveConversationTools: Type.Array(ConversationToolNameSchema, { maxItems: 2, uniqueItems: true }),
   available: Type.Boolean(),
   usable: Type.Boolean(),
   policyIssue: WorkspacePolicyIssueSchema,
@@ -540,6 +549,8 @@ export const ConversationStateSchema = strictObject({
     maxItems: MAX_WORKSPACE_HTTP_TOOLS,
     uniqueItems: true,
   }),
+  /** Effective cached-history tools captured when this runtime started. */
+  effectiveConversationTools: Type.Array(ConversationToolNameSchema, { maxItems: 2, uniqueItems: true }),
   /** Safe live ownership; closed persisted sessions have no owner. */
   owner: Type.Optional(ConversationOwnerSchema),
 });
@@ -563,6 +574,7 @@ export const WorkspaceCreateCommandSchema = strictObject({
     maxItems: MAX_WORKSPACE_HTTP_TOOLS,
     uniqueItems: true,
   })),
+  conversationToolsEnabled: Type.Optional(Type.Boolean()),
   acknowledgeWritableMounts: Type.Optional(Type.Literal(true)),
 });
 export const WorkspaceUpdateCommandSchema = strictObject({
@@ -579,6 +591,7 @@ export const WorkspaceUpdateCommandSchema = strictObject({
     maxItems: MAX_WORKSPACE_HTTP_TOOLS,
     uniqueItems: true,
   })),
+  conversationToolsEnabled: Type.Optional(Type.Boolean()),
   acknowledgeSecurityDowngrade: Type.Optional(Type.Literal(true)),
   acknowledgeNetworkExposure: Type.Optional(Type.Literal(true)),
   acknowledgeWritableMounts: Type.Optional(Type.Literal(true)),

@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import Database from "better-sqlite3";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   DATABASE_FILENAME,
@@ -93,6 +93,8 @@ describe("WorkspaceRepository CRUD", () => {
       networkPolicyIssue: null,
       enabledHttpTools: [],
       effectiveHttpTools: [],
+      conversationToolsEnabled: false,
+      effectiveConversationTools: [],
       createdAt: 10,
       updatedAt: 10,
       available: true,
@@ -128,6 +130,28 @@ describe("WorkspaceRepository CRUD", () => {
     expect(statSync(retainedFile).isFile()).toBe(true);
   });
 
+  it("lists immutable stored session registrations without filesystem probes or runtime-policy evaluation", () => {
+    const root = temporaryDirectory(); const opened = database();
+    const fileSystem = { realpath: vi.fn(realFileSystem.realpath), stat: vi.fn(realFileSystem.stat), access: vi.fn(realFileSystem.access) };
+    let sequence = 0;
+    const repository = new WorkspaceRepository(opened.connection, { uuid: () => `workspace-${++sequence}`, fileSystem });
+    const first = repository.create({ name: "Zulu", path: directory(root, "first"), sessionStorage: "workspace" });
+    const second = repository.create({ name: "Alpha", path: directory(root, "second"), sessionStorage: "pi-default" });
+    opened.connection.prepare("UPDATE workspaces SET security_profile = 'workspace-sandboxed' WHERE id = ?").run(first.id);
+    for (const method of [fileSystem.realpath, fileSystem.stat, fileSystem.access]) {
+      method.mockClear(); method.mockImplementation(() => { throw new Error("Source directory unavailable"); });
+    }
+    const registrations = repository.listRegistrations();
+    expect(registrations).toEqual([second, first].map(({ id, name, path, sessionDirectory }) => ({ id, name, path, sessionDirectory })));
+    expect(Object.isFrozen(registrations)).toBe(true); expect(registrations.every(Object.isFrozen)).toBe(true);
+    expect(fileSystem.realpath).not.toHaveBeenCalled(); expect(fileSystem.stat).not.toHaveBeenCalled(); expect(fileSystem.access).not.toHaveBeenCalled();
+    expect(repository.list().find((workspace) => workspace.id === first.id)).toMatchObject({ available: false, usable: false, policyIssue: "sandbox_disabled" });
+    repository.update(second.id, { name: "Renamed" });
+    expect(repository.listRegistrations()[0]?.name).toBe("Renamed");
+    repository.delete(second.id);
+    expect(repository.listRegistrations().map(({ id }) => id)).toEqual([first.id]);
+  });
+
   it("persists rows when the SQLite database is reopened", () => {
     const root = temporaryDirectory();
     const workspacePath = directory(root, "project");
@@ -159,6 +183,8 @@ describe("WorkspaceRepository CRUD", () => {
         networkPolicyIssue: null,
         enabledHttpTools: [],
         effectiveHttpTools: [],
+        conversationToolsEnabled: false,
+        effectiveConversationTools: [],
         createdAt: 123,
         updatedAt: 123,
         available: true,
@@ -731,6 +757,75 @@ describe("workspace path canonicalization and availability", () => {
     expect(() => inaccessible.requireAvailable("workspace-1")).toThrow(
       expect.objectContaining({ code: ERROR_CODES.WORKSPACE_UNAVAILABLE }),
     );
+  });
+});
+
+describe("workspace conversation tool selections", () => {
+  it("defaults off, persists toggles and preserves omitted selection across reopen", () => {
+    const root = temporaryDirectory();
+    const dataDir = temporaryDirectory();
+    const opened = database(dataDir, DATABASE_FILENAME);
+    const repository = new WorkspaceRepository(opened.connection, { searchMode: "optional" });
+    const created = repository.create({ name: "History", path: directory(root, "history") });
+    expect(created).toMatchObject({ conversationToolsEnabled: false, effectiveConversationTools: [] });
+    expect(repository.update(created.id, { conversationToolsEnabled: true })).toMatchObject({
+      conversationToolsEnabled: true, effectiveConversationTools: ["conversation_search", "conversation_read"],
+    });
+    repository.update(created.id, { name: "Renamed" });
+    opened.close();
+    const reopened = database(dataDir, DATABASE_FILENAME);
+    const restored = new WorkspaceRepository(reopened.connection, { searchMode: "optional" });
+    expect(restored.get(created.id)).toMatchObject({ name: "Renamed", conversationToolsEnabled: true });
+    expect(restored.update(created.id, { conversationToolsEnabled: false })).toMatchObject({
+      conversationToolsEnabled: false, effectiveConversationTools: [],
+    });
+    restored.delete(created.id);
+    expect(reopened.connection.prepare("SELECT conversation_tools_enabled FROM workspaces").all()).toEqual([]);
+  });
+
+  it("retains selection while search is disabled without making the workspace unusable", async () => {
+    const root = temporaryDirectory();
+    const opened = database();
+    const disabled = new WorkspaceRepository(opened.connection);
+    const created = disabled.create({
+      name: "History", path: directory(root, "history"), conversationToolsEnabled: true,
+    });
+    expect(created).toMatchObject({ conversationToolsEnabled: true, effectiveConversationTools: [], usable: true });
+    await expect(disabled.requireUsable(created.id)).resolves.toMatchObject({ workspaceId: created.id, effectiveConversationTools: [] });
+    const optional = new WorkspaceRepository(opened.connection, { searchMode: "optional" });
+    expect(optional.get(created.id)).toMatchObject({
+      conversationToolsEnabled: true, effectiveConversationTools: ["conversation_search", "conversation_read"], usable: true,
+    });
+    const captured = await optional.requireUsable(created.id);
+    expect(captured.effectiveConversationTools).toEqual(["conversation_search", "conversation_read"]);
+    expect(Object.isFrozen(captured.effectiveConversationTools)).toBe(true);
+    const projection = optional.get(created.id);
+    projection.effectiveConversationTools.pop();
+    expect(optional.get(created.id).effectiveConversationTools).toHaveLength(2);
+    expect(disabled.update(created.id, { name: "Preserved" }).conversationToolsEnabled).toBe(true);
+    expect(disabled.update(created.id, { conversationToolsEnabled: false }).effectiveConversationTools).toEqual([]);
+    expect(captured.effectiveConversationTools).toHaveLength(2);
+    expect((await optional.requireUsable(created.id)).effectiveConversationTools).toEqual([]);
+  });
+
+  it("validates direct inputs before persistence and rejects corrupt stored selections", () => {
+    const root = temporaryDirectory();
+    const opened = database();
+    const repository = new WorkspaceRepository(opened.connection);
+    const target = directory(root, "history");
+    for (const invalid of [null, 0, 1, "true", [], {}]) {
+      expect(() => repository.create({ name: "Bad", path: target, conversationToolsEnabled: invalid as boolean }))
+        .toThrow(expect.objectContaining({ code: ERROR_CODES.INVALID_COMMAND }));
+    }
+    const created = repository.create({ name: "History", path: target });
+    for (const invalid of [null, 0, 1, "false", [], {}]) {
+      expect(() => repository.update(created.id, { conversationToolsEnabled: invalid as boolean }))
+        .toThrow(expect.objectContaining({ code: ERROR_CODES.INVALID_COMMAND }));
+    }
+    expect(repository.get(created.id).conversationToolsEnabled).toBe(false);
+    opened.connection.pragma("ignore_check_constraints = ON");
+    opened.connection.prepare("UPDATE workspaces SET conversation_tools_enabled = 2 WHERE id = ?").run(created.id);
+    expect(() => repository.get(created.id)).toThrow(expect.objectContaining({ code: ERROR_CODES.DATABASE_ERROR }));
   });
 });
 

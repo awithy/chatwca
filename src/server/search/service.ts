@@ -1,16 +1,24 @@
+import { performance } from "node:perf_hooks";
 import type { PublicSearchConfig, SearchAvailability, SearchCounts, SearchFreshness, SearchStatus } from "../../shared/search.js";
 import type { SearchConfig } from "./config.js";
 import type { SearchRepositoryOptions } from "./database.js";
 import { OllamaSearchEmbeddings } from "./embeddings.js";
-import { SearchQueryError, SearchRepositoryError, type SearchQueryErrorCode } from "./errors.js";
+import { ConversationReadError, SearchQueryError, SearchRepositoryError, type SearchQueryErrorCode } from "./errors.js";
 import { SearchIndexer, type SearchIndexerRegistrations, type SearchIndexerStatus, type SearchRefreshRequest } from "./indexer.js";
 import { checkSearchSchema, loadSearchMigrations } from "./migrations.js";
 import { createSearchPool } from "./postgres.js";
-import { SearchQueryService, type SearchQueryRequest, type SearchQueryResponse } from "./query.js";
+import { SearchQueryService, validateSearchQueryRequest, type SearchQueryRequest, type SearchQueryResponse } from "./query.js";
 import { PostgresSearchRepository, type SearchRepositoryScope } from "./repository.js";
 import { PostgresSearchRetrieval } from "./retrieval.js";
 import { workspaceSourceRevision } from "./session-source.js";
 import { PiSearchReranker, type SearchRerankerOptions } from "./rerank.js";
+import { validateConversationReadRequest, type ConversationReadPage, type ConversationReadRequest } from "./read-page.js";
+import { conversationReadPageBudget, MAX_CONVERSATION_CONCURRENT_READS, PostgresConversationReader, type ConversationReadOptions, type ConversationReadRepository } from "./read-repository.js";
+
+export const MAX_CONVERSATION_READ_TIMEOUT_MS = 10_000;
+export interface ConversationReadResponse extends ConversationReadPage {
+  readonly freshness: SearchFreshness;
+}
 
 export interface SearchServiceStatus extends SearchStatus {
   readonly mode: SearchConfig["mode"];
@@ -24,6 +32,7 @@ export interface SearchServicePort {
   freshness(): SearchFreshness;
   status(options?: SearchRepositoryOptions): Promise<SearchServiceStatus>;
   search(request: SearchQueryRequest, options?: SearchRepositoryOptions): Promise<SearchQueryResponse>;
+  read(request: ConversationReadRequest, options?: ConversationReadOptions): Promise<ConversationReadResponse>;
   requestRefresh(request?: SearchRefreshRequest): void;
   /** Synchronous admission/cancellation boundary; returned promise includes pool closure. */
   close(): Promise<void>;
@@ -31,6 +40,7 @@ export interface SearchServicePort {
 export interface SearchServiceResources {
   readonly indexer: Pick<SearchIndexer, "status" | "requestRefresh" | "close">;
   readonly queries: Pick<SearchQueryService, "search" | "close">;
+  readonly reads: ConversationReadRepository;
   checkSchema(options: SearchRepositoryOptions): Promise<void>;
   readCounts(scopes: readonly SearchRepositoryScope[], options: SearchRepositoryOptions): Promise<SearchCounts>;
   /** Cancels all IO synchronously, then closes the pool. */
@@ -40,6 +50,8 @@ export interface SearchServiceOptions {
   readonly config: Readonly<SearchConfig>;
   readonly registrations: SearchIndexerRegistrations;
   readonly piAgentDirectory: string;
+  /** Internal test override, never an environment/browser setting. */
+  readonly readTimeoutMs?: number;
   /** Constructed only asynchronously in optional mode; tests use synthetic isolated dependencies. */
   readonly createResources?: (reranker?: PiSearchReranker) => SearchServiceResources;
   /** Existing Pi runtime and global-only snapshot; invoked asynchronously only in optional mode. */
@@ -57,15 +69,16 @@ function defaultResources(options: SearchServiceOptions, reranker?: PiSearchRera
   const pool = createSearchPool(options.config.databaseUrl!);
   const repository = new PostgresSearchRepository(pool);
   const reader = new PostgresSearchRetrieval(pool);
+  const conversations = new PostgresConversationReader(pool);
   const indexer = new SearchIndexer({ repository, registrations: options.registrations, embeddings, piAgentDirectory: options.piAgentDirectory });
   const queries = new SearchQueryService({ repository: reader, registrations: options.registrations, embeddings, piAgentDirectory: options.piAgentDirectory,
     ...(reranker ? { reranker } : {}) });
   return {
-    indexer, queries,
+    indexer, queries, reads: conversations,
     checkSchema: async (settings) => checkSearchSchema(pool, await loadSearchMigrations(), settings),
     readCounts: (scopes, settings) => reader.readCounts(scopes, settings),
     close: async () => {
-      queries.close(); embeddings.close(); reader.close(); repository.close();
+      queries.close(); conversations.close(); embeddings.close(); reader.close(); repository.close();
       await indexer.close(); await pool.end();
     },
   };
@@ -84,9 +97,12 @@ export class SearchService implements SearchServicePort {
   private initializing: Promise<void> | undefined;
   private pending: Pending | null = null;
   private readonly controller = new AbortController();
+  private readonly activeReads = new Set<AbortController>();
   private closing: Promise<void> | undefined;
 
   constructor(private readonly options: SearchServiceOptions) {
+    const timeout = options.readTimeoutMs ?? MAX_CONVERSATION_READ_TIMEOUT_MS;
+    if (!Number.isSafeInteger(timeout) || timeout <= 0 || timeout > MAX_CONVERSATION_READ_TIMEOUT_MS) throw new SearchQueryError("search_query_invalid");
     this.state = options.config.mode === "disabled" ? "disabled" : "initializing";
   }
   start(): void {
@@ -123,6 +139,7 @@ export class SearchService implements SearchServicePort {
   }
   async search(request: SearchQueryRequest, options: SearchRepositoryOptions = {}): Promise<SearchQueryResponse> {
     this.requireReady();
+    request = validateSearchQueryRequest(request);
     try {
       const result = await this.resources!.queries.search(request, { signal: options.signal ? AbortSignal.any([options.signal, this.controller.signal]) : this.controller.signal });
       this.errorCode = null;
@@ -131,6 +148,59 @@ export class SearchService implements SearchServicePort {
       const code = safeFailure(error);
       if (code === "search_database_unavailable") this.errorCode = code;
       throw new SearchQueryError(code);
+    }
+  }
+  async read(input: ConversationReadRequest, options: ConversationReadOptions = {}): Promise<ConversationReadResponse> {
+    this.requireReady();
+    if (options.signal?.aborted) throw new SearchQueryError("search_cancelled");
+    const request = validateConversationReadRequest(input);
+    const maximumPageBytes = conversationReadPageBudget(options);
+    if (this.activeReads.size >= MAX_CONVERSATION_CONCURRENT_READS) throw new SearchQueryError("search_busy");
+    const controller = new AbortController(); this.activeReads.add(controller);
+    const timeout = this.options.readTimeoutMs ?? MAX_CONVERSATION_READ_TIMEOUT_MS;
+    const expiresAt = performance.now() + timeout;
+    const timer = setTimeout(() => controller.abort(new SearchQueryError("search_timeout")), timeout); timer.unref();
+    const abort = (): void => controller.abort(new SearchQueryError("search_cancelled"));
+    options.signal?.addEventListener("abort", abort, { once: true });
+    this.controller.signal.addEventListener("abort", abort, { once: true });
+    if (options.signal?.aborted || this.controller.signal.aborted) abort();
+    const check = (): void => {
+      if (performance.now() >= expiresAt && !controller.signal.aborted) controller.abort(new SearchQueryError("search_timeout"));
+      if (controller.signal.aborted) throw controller.signal.reason;
+    };
+    let cancel: (() => void) | undefined;
+    try {
+      check();
+      let scope: SearchRepositoryScope;
+      try {
+        const workspace = this.options.registrations.list().find((workspace) => workspace.id === request.workspaceId);
+        if (!workspace) throw new Error("unknown scope");
+        scope = { workspaceId: workspace.id, sourceRevision: workspaceSourceRevision(workspace, this.options.piAgentDirectory) };
+      } catch { throw new SearchQueryError("search_scope_unavailable"); }
+      check();
+      // Like query execution, race injected IO too. Late settlement cannot resume
+      // this call, change freshness, or keep admission held after cancellation.
+      const result = await new Promise<ConversationReadPage>((resolve, reject) => {
+        cancel = () => reject(controller.signal.reason);
+        controller.signal.addEventListener("abort", cancel, { once: true });
+        Promise.resolve().then(() => { check(); return this.resources!.reads.read(scope, request, { signal: controller.signal, maximumPageBytes }); }).then(resolve, reject);
+        if (controller.signal.aborted) cancel();
+      });
+      check();
+      this.errorCode = null;
+      return { ...result, freshness: this.freshness() };
+    } catch (error) {
+      check();
+      if (error instanceof ConversationReadError) throw error;
+      const code = safeFailure(error);
+      if (code === "search_database_unavailable") this.errorCode = code;
+      throw new SearchQueryError(code);
+    } finally {
+      clearTimeout(timer);
+      options.signal?.removeEventListener("abort", abort);
+      this.controller.signal.removeEventListener("abort", abort);
+      if (cancel) controller.signal.removeEventListener("abort", cancel);
+      this.activeReads.delete(controller);
     }
   }
   private requireReady(): void {

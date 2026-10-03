@@ -1,5 +1,5 @@
 import { performance } from "node:perf_hooks";
-import { SearchRepositoryError, type SearchRepositoryErrorCode } from "./errors.js";
+import { ConversationReadError, SearchRepositoryError, type SearchRepositoryErrorCode } from "./errors.js";
 import type { SearchDatabaseConnection, SearchDatabasePool } from "./migrations.js";
 
 export const SEARCH_TRANSACTION_TIMEOUT_MS = 5_000;
@@ -13,13 +13,13 @@ export interface SearchRepositoryTransaction {
   query(sql: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
 }
 
-function safeError(error: unknown): SearchRepositoryError {
-  if (error instanceof SearchRepositoryError) return error;
+function safeError(error: unknown): SearchRepositoryError | ConversationReadError {
+  if (error instanceof SearchRepositoryError || error instanceof ConversationReadError) return error;
   const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
   return new SearchRepositoryError(code === "57014" || code === "55P03" || code === "25P04" ? "search_timeout" : "search_database_unavailable");
 }
 
-/** Maintenance-only admission: one connection, no waiters; pool capacity stays reserved for retrieval. */
+/** One transaction, no waiters; retrieval/read consumers allocate independent slots. */
 export class SearchRepositoryDatabase {
   private active: AbortController | undefined;
   private closed = false;
@@ -37,7 +37,8 @@ export class SearchRepositoryDatabase {
   async transaction<T>(
     work: (transaction: SearchRepositoryTransaction) => Promise<T>,
     options: SearchRepositoryOptions = {},
-    readOnly = false,
+    /** Snapshot mode keeps multi-statement cached reads on one document generation. */
+    readOnly: boolean | "snapshot" = false,
   ): Promise<T> {
     if (this.closed || options.signal?.aborted) throw new SearchRepositoryError("search_cancelled");
     if (this.active) throw new SearchRepositoryError("search_busy");
@@ -100,7 +101,7 @@ export class SearchRepositoryDatabase {
       } finally { clearTimeout(connectTimer); }
       check();
       beginAttempted = true;
-      await send(readOnly ? "BEGIN READ ONLY" : "BEGIN");
+      await send(readOnly === "snapshot" ? "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY" : readOnly ? "BEGIN READ ONLY" : "BEGIN");
       begun = true;
       // PostgreSQL 17 also enforces an aggregate server-side transaction deadline.
       await send("SELECT set_config('transaction_timeout', $1, true), set_config('statement_timeout', $1, true), set_config('lock_timeout', $1, true)", [remaining()]);

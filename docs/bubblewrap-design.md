@@ -482,17 +482,25 @@ The registry obtains this object only from `WorkspaceRepository.requireUsable()`
 
 ### 14.2 App-owned tool set
 
-Sandboxed sessions pass an explicit allowlist and `customTools` set to `createAgentSessionFromServices()`:
+Sandboxed sessions pass an explicit allowlist and `customTools` set to `createAgentSessionFromServices()`. The worker-backed coding names are:
 
 ```text
 read, write, edit, bash, ls, grep, find
 ```
 
-Each definition preserves Pi's current name, schema, descriptions, output truncation, tool result details, and edit patch shape, but its `execute` method calls the worker protocol. Tool definition behavior is pinned and tested against Pi 0.84.3.
+Each coding definition preserves Pi's current name, schema, descriptions, output truncation, tool result details, and edit patch shape, but its `execute` method calls the worker protocol. Tool definition behavior is pinned and tested against Pi 0.84.3.
 
 The implementation will not rely only on the SDK's low-level operation interfaces. In 0.84.3, some built-in implementations still perform host-side path probes, spawn `rg`/`fd` in the parent, omit `AbortSignal` from filesystem operation interfaces, or save full bash output in the parent's temp directory. Overriding whole `execute` functions avoids those gaps.
 
 An SDK upgrade requires rerunning contract tests for tool schemas, result details, truncation, image handling, and edit semantics before the pinned version changes.
+
+Explicitly granted app-owned parent tools join this same closed allowlist: configured
+`web_search`, selected fixed-endpoint HTTP tools, and the selected
+[`conversation_search` / `conversation_read` pair](conversation-search-tool.md).
+Parent history tools serve cached dialogue without granting workers session-file,
+database, general host or network access. They are implemented and locally validated
+but not yet deployed. Their cached cross-workspace/provider-use authority is disclosed
+separately from coding-tool isolation.
 
 No built-in, custom, dynamically registered, or extension tool is enabled unless it is in the app-owned set. Unknown stored tool-call names can render from session history but cannot execute.
 

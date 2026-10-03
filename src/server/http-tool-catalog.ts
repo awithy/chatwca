@@ -3,6 +3,7 @@ import path from "node:path";
 
 import type { TSchema } from "@sinclair/typebox";
 
+import { CONVERSATION_TOOL_NAMES } from "../shared/protocol.js";
 import { ConfigurationError } from "./sandbox/config.js";
 
 export const HTTP_TOOL_CATALOG_ENV = "CHATWCA_TOOL_CATALOG";
@@ -23,6 +24,7 @@ const RESERVED_TOOL_NAMES = new Set([
   "read",
   "web_search",
   "write",
+  ...CONVERSATION_TOOL_NAMES,
 ]);
 
 export interface HttpToolConfig {

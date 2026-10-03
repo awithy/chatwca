@@ -27,7 +27,7 @@ const workspace: WorkspaceSummary = {
   effectiveSecurityProfile: "unrestricted",
   mounts: [], networkPolicy: "isolated", effectiveNetworkPolicy: "isolated",
   networkPolicySetId: "default", effectiveNetworkPolicySetId: null, networkPolicyIssue: null,
-  enabledHttpTools: [], effectiveHttpTools: [],
+  enabledHttpTools: [], effectiveHttpTools: [], conversationToolsEnabled: false, effectiveConversationTools: [],
   createdAt: 1,
   updatedAt: 1,
   available: true,
@@ -49,7 +49,7 @@ const state: ConversationState = {
   contextUsage: null,
   messages: [],
   queue: { steering: [], followUp: [] },
-  securityProfile: "unrestricted", networkPolicy: "isolated", networkPolicySetId: "default", effectiveNetworkPolicySetId: null, effectiveHttpTools: [],
+  securityProfile: "unrestricted", networkPolicy: "isolated", networkPolicySetId: "default", effectiveNetworkPolicySetId: null, effectiveHttpTools: [], effectiveConversationTools: [],
 };
 const summary: ConversationSummary = {
   id: state.id,
@@ -64,7 +64,7 @@ const summary: ConversationSummary = {
   runnable: true,
 };
 
-const runtimePolicyFields = { networkPolicy: "isolated" as const, networkPolicySetId: "default", effectiveNetworkPolicySetId: null, networkPolicySet: null, effectiveHttpTools: [] };
+const runtimePolicyFields = { networkPolicy: "isolated" as const, networkPolicySetId: "default", effectiveNetworkPolicySetId: null, networkPolicySet: null, effectiveHttpTools: [], effectiveConversationTools: [] };
 
 function services() {
   const create = vi.fn(async () => ({ id: state.id }));
@@ -175,6 +175,31 @@ describe("server WebSocket protocol", () => {
         extra: true,
       })), false),
     ]) expect(operation).toThrow(AppError);
+  });
+
+  it.each([true, false])("forwards history selection %s on create/update, rejects live edits and permits rename", async (enabled) => {
+    const { registry, history, workspaces, calls } = services();
+    await dispatchClientCommand(command({
+      type: "workspace.create", requestId: "create-history", name: "History", path: "/history",
+      sessionStorage: "pi-default", securityProfile: "unrestricted", conversationToolsEnabled: enabled,
+    }), registry, history, workspaces);
+    expect(workspaces.create).toHaveBeenCalledWith(expect.objectContaining({ conversationToolsEnabled: enabled }));
+    await dispatchClientCommand(command({
+      type: "workspace.update", requestId: "update-history", workspaceId: workspace.id,
+      conversationToolsEnabled: enabled,
+    }), registry, history, workspaces);
+    expect(workspaces.update).toHaveBeenLastCalledWith(workspace.id, { conversationToolsEnabled: enabled });
+    calls.busy.mockReturnValue(true);
+    vi.mocked(workspaces.update).mockClear();
+    await expect(dispatchClientCommand(command({
+      type: "workspace.update", requestId: "live-history", workspaceId: workspace.id,
+      conversationToolsEnabled: enabled,
+    }), registry, history, workspaces)).rejects.toMatchObject({ code: ERROR_CODES.WORKSPACE_BUSY });
+    expect(workspaces.update).not.toHaveBeenCalled();
+    await dispatchClientCommand(command({
+      type: "workspace.update", requestId: "live-rename", workspaceId: workspace.id, name: "Renamed",
+    }), registry, history, workspaces);
+    expect(workspaces.update).toHaveBeenLastCalledWith(workspace.id, { name: "Renamed" });
   });
 
   it("dispatches scoped history and lifecycle commands with exact correlated responses", async () => {

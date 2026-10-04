@@ -84,7 +84,7 @@
   --warning-halo-soft: #e6b45012;
   --success-border-halo: #a4f3bf66;
   --success-glow: #55c78348;
-  --sidebar-width: 20rem;
+  --sidebar-width: 17rem;
 }
 
 * {
@@ -235,7 +235,7 @@ pre {
 .conversation-sidebar {
   z-index: 20;
   display: grid;
-  grid-template-rows: auto minmax(8rem, 42%) minmax(8rem, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   min-width: 0;
   min-height: 0;
   height: 100%;
@@ -248,8 +248,8 @@ pre {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  min-height: 4.5rem;
-  padding: 0.875rem 1rem;
+  min-height: 2rem;
+  padding: 0.25rem 0.65rem;
   border-bottom: 1px solid var(--border);
 }
 
@@ -260,13 +260,8 @@ pre {
 }
 
 .sidebar-brand strong {
-  font-size: 0.95rem;
+  font-size: 0.8rem;
   letter-spacing: 0.01em;
-}
-
-.sidebar-brand small {
-  color: var(--muted);
-  font-size: 0.72rem;
 }
 
 .icon-button {
@@ -289,7 +284,9 @@ pre {
 
 .sidebar-dismiss {
   display: none;
-  font-size: 1.5rem;
+  width: 1.5rem;
+  height: 1.5rem;
+  font-size: 1.1rem;
 }
 
 .primary-button,
@@ -314,7 +311,8 @@ pre {
 }
 
 .workspace-panel {
-  padding: 0.75rem 0.6rem;
+  max-height: min(35dvh, 20rem);
+  padding: 0.35rem;
   overflow-y: auto;
   scrollbar-color: var(--border-strong) transparent;
 }
@@ -324,8 +322,8 @@ pre {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 0.6rem;
-  padding: 0 0.35rem 0.6rem;
+  gap: 0.4rem;
+  padding: 0 0.25rem 0.3rem;
 }
 
 .workspace-panel-header h2,
@@ -339,13 +337,18 @@ pre {
   text-transform: uppercase;
 }
 
+.workspace-panel-header h2,
+.conversation-list-header h2 {
+  font-size: 0.65rem;
+}
+
 .workspace-add-button {
-  min-height: 1.9rem;
-  padding: 0.25rem 0.55rem;
+  min-height: 1.5rem;
+  padding: 0.15rem 0.4rem;
   border: 1px solid var(--border-strong);
   border-radius: 0.4rem;
   color: var(--text);
-  font-size: 0.72rem;
+  font-size: 0.65rem;
   font-weight: 700;
   background: var(--panel-raised);
 }
@@ -933,7 +936,7 @@ pre {
 
 .workspace-list {
   display: grid;
-  gap: 0.35rem;
+  gap: 0.1rem;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -960,10 +963,11 @@ pre {
 
 .workspace-select-button {
   display: grid;
-  gap: 0.28rem;
+  gap: 0.1rem;
   width: 100%;
   min-width: 0;
-  padding: 0.5rem 2.65rem 0.5rem 0.6rem;
+  padding: 0.2rem 2rem 0.2rem 0.45rem;
+  line-height: 1.35;
   border: 0;
   color: var(--text);
   text-align: left;
@@ -979,8 +983,10 @@ pre {
 
 .workspace-name strong {
   min-width: 0;
-  font-size: 0.83rem;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  font-size: 0.78rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .workspace-select-button code,
@@ -996,6 +1002,13 @@ pre {
   background: transparent;
 }
 
+.workspace-select-button code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .workspace-unavailable,
 .workspace-policy-blocked {
   flex: 0 0 auto;
@@ -1006,15 +1019,15 @@ pre {
 
 .workspace-item-menu {
   position: absolute;
-  top: 0.35rem;
-  right: 0.35rem;
+  top: 0.15rem;
+  right: 0.2rem;
 }
 
 .workspace-menu-trigger {
   display: grid;
   place-items: center;
-  width: 1.85rem;
-  height: 1.85rem;
+  width: 1.5rem;
+  height: 1.5rem;
   padding: 0;
   border: 1px solid transparent;
   border-radius: 0.38rem;
@@ -1147,12 +1160,13 @@ pre {
 }
 
 .conversation-list-header {
-  padding: 0.65rem 0.85rem 0.55rem;
+  padding: 0.35rem 0.6rem;
 }
 
 .conversation-list-header > div {
   display: grid;
-  gap: 0.15rem;
+  gap: 0.05rem;
+  line-height: 1.25;
   min-width: 0;
 }
 
@@ -1168,9 +1182,9 @@ pre {
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
-  min-height: 2rem;
-  padding: 0.3rem 0.55rem;
-  font-size: 0.7rem;
+  min-height: 1.5rem;
+  padding: 0.15rem 0.4rem;
+  font-size: 0.65rem;
 }
 
 .conversation-list-body {
@@ -1183,21 +1197,21 @@ pre {
 .conversation-list {
   flex: 1 1 auto;
   min-height: 0;
-  padding: 0.6rem 0.5rem 1rem;
+  padding: 0.15rem 0.35rem 0.5rem;
   overflow-y: auto;
   scrollbar-color: var(--border-strong) transparent;
 }
 
 .sidebar-empty {
-  margin: 1.25rem 0.75rem;
+  margin: 0.65rem 0.5rem;
   color: var(--muted);
-  font-size: 0.82rem;
+  font-size: 0.72rem;
   text-align: center;
 }
 
 .conversation-list > ul {
   display: grid;
-  gap: 0.2rem;
+  gap: 0.1rem;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -1205,9 +1219,10 @@ pre {
 
 .conversation-row {
   display: grid;
-  gap: 0.38rem;
+  gap: 0.1rem;
   width: 100%;
-  padding: 0.65rem 0.7rem;
+  padding: 0.25rem 0.45rem;
+  line-height: 1.35;
   border: 1px solid transparent;
   border-radius: 0.48rem;
   color: var(--text);
@@ -1236,7 +1251,7 @@ pre {
 .conversation-row-heading strong {
   min-width: 0;
   overflow: hidden;
-  font-size: 0.84rem;
+  font-size: 0.78rem;
   font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1281,7 +1296,15 @@ pre {
 
 .conversation-row-meta {
   color: var(--subtle);
-  font-size: 0.69rem;
+  font-size: 0.64rem;
+}
+
+.conversation-row-meta > span,
+.conversation-row-meta time {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .unavailable-label {
@@ -1293,11 +1316,11 @@ pre {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  min-height: 2.75rem;
-  padding: 0.65rem 1rem;
+  min-height: 1.75rem;
+  padding: 0.25rem 0.65rem;
   border-top: 1px solid var(--border);
   color: var(--muted);
-  font-size: 0.72rem;
+  font-size: 0.65rem;
 }
 
 .connection-dot {
@@ -3531,7 +3554,7 @@ pre {
 
   .conversation-sidebar {
     inset: 0 auto 0 0;
-    grid-template-rows: auto auto minmax(8rem, 42%) minmax(8rem, 1fr) auto;
+    grid-template-rows: auto auto auto minmax(0, 1fr) auto;
     width: min(var(--sidebar-width), calc(100vw - 3rem));
   }
 
@@ -3542,6 +3565,17 @@ pre {
     padding: 0.6rem;
     border-bottom: 1px solid var(--border);
     background: var(--field-bg);
+  }
+
+  .conversation-sidebar .mobile-section-navigation {
+    gap: 0.3rem;
+    padding: 0.35rem;
+  }
+
+  .conversation-sidebar .mobile-section-navigation button {
+    min-height: 1.75rem;
+    padding: 0.2rem 0.4rem;
+    font-size: 0.7rem;
   }
 
   .mobile-section-navigation button[aria-current="page"] {

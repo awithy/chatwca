@@ -407,7 +407,6 @@ export function WorkspaceSidebar({
       <div className="sidebar-brand">
         <div>
           <strong>ChatWCA</strong>
-          <small>Local agent platform</small>
         </div>
         <button
           className="icon-button sidebar-dismiss"
@@ -772,7 +771,7 @@ export function WorkspaceSidebar({
                     onClick={() => onSelectWorkspace(workspace.id)}
                   >
                     <span className="workspace-name">
-                      <strong>{workspace.name}</strong>
+                      <strong title={workspace.name}>{workspace.name}</strong>
                       {!workspace.available ? (
                         <span className="workspace-unavailable">Unavailable</span>
                       ) : !workspace.usable ? (

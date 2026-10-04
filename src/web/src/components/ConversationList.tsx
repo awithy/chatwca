@@ -64,7 +64,7 @@ export function ConversationList({
       <div className="conversation-list-header">
         <div>
           <h2 id="conversation-list-heading">Conversations</h2>
-          {workspace !== null && <span>{workspace.name}</span>}
+          {workspace !== null && <span title={workspace.name}>{workspace.name}</span>}
         </div>
         <button
           className="new-conversation-button"
@@ -122,7 +122,7 @@ export function ConversationList({
                       onClick={() => onSelect(conversation)}
                     >
                       <span className="conversation-row-heading">
-                        <strong>{conversationTitle(conversation)}</strong>
+                        <strong title={conversationTitle(conversation)}>{conversationTitle(conversation)}</strong>
                         <span className={`conversation-status status-${status}`}>
                           <i aria-hidden="true" />{statusLabel(status)}
                         </span>

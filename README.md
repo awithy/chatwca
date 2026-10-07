@@ -1,36 +1,49 @@
 # ChatWCA
 
-ChatWCA is a single-user local agent platform built upon the [Pi coding agent](https://pi.dev/) SDK.
+ChatWCA is a single-user, self-hosted web interface for the [Pi coding agent](https://pi.dev/). It brings workspace-based conversations, scheduled prompts, and optional sandboxing and conversation search to the browser while preserving Pi's native session format.
 
 ![ChatWCA web interface showing workspaces, conversations, and a Pi coding session](docs/assets/chatwca-interface.png)
 
+## Features
+
+- **Workspace-based conversations** with persistent history, editable titles, images, forks, and rewinds.
+- **Optional Linux sandboxing** with read-only or read-write mounts and administrator-defined network policies.
+- **Scheduled jobs** for recurring prompts, with optional trusted pre/post scripts.
+- **Conversation search** with local hybrid retrieval, optional provider reranking, and opt-in agent history tools.
+- **Extensible tools** through Brave Search and per-workspace HTTP integrations.
+
+> **Deployment model:** ChatWCA has no built-in authentication or per-client roles. Use it locally or behind an authenticated reverse proxy. Every accepted client has full application authority. Run only one ChatWCA server process per data/Pi state directory set.
+
 ## Requirements
 
-- Node.js **22.19.0 or newer** and npm.
-- A host supported by Pi, with at least one model/provider configured and available to the server process.
-- Read/search access to every directory registered as a workspace or read-only mount, read/write/search access to every read-write mount, read/write access to Pi's agent/session directory, and read/write access to ChatWCA's data directory. A workspace configured for workspace-local session storage must also be writable.
-- Network access from the **parent** to any remote model provider, configured HTTP-tool endpoints, and, when `BRAVE_SEARCH_API_KEY` is configured, `api.search.brave.com`. `PI_OFFLINE` intentionally disables Pi model network access but does not disable separately configured parent-owned tools.
-- To enable Workspace sandbox: Linux x86-64 or arm64 with unprivileged user/network namespaces, Bubblewrap **0.6.1+** at a canonical root-owned executable, `/usr/bin/node` **22.19.0+**, `/usr/bin/bash`, and ripgrep on the configured synthetic-root `PATH`. Sandboxing is Linux-only; disabled mode does not inspect these dependencies.
-- To build managed egress from source: stable Rust/Cargo and kernel support for capabilities, `NoNewPrivs`, seccomp, and `SCM_RIGHTS`. The running service uses the built architecture-specific native helper and integrity manifest, not Cargo. Managed egress also requires the base sandbox and remains disabled by default.
-- Scheduled jobs need no additional dependency unless trusted hooks are enabled. Hooks require executable `/usr/bin/bash` plus read/search access to administrator-owned script roots and run as the ChatWCA service user outside the workspace sandbox.
+- **Node.js 22.19.0+** and npm.
+- **Stable Rust/Cargo** to build the native network helper; both `npm run dev` and `npm run build` include this step.
+- A Pi-supported host with a configured model provider and credentials available to the server user.
+- Read/search access to workspace directories and write access to ChatWCA data, Pi state, and any writable mounts or workspace-local session stores.
+- Network access to configured remote model providers and tools.
 
-`npm ci` installs the Pi SDK and its local `pi` executable; a separate global Pi installation is not required. ChatWCA uses Pi's existing settings, credentials, context files, skills, and extensions. Configure those through Pi rather than ChatWCA—the web UI has no model or credential settings. You can inspect the models visible to the same installation with:
+Workspace sandboxing additionally requires Linux x86-64 or arm64, unprivileged user/network namespaces, Bubblewrap 0.6.1+, `/usr/bin/node` 22.19.0+, Bash, and ripgrep. See the [sandbox runbook](docs/bubblewrap-operations.md) and [managed-egress runbook](docs/network-sandbox-operations.md) before enabling these features. Both are disabled by default.
 
-```sh
-npx pi --list-models
-```
+## Quick start
 
-ChatWCA snapshots Pi's global `defaultProvider` and `defaultModel` from `<Pi agent directory>/settings.json` at server startup. When configured, that model is explicitly selected for every new, reopened, scheduled, forked, and rewound conversation in both security profiles. Saved session models and workspace `.pi/settings.json` model overrides do not take precedence. Historical messages retain their original model metadata; subsequent responses use the selected default. An incomplete, unknown, or unauthenticated configured default fails with `model_unavailable` rather than silently selecting another model. If neither default field is configured, Pi's normal automatic selection remains available. Restart ChatWCA after changing the global default; open conversations then use it when reopened. There is no browser model selector.
-
-The application is pinned to `@earendil-works/pi-coding-agent` **0.84.3**. See [docs/pi-sdk-notes.md](docs/pi-sdk-notes.md) for the validated SDK behavior.
-
-## Install and run
-
-Run commands from the repository root so the production server can find `dist/web`. The default SQLite location, `./data`, is also resolved from the server process's current working directory.
+Run commands from the repository root:
 
 ```sh
 npm ci
+npx pi --list-models
+npm run build
+CHATWCA_HOST=127.0.0.1 npm start
 ```
+
+Open **http://127.0.0.1:8787**. `npm start` uses the existing production build; it does not build first.
+
+`npm ci` installs the pinned Pi SDK (**0.84.3**) and its local CLI. A global Pi installation is not required. Configure providers, credentials, and defaults through Pi; ChatWCA has no browser model or credential settings.
+
+### Model selection
+
+At startup, ChatWCA reads `defaultProvider` and `defaultModel` from Pi's global `settings.json`. When configured, this default takes precedence over saved-session models and workspace model overrides for new and reopened conversations, jobs, forks, and rewinds. An incomplete, unknown, or unauthenticated default fails with `model_unavailable` rather than silently switching models. If neither field is set, Pi's automatic selection remains available.
+
+Restart ChatWCA after changing the global default. See the [SDK integration notes](docs/pi-sdk-notes.md) for compatibility details.
 
 ### Development
 
@@ -38,27 +51,11 @@ npm ci
 npm run dev
 ```
 
-This starts the backend on `http://0.0.0.0:8787` and Vite on `http://0.0.0.0:5173`. Open `http://127.0.0.1:5173` locally or use the host's LAN address with port `5173`. The Vite proxy is fixed to `http://127.0.0.1:8787`, so keep the backend reachable there when using the combined development command.
-
-The processes can also be run separately:
-
-```sh
-npm run dev:server
-npm run dev:web
-```
-
-### Production build and start
-
-```sh
-npm run build
-npm start
-```
-
-`npm run build` compiles the locked Rust helper for the host architecture, writes its executable and SHA-256/version manifest under `dist/native/<arch>/`, bundles the sandbox worker, and builds server/web assets. `npm start` runs the already-built `dist/server/server/index.js`; it does not build first. With default settings, open `http://127.0.0.1:8787` on the server or `http://<server-lan-address>:8787` from the trusted LAN. `0.0.0.0` is a bind address, not a browser destination.
+Open **http://127.0.0.1:5173**. This starts Vite on port `5173` and the backend on port `8787`, both bound to `0.0.0.0` by default. The Vite proxy targets `127.0.0.1:8787`; keep the backend reachable there. Use only on a trusted network.
 
 ### systemd
 
-A system service for this checkout and the `adrian` user is provided at [`systemd/chatwca.service`](systemd/chatwca.service). It uses `/usr/bin/node`, loads the optional repository `.env`, and runs the existing production build. Build before installing or restarting it:
+The supplied [service unit](systemd/chatwca.service) targets this checkout and the `adrian` user. Adjust its user and paths for your deployment, and ensure `/usr/bin/node` meets the version requirement. Build before installing:
 
 ```sh
 npm ci
@@ -68,323 +65,126 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now chatwca.service
 ```
 
-Inspect its state and logs with:
+After updates, reinstall dependencies, rebuild, and restart the service. Inspect logs with `journalctl -u chatwca.service -f`. Validate sandbox profiles under the actual service constraints before enabling them.
 
-```sh
-systemctl status chatwca.service
-journalctl -u chatwca.service -f
-```
+## Workspaces and conversations
 
-The unit preserves `NoNewPrivileges=true`, `KillMode=control-group`, process-wide `TasksMax=512`, and `LimitNOFILE=8192`, with namespace restrictions left disabled so Bubblewrap can create its own user/mount/PID/IPC/UTS/network namespaces. These limits are defense in depth for the whole service, **not** per-conversation quotas. Validate isolated and managed profiles under the exact service constraints before enabling either; see the [Bubblewrap](docs/bubblewrap-operations.md) and [managed-egress](docs/network-sandbox-operations.md) runbooks.
+1. Open **Manage workspaces → Add**.
+2. Enter a name and an existing directory on the **server**. An absolute path is recommended.
+3. Optionally enable **Store sessions in this workspace** to use `<workspace>/.chatwca/sessions` instead of Pi's default store. This choice cannot be changed later.
+4. Choose the security profile and any available mounts, network policy, or optional tools.
+5. Select the workspace, then create a conversation or open one from its history.
 
-After application updates, run `npm ci`, rebuild, and use `sudo systemctl restart chatwca.service`. If the checkout or user changes, update `User`, `WorkingDirectory`, `EnvironmentFile`, `ExecStart`, and `Documentation` in the service file.
+ChatWCA does not discover workspaces automatically. Workspace definitions persist, but the browser's selected workspace resets on a full page reload. Session history is loaded for the selected workspace, not scanned globally at startup.
 
-Operational endpoints are:
+Use **Workspace Info** to review effective policies and access grants. Close all live conversations before changing a workspace's path, mounts, security/network policy, or tool access. Removing a workspace unregisters its metadata only; files and Pi sessions remain. Delete any scheduled jobs referencing it first.
 
-```text
-GET /api/health
-GET /api/config
-GET /api/conversations/:conversationId/messages/:entryId/images/:imageIndex
-GET /api/conversations/:conversationId/workspace-images?path=<image-path>
-WS  /ws
-```
+**Fork** preserves the source conversation. **Rewind** replaces it with a fork and permanently deletes the source after successful fork creation. Closing a conversation only releases its runtime; it does not delete persisted history.
 
-## Workspace onboarding
+## Optional capabilities
 
-ChatWCA starts with no selected workspace. Before creating or opening a conversation:
+### Scheduled jobs
 
-1. Open **Manage workspaces** and choose **Add**.
-2. Enter a name and a directory path on the **server** machine. An absolute path is recommended. The directory must already exist and be readable/searchable by the server process.
-3. Optionally enable **Store sessions in this workspace**. It is disabled by default and cannot be changed after creation. Enabled workspaces use `<workspace>/.chatwca/sessions`; otherwise they use Pi's default session store.
-4. Select the security profile when the server permits it. **Workspace sandbox** routes the seven coding tools through a per-conversation Bubblewrap worker; **Unrestricted** retains the server user's full host authority. A sandbox can expose additional existing server directories at `/mounts/<name>` as read-only or read-write. Sources may be anywhere the service user can access except the workspace and protected ChatWCA, Pi, session, helper, or administrator-runtime paths. Read-write mounts require confirmation and let tools modify files outside the workspace. A sandbox defaults to **Isolated** networking. When an administrator explicitly enables it, **Managed egress** exposes only destination-filtered HTTP/HTTPS/WebSocket/SOCKS5 TCP proxies and requires confirmation. Select one administrator-defined **Destination policy**; its normalized domains and ports are disclosed read-only and cannot be widened in the browser. The sandbox still permits all workspace and `.git` changes. Managed destinations and the parent-configured remote model can receive readable workspace content.
-5. Optionally enable catalog-defined **Parent-owned HTTP tools**. They default off and can send model-selected readable workspace or mount content to their displayed fixed endpoints, even when sandbox networking is isolated.
-6. Optionally enable **Conversation history** (default off) to give the ordinary agent `conversation_search` and `conversation_read`. They search/read cached user/assistant dialogue across **all registered workspaces**, run outside workspace sandboxing, and can send retrieved dialogue to the conversation’s model provider; search may also use optional provider reranking. Search must be configured in optional mode. Disabled mode retains stored selection but grants no history tools.
-7. Select the workspace. Only then does ChatWCA ask Pi for sessions whose exact working directory is that workspace path, and it shows that workspace's conversations in the main view for you to choose.
-8. Create a new conversation or open one from the selected workspace's history. An open conversation's title can be edited from its header; the custom title is stored in Pi's native session metadata. From an eligible user message, **Fork** keeps the source conversation while **Rewind** replaces it with the fork and permanently deletes the source after fork creation succeeds.
+Use **Jobs** to run saved prompts at fixed intervals or daily in an explicit timezone. Jobs run without connected browsers and create persistent conversations using the workspace's current policy. **Run now** does not alter the recurring schedule.
 
-Workspace definitions persist across browser and server restarts, but browser selection is intentionally in memory only and resets after a full page load. During a browser session, the workspace list is ordered by most recently selected; that usage order resets with the browser selection after a full page load. Starting ChatWCA or connecting a browser loads the small SQLite workspace and job lists; it does **not** scan Pi session history. ChatWCA performs no automatic discovery or import of directories from existing global Pi history.
+Overlapping occurrences of the same job are skipped. After restart, unfinished attempts become `interrupted`, and each overdue enabled job receives at most one catch-up attempt. Jobs share the live-conversation limit with interactive work.
 
-You can use **Workspace Info** to inspect a workspace's path, availability, session-storage policy, stored/effective security and network policy, stored/effective destination-policy set, stored/effective HTTP and conversation-history tools, history availability, normalized grants, and disclosure warnings. Add/edit opens a keyboard-contained responsive modal; Escape closes only while idle and focus returns to the exact trigger. You can rename a workspace at any time. Changing its path, filesystem mounts, security profile, network type, destination-policy set, or tool access—or removing it—requires closing all live conversations in that workspace first. The session-storage policy cannot be edited. Removing a workspace unregisters only its ChatWCA metadata: the directory, its contents, and all Pi JSONL sessions are retained. A workspace referenced by a scheduled job cannot be removed until the job is deleted.
+Optional pre/post scripts run **outside the sandbox**, with the service user's host permissions. Scheduled prompts can disclose readable data to the model provider and incur costs unattended. See the [jobs runbook](docs/jobs-operations.md) for configuration, scheduling semantics, and troubleshooting.
 
-## Scheduled jobs
+### Conversation search
 
-The **Jobs** section configures recurring saved prompts for registered workspaces. Fixed intervals remain anchored to their server-assigned creation/edit instant and do not drift with run duration. Daily schedules use an explicit IANA timezone: a daylight-saving spring gap selects the first valid instant after the gap, while a fallback overlap runs once at the earlier instant. **Run now** does not move the recurring schedule.
+**Global Search** supports all-workspace or single-workspace queries, excerpts, and navigation to matching messages. It requires PostgreSQL 17 with pgvector, local Ollama embeddings, and `CHATWCA_SEARCH_MODE=optional`. Search is disabled by default; provision the database and run explicit migrations before enabling it.
 
-Jobs are process-global and continue with zero connected browsers. Every occurrence resolves the workspace's current effective policy and creates a new persistent Pi conversation using that workspace's default or workspace-local session setting. At startup, old queued/running attempts become `interrupted`; each overdue enabled job gets at most one catch-up attempt, not one per missed occurrence. A due occurrence overlapping its own active job is recorded as skipped. Jobs share `CHATWCA_MAX_LIVE_CONVERSATIONS` with interactive work.
+Retrieval is local. Optional Pi reranking is enabled by default and may send queries and excerpts to the configured provider; turn it off to keep search requests local. Search outages do not prevent chat or job startup.
 
-**Run exactly one ChatWCA server process per data/Pi state universe.** SQLite prevents same-job races inside one process but is not distributed scheduler leadership. Another ChatWCA process or Pi CLI can also become a concurrent Pi session writer.
+Per-workspace **Conversation history** tools are separately opt-in. They let the agent search/read cached dialogue across **all registered workspaces**, outside sandbox boundaries, and may send that dialogue to the conversation's model provider.
 
-Optional pre/post scripts are trusted host automation. They run outside Bubblewrap and managed egress as the service user, with the workspace as `cwd`, through fixed arguments equivalent to `/usr/bin/bash -- <canonical-script-path>`—never `bash -c`. Script roots are startup-only administrator configuration and must not overlap any workspace or mount. Prompt text, credentials, browser arguments, and arbitrary process environment are not forwarded, but a script still has all host/file/network authority naturally available to the service account. Scheduled prompts may send readable data to the model provider unattended and incur provider cost.
+See the [search runbook](docs/search-operations.md) and [history-tool documentation](docs/conversation-search-tool.md).
 
-See the [scheduled-jobs operations runbook](docs/jobs-operations.md) for safe layouts, exact scheduling/restart behavior, systemd cleanup, rollout/rollback, backup/restore, stable errors, and incident response.
+### Web and HTTP tools
 
-## Conversation search
+- Set `BRAVE_SEARCH_API_KEY` to enable the parent-owned `web_search` tool.
+- Copy [the example HTTP catalog](tool-catalog.example.json) to `tool-catalog.json`, set `CHATWCA_TOOL_CATALOG=./tool-catalog.json`, restart, and enable selected tools in **Add/Edit Workspace**.
 
-The [conversation-search design](docs/search-design.md) is implemented and released.
-Implemented foundations include startup-only configuration, a separate PostgreSQL 17/pgvector
-schema with explicit `npm run search:migrate` tooling, tested read-only scoped source,
-saved-branch extraction/message chunking, and a bounded local Ollama adapter with immutable
-model-digest signatures, plus an injectable atomic document/checkpoint repository with
-bounded transactions, paged scoped checkpoint/source-path lookup, and exact-input embedding
-reuse. The simplified per-document pipeline composes fingerprint skipping, reuse, cancellation,
-final source/model checks and atomic publication without authority capabilities. Retired
-authority/cleanup/workspace-preparation modules and obsolete tests have been removed.
-The serialized `SearchIndexer` syncs registrations, indexes configured stores,
-prunes safely, coalesces refresh/rebuild,
-and reports in-memory progress/errors. The local query service now combines parameterized
-lexical/exact-vector retrieval, model-space filtering, RRF, grouped excerpts and lexical
-fallback, with bounded admission/cancellation and cached results across restart/source
-outages. Synthetic worker-to-query composition is tested on disposable PostgreSQL.
-Optional mode now initializes asynchronously after listener readiness, checks schema
-compatibility without DDL, starts the worker and a 15-minute refresh timer, and exposes
-`POST /api/search`, `GET /api/search/status`, and `POST /api/search/{refresh,rebuild}`.
-Successful workspace changes, deletion/rewind and conversation rename request refresh;
-search outages never fail those mutations or chat/job startup. Disabled mode constructs
-no search pool, scans no history and probes no dependencies. Browser **Global Search**
-is now implemented: select All or one workspace, submit/Enter, cancel, inspect freshness,
-refresh or confirm a rebuild, and open an excerpt's matching message. The page remains
-available through initialization/outages when optional mode is configured. Query/results
-and the default-on Pi reranking selection stay in browser memory across page navigation
-(not reload or local storage). Stale/deleted conversations
-or missing branch entries show a notice; no branch is switched automatically. Excerpts
-are rendered as plain text. The API now supports default-on optional Pi reranking
-through the configured native OpenAI/OpenAI-Codex runtime, with local fallback and
-safe capability/reason metadata. The browser toggle sends the selected preference;
-turn it off (`rerank: false`) to keep requests fully local. Results explicitly label
-applied reranking, opt-out or local fallback with safe reasons. Unavailable capability
-never blocks local search or changes the user's selection. Synthetic browser-to-real
-API/faux-Pi checks cover ordering, scopes, message navigation and cancellation.
-Search defaults to `CHATWCA_SEARCH_MODE=disabled`; enable optional mode only after
-explicit rollout approval and database provisioning. Isolated synthetic tests need
-no service restart. This workstation's approved rollout is live and verified,
-including real-history search/message navigation and Pi reranking; see
-`checkpoint.md` for current deployment status.
-
-See [search provisioning and configuration](docs/search-operations.md) for all
-`CHATWCA_SEARCH_*` settings, least-privilege database setup, and isolated test instructions.
-PostgreSQL remains disposable derived state, not an authority for conversations.
-
-The new [Conversation history agent tools](docs/conversation-search-tool.md) are
-deployed on this workstation following explicit approval on 2026-10-03. They reuse
-this cache without new PostgreSQL migrations or worker access to history. SQLite schema
-v9 adds a default-off workspace selection; enable Conversation history in Add/Edit
-Workspace when idle. See `checkpoint.md` for validation and deployment status.
+These tools run in the parent process and remain available to isolated workspaces. Queries or arguments can contain readable workspace content. HTTP tools use fixed catalog endpoints and default to disabled per workspace. See the [HTTP-tool design](docs/http-tools-design.md).
 
 ## Configuration
 
-When started through the server entry point, ChatWCA loads an optional `.env` file from the repository/current working directory before reading its configuration. Copy the included template and edit it:
+The server loads an optional `.env` from its working directory. Shell environment variables take precedence. To start from the provided template:
 
 ```sh
 cp .env.example .env
 ```
 
-For example, set `CHATWCA_HOST` to an IP address assigned to the server. Variables already present in the shell environment take precedence over values in `.env`. The `.env` file is gitignored so credentials and machine-specific settings are not committed.
+**Review the template before starting:** it sets deployment-specific data and workspace paths, not just application defaults. Ensure those paths exist or can be created by the service user. `.env` is gitignored.
 
-The table below covers the current conversation/job/tool runtime settings. The in-progress
-`CHATWCA_SEARCH_*` settings are listed in the [search runbook](docs/search-operations.md#startup-only-configuration).
+| Variable | Application default | Purpose |
+|---|---|---|
+| `CHATWCA_HOST` | `0.0.0.0` | HTTP/WebSocket bind address; prefer `127.0.0.1` behind a proxy. |
+| `CHATWCA_PORT` | `8787` | HTTP/WebSocket port. |
+| `CHATWCA_DATA_DIR` | `./data` | SQLite data directory, relative to the server's working directory. |
+| `CHATWCA_MAX_LIVE_CONVERSATIONS` | `8` | Shared runtime limit; idle runtimes may be evicted, active ones are not. |
+| `CHATWCA_SHUTDOWN_GRACE_MS` | `10000` | Graceful shutdown deadline, up to five minutes. |
+| `CHATWCA_SANDBOX_MODE` | `disabled` | `disabled`, `optional`, or `required`. |
+| `CHATWCA_MANAGED_EGRESS_MODE` | `disabled` | `disabled` or `optional`; requires sandboxing. |
+| `CHATWCA_SEARCH_MODE` | `disabled` | `disabled` or `optional`. |
+| `CHATWCA_TOOL_CATALOG` | unset | Path to the HTTP-tool definition catalog. |
+| `BRAVE_SEARCH_API_KEY` | unset | Enables Brave Search. |
+| `PI_CODING_AGENT_DIR` | `~/.pi/agent` | Pi configuration, credentials, resources, and default sessions. |
+| `PI_OFFLINE` | unset | Disables Pi model network access by **presence**, even when set to `0`. Does not disable parent-owned tools. |
 
-| Variable | Default | Validation and behavior |
-|---|---:|---|
-| `CHATWCA_HOST` | `0.0.0.0` | Non-empty HTTP/WebSocket bind address. |
-| `CHATWCA_PORT` | `8787` | Integer from `1` through `65535`. |
-| `CHATWCA_DATA_DIR` | `./data` | Directory containing `chatwca.sqlite`. Relative values are resolved against the server process's current working directory. The directory is created at startup; an explicitly empty value is rejected. |
-| `CHATWCA_MAX_LIVE_CONVERSATIONS` | `8` | Positive integer. At capacity, the least-recently-used idle runtime is closed; active runtimes are never evicted. |
-| `CHATWCA_MAX_IMAGES` | `8` | Positive integer; maximum images in one prompt. |
-| `CHATWCA_MAX_IMAGE_BYTES` | `8388608` (8 MiB) | Positive integer; maximum decoded bytes for one image. |
-| `CHATWCA_MAX_TOTAL_IMAGE_BYTES` | `25165824` (24 MiB) | Positive integer; maximum aggregate decoded image bytes in one prompt. |
-| `CHATWCA_SHUTDOWN_GRACE_MS` | `10000` | Positive integer in milliseconds, capped at `300000` (5 minutes). |
-| `BRAVE_SEARCH_API_KEY` | unset | Non-empty server-only Brave Search API credential. Presence enables the parent-owned `web_search` tool for unrestricted and sandboxed conversations. The key is never returned to browsers or exposed to models/workspaces. |
-| `CHATWCA_WEB_SEARCH_TIMEOUT_MS` | `10000` | Positive aggregate timeout in milliseconds for one `web_search` tool call. |
-| `CHATWCA_TOOL_CATALOG` | unset | Optional path to a startup-only JSON HTTP-tool definition catalog. Relative paths resolve against the server process's current working directory. Definitions require a restart; each tool defaults off and is enabled per workspace in SQLite through Add/Edit Workspace. |
-| `CHATWCA_JOB_SCRIPT_ROOTS` | `[]` | JSON string array of existing absolute canonical trusted-script directories. Roots must be unique/non-overlapping, readable/searchable, and disjoint from every workspace, mount, and protected runtime path. Empty disables hooks but not scriptless jobs. |
-| `CHATWCA_JOB_HOOK_TIMEOUT_MS` | `300000` | Positive per-hook runtime in milliseconds, capped at `3600000` (1 hour). |
-| `CHATWCA_JOB_HOOK_MAX_OUTPUT_BYTES` | `1048576` | Positive aggregate stdout-plus-stderr byte limit for each hook. Overflow terminates the process group. |
-| `CHATWCA_SANDBOX_MODE` | `disabled` | `disabled`, `optional`, or `required`. Optional/required runs the real functional probe before listening; required needs at least one workspace root. |
-| `CHATWCA_BWRAP_PATH` | `/usr/bin/bwrap` | Absolute canonical root-owned Bubblewrap 0.6.1+ executable. Ignored in disabled mode. |
-| `CHATWCA_WORKSPACE_ROOTS` | `[]` | JSON string array of approved canonical roots. Non-empty roots apply in every mode. |
-| `CHATWCA_SANDBOX_RO_MOUNTS` | `[]` | JSON string array of administrator-trusted host files/directories mounted read-only at the same guest paths. |
-| `CHATWCA_SANDBOX_PATH` | `/usr/bin:/bin` | Absolute, empty-segment-free guest `PATH` covered by `/usr` or approved read-only mounts. |
-| `CHATWCA_SANDBOX_START_TIMEOUT_MS` | `5000` | Positive worker probe/handshake deadline in milliseconds. |
-| `CHATWCA_SANDBOX_COMMAND_TIMEOUT_MS` | `900000` | Positive hard maximum for a sandbox shell command. |
-| `CHATWCA_SANDBOX_MAX_COMMAND_OUTPUT_BYTES` | `67108864` | Positive total command-output bound; exceeding it terminates the worker. |
-| `CHATWCA_MANAGED_EGRESS_MODE` | `disabled` | `disabled` or `optional`. Optional requires sandbox optional/required, a non-empty allowlist, helper validation, and a real managed probe before listening. |
-| `CHATWCA_NETWORK_HELPER_PATH` | packaged `dist/native/<arch>/chatwca-network-helper` | Absolute canonical helper. In optional mode its owner/mode, ELF architecture, executable bit, protocol/build version, and packaged-manifest SHA-256 must match. Disabled mode does not inspect it. |
-| `CHATWCA_NETWORK_ALLOWED_DOMAINS` | `[]` | Global destination ceiling as a JSON string array of exact hosts, `*.` subdomain-only patterns, `**.` apex-plus-subdomain patterns, or `*` for every normalized host. The global wildcard still permits only public resolved/literal addresses and configured ports. Browser clients cannot modify it. Non-empty in optional mode. |
-| `CHATWCA_NETWORK_DENIED_DOMAINS` | `[]` | JSON string array using the same syntax. Explicit deny always wins. |
-| `CHATWCA_NETWORK_ALLOWED_PORTS` | `[80,443]` | Unique JSON integer array; each port is `1`–`65535`. This is the global port ceiling. |
-| `CHATWCA_NETWORK_POLICY_SETS` | unset | Optional closed JSON array of administrator-defined `{id,label,allowedDomains,allowedPorts}` sets. IDs are 1–64 character lowercase ASCII slugs (`a-z`, `0-9`, `_`, `-`, with alphanumeric ends); labels are 1–128 trimmed characters. An explicit array must be non-empty, contain exactly one `default`, and give every set non-empty unique domain/port lists whose normalized entries are exact members of the corresponding global ceiling. Unknown keys/types, duplicate IDs, wildcard-containment inference, and browser-authored rules are rejected. Unset synthesizes `default` from the complete global allowlists for compatibility. |
-| `CHATWCA_NETWORK_MAX_CONNECTIONS` | `32` | Positive per-conversation concurrent outbound proxy connection limit, shared by HTTP and SOCKS. |
-| `CHATWCA_NETWORK_CONNECT_TIMEOUT_MS` | `10000` | Positive aggregate DNS-and-connect/setup deadline; also bounds incomplete proxy handshakes/headers. |
-| `CHATWCA_NETWORK_IDLE_TIMEOUT_MS` | `300000` | Positive bidirectional idle deadline. |
-| `CHATWCA_NETWORK_MAX_CONNECTION_BYTES` | `1073741824` | Positive aggregate bidirectional byte limit for one connection. |
-| `PI_CODING_AGENT_DIR` | Pi default (`~/.pi/agent`) | Non-empty Pi configuration, credential, resource, and session root. Prefer an absolute path. Changing it selects a different Pi history/configuration universe. |
-| `PI_OFFLINE` | unset | Pi offline mode is enabled by the variable's **presence**, regardless of value; even `PI_OFFLINE=0` enables it. Remove/unset the variable to disable offline mode. |
+Configuration is startup-only. Consult [.env.example](.env.example) and the feature runbooks for full settings and validation rules. Image defaults are 8 images per prompt, 8 MiB per image, and 24 MiB total; the fixed WebSocket command limit is 40 MiB.
 
-All numeric limits above accept positive safe integers; startup fails with a specific configuration message for invalid values. Provider-specific credential environment variables are consumed by Pi, not parsed or returned by ChatWCA. Their names depend on the configured Pi provider; use Pi's provider documentation or credential store. Credentials and `PI_CODING_AGENT_DIR` are never included in `/api/config`.
+## Security
 
-### Workspace HTTP tools
+- **Protect the listener.** Prefer loopback binding behind a reverse proxy requiring client certificates (mTLS) for HTTP and WebSocket connections. Preserve the browser-facing `Host` header and proxy `/ws` upgrades. Same-origin checks are not authentication; direct LAN access requires firewall isolation.
+- **Choose authority deliberately.** Unrestricted tools have the service user's full host authority. Sandboxing limits coding tools, not browser access or per-conversation CPU, memory, process, disk, or bandwidth usage. Accepted clients can configure mounts to non-protected directories accessible to the service user.
+- **Treat mounts as data grants.** Read-only mounts disclose content to tools and models; read-write mounts also permit changes outside the workspace. Sandboxing still permits workspace and `.git` modifications.
+- **Understand network boundaries.** Isolated sandbox tools have no network access. Managed egress permits only administrator-defined public destinations through filtered proxies; it is not data-loss prevention. Allowed destinations can receive readable content and return untrusted code or data.
+- **Account for parent-owned capabilities.** Model requests, Brave Search, HTTP tools, history tools, and trusted job hooks operate outside the sandbox's network boundary. Sandboxed runtimes disable arbitrary Pi extensions, extension-only providers, skills, and prompt packages.
+- **Avoid concurrent writers.** Do not run multiple ChatWCA processes against the same state or edit a live session through another Pi process.
 
-Copy [`tool-catalog.example.json`](tool-catalog.example.json) to the gitignored `tool-catalog.json` and set `CHATWCA_TOOL_CATALOG=./tool-catalog.json`. The catalog contains definitions only; catalog changes require a server restart. Enable available tools per workspace in **Add/Edit Workspace**. New and migrated workspaces default to none enabled.
+Sandbox or managed-egress failures never silently fall back to unrestricted tools. Review the [sandbox](docs/bubblewrap-operations.md) and [managed-egress](docs/network-sandbox-operations.md) runbooks for rollout procedures and residual risks.
 
-Selections are stored in SQLite. If a selected definition is removed from the catalog, Workspace Info shows the stored name as unavailable and it contributes no executable tool; the selection can be removed while the workspace is idle. Tool access cannot change while that workspace has a live conversation, and a live runtime retains its captured tool set.
+## Storage and backups
 
-The initial contract supports fixed JSON `POST` endpoints with object-shaped JSON Schema parameters; tool input becomes the request body, redirects are disabled, and successful responses must be bounded JSON. HTTP tools execute in the parent process, so an enabled tool remains callable from an isolated workspace without opening general sandbox networking. Arguments may contain readable workspace or mount content, and returned JSON is untrusted. The example `network_brain_search` tool requires the separate Network Brain API at `http://127.0.0.1:53147`.
+ChatWCA keeps application metadata in `CHATWCA_DATA_DIR/chatwca.sqlite`: workspaces, access selections, job definitions, scheduling state, and bounded run diagnostics. Pi's native JSONL sessions remain authoritative for conversation messages, images, and titles. PostgreSQL search data is a rebuildable cache, not a conversation store.
 
-### Named destination-policy compatibility and rollout
-
-`CHATWCA_NETWORK_ALLOWED_DOMAINS` and `CHATWCA_NETWORK_ALLOWED_PORTS` remain the process-wide security ceiling. A named set can only remove grants: each normalized pattern and port must literally occur in its corresponding ceiling. For example, ceiling entry `**.example.com` does **not** make set entry `api.example.com` valid; list both globally if both must be independently selectable. The exact entry `*` grants a selected set every normalized public host, including public IP literals, but never bypasses explicit denies, non-public-address rejection, configured ports, protocol restrictions, DNS pinning, or resource limits.
-
-When `CHATWCA_NETWORK_POLICY_SETS` is absent—not present with an empty value—ChatWCA synthesizes `default` from the complete global allowlists. This preserves the previous single-global-policy behavior. Schema v5 adds `network_policy_set_id`; every v1–v4 workspace migrates transactionally through the existing steps and receives `default`, without starting a helper or proxy. Schema v6 adds an initially empty per-workspace filesystem-mount table. An existing managed workspace whose stored set is removed remains stored unchanged but becomes unusable with `managed_egress_policy_set_unavailable`; ChatWCA never substitutes another set.
-
-Configuration is startup-only and requires a server restart. A live runtime holds the exact compiled set object and ID captured at creation and never re-reads browser or administrator state. A restart closes those runtimes; subsequently opened runtimes use the new configuration. Safely replace or remove a set by first adding its replacement and restarting, then closing affected conversations and explicitly changing each workspace, verifying no workspace still selects the old ID, and only then removing the old set and restarting again. See the [managed-egress runbook](docs/network-sandbox-operations.md).
-
-Example:
+Sessions use Pi's default store or `<workspace>/.chatwca/sessions`. They remain compatible with the matching Pi CLI. For workspace-local history, run from that workspace:
 
 ```sh
-CHATWCA_HOST=127.0.0.1 \
-CHATWCA_PORT=8787 \
-CHATWCA_DATA_DIR=/var/lib/chatwca \
-npm start
+npx pi --session-dir .chatwca/sessions -r
 ```
 
-### Payload and flow-control defaults
+A new conversation becomes durable after its first assistant message finishes, including a terminal error or abort response. Empty and user-only conversations do not survive a server restart.
 
-| Boundary | Default |
-|---|---:|
-| Accepted image types | PNG, JPEG, WebP |
-| Browser resize maximum | 2048 px on the longest edge |
-| Images per prompt | 8 |
-| Decoded bytes per image | 8 MiB |
-| Aggregate decoded image bytes per prompt | 24 MiB |
-| Complete inbound WebSocket command | 41943040 bytes (40 MiB), fixed |
-| Tool-result text exposed in a browser snapshot/event | 65536 UTF-8 bytes (64 KiB), fixed |
-| WebSocket outbound high-water mark per client | 524288 bytes (512 KiB), fixed |
-| Additional outbound application queue per client | 4194304 bytes (4 MiB), fixed |
-| Persistent slow-client timeout | 5000 ms, fixed |
+For a consistent file-copy backup, stop ChatWCA and copy:
 
-Image count and byte defaults are controlled by the corresponding environment variables and are returned to the browser by `/api/config`. The browser performs preliminary checks and resizing; the server remains authoritative, validates canonical padded base64 and file signatures, and counts actual decoded bytes. Image data on the wire is raw base64 without a `data:` URL prefix. Raising image limits does **not** raise the fixed 40 MiB WebSocket command limit.
+1. The entire `CHATWCA_DATA_DIR`.
+2. Pi's configured agent/session directory.
+3. Every workspace-local `.chatwca/sessions` directory.
+4. The deployment `.env`, HTTP-tool catalog, and any other administrator-managed configuration or scripts.
 
-Tool-result text is bounded only in the browser projection; Pi's native session remains canonical. Supported images attached to tool results are displayed inline through a same-origin, no-store HTTP URL backed by the open conversation's canonical Pi entry, so their base64 data is not repeated in WebSocket snapshots. Markdown image and image-link destinations ending in PNG, JPEG, or WebP are resolved against the open conversation's workspace and rewritten to a same-origin endpoint. Absolute, `file:`, and `sandbox:` image paths are accepted only when their canonical target remains inside that workspace; symlink escapes, unsupported formats, oversized files, and non-image signatures are rejected. This allows a generated workspace image to appear from ordinary Markdown without exposing a general workspace file server. Under backpressure, cumulative tool/history updates may be coalesced. A client that remains slow is closed and can reconnect to obtain an authoritative snapshot; its disconnect does not stop server-side runs.
+SQLite uses WAL mode: copying only `chatwca.sqlite` while running is not a safe backup. Restore while stopped. Job metadata alone cannot restore generated conversations.
 
-## Network and security behavior
-
-The browser client uses `/api/*` and `/ws` on the same authority that served the page. ChatWCA does not enable broad CORS. Browser WebSocket upgrades are accepted only when the `Origin` authority matches the request `Host`; direct clients that omit `Origin` are accepted. This check reduces cross-site WebSocket abuse but **is not authentication**. The recommended remote deployment is loopback binding behind a reverse proxy that requires and validates client certificates (mTLS) for both HTTP and WebSocket upgrades. Preserve the browser-facing `Host` header. Firewall isolation is still required when binding directly to a LAN address. Every client accepted by the proxy/firewall retains full ChatWCA authority; there are no per-client roles.
-
-Workspace sandboxing is a tool boundary, not an access-control or resource-quota system. It includes every workspace-specific filesystem mount: read-only mounts disclose their contents to tools and the model, while read-write mounts also permit modification outside the workspace. Because ChatWCA has no authentication, every accepted client can configure mounts to any non-protected directory accessible to the service user. **Isolated** tools have no network access. **Managed egress** keeps direct IPv4, IPv6, DNS, arbitrary loopback, local/LAN/metadata, UDP, inbound, and Unix-socket networking blocked; only two conversation-owned guest-loopback bridges reach parent proxies. Every connection is checked against the workspace's immutable administrator-defined named set, the process-wide domain/port ceiling and denials, and public-address-only DNS validation before dialing one pinned numeric address. Concurrent conversations own distinct proxies and cannot select each other's set. Managed workers receive the host's public CA certificate directory read-only so HTTPS clients can authenticate servers. HTTPS remains opaque end-to-end—ChatWCA installs no private CA and cannot restrict encrypted methods or content.
-
-Managed egress is not data-loss prevention. Any allowed destination can receive workspace content through paths, queries, headers, bodies, TLS, or protocol payloads and may return malicious packages/scripts/content. Model requests still leave through the separate parent path. When configured, `web_search` is another parent-owned path: model-authored queries go only to Brave Search, even for an isolated workspace, and returned snippets are untrusted; it does not let tools fetch result pages or bypass the managed destination policy. Explicitly granted workspace HTTP tools are also parent-owned paths to their fixed catalog URLs and remain available under isolated networking; their arguments can contain readable workspace data and their JSON responses are untrusted. The sandbox cannot prevent harmful workspace, `.git`, hook, dependency, or build-script changes, and it has no per-conversation CPU, memory, process, disk, or bandwidth quota. Sandboxed runtimes disable arbitrary Pi extensions, extension-only providers, skills, and prompt packages; use an administrator-configured native provider. See the [Bubblewrap](docs/bubblewrap-operations.md) and [managed-egress](docs/network-sandbox-operations.md) runbooks for rollout and residual risks.
-
-Use a single ChatWCA process. The process-wide registry prevents duplicate live writers inside that process, but it does not coordinate session writes with another ChatWCA or Pi CLI process.
-
-## Storage, backup, and Pi compatibility
-
-ChatWCA uses two independent stores:
-
-- `./data/chatwca.sqlite` contains registered workspace metadata, workspace-specific mount and HTTP-tool selections, scheduled-job definitions/scheduling state, and bounded run/hook diagnostics. Schema v5 migration gives every prior workspace the set ID `default`; schema v6 gives every prior workspace an empty mount list; schema v7 adds empty job/run tables; schema v8 gives every prior workspace an empty HTTP-tool selection; schema v9 stores the conversation-history tool selection, disabled by default. `CHATWCA_DATA_DIR` changes its parent directory. The repository's `/data/` rule ignores the database and its `-wal`, `-shm`, and journal sidecars.
-- Pi's native append-only JSONL store remains canonical for messages, images, editable conversation titles, and conversation metadata. A workspace uses either Pi's default session store under `~/.pi/agent/sessions` (affected by `PI_CODING_AGENT_DIR`) or its own `<workspace>/.chatwca/sessions` directory. ChatWCA does not copy Pi sessions into SQLite or maintain a separate image store.
-
-At startup and browser connection ChatWCA reads the small SQLite workspace/job projections only. Selecting a workspace invokes `SessionManager.list()` for that exact working directory and its configured session location. Open and delete operations are authorized by another fresh listing in the same workspace; normal application operation never performs a global `SessionManager.listAll()` scan and never parses JSONL to build history.
-
-Sessions are created by the pinned Pi 0.84.3 SDK and remain usable by a matching Pi CLI. For workspace-local history, run Pi from that workspace with `npx pi --session-dir .chatwca/sessions -r`, or open a JSONL file directly with `--session`. Avoid writing the same session concurrently from ChatWCA and another Pi process. Closing a conversation or idle LRU eviction disposes only its live runtime; persisted history remains and can be reopened. Conversation deletion removes the freshly listed Pi JSONL file and is allowed only after its live runtime is closed.
-
-A new persistent session has an ID and prospective path but no file yet. It becomes durable when its first assistant message finishes (including a terminal error/abort response). Empty and user-only conversations are therefore absent from history and do not survive a process restart.
-
-### Backups
-
-Back up the ChatWCA data directory, Pi's agent/session directory, and the `.chatwca/sessions` directory of every workspace using local storage. SQLite runs in WAL mode, so copying only `chatwca.sqlite` while the server is running can omit committed workspace changes or produce an inconsistent backup. The safest file-copy procedure is:
-
-1. shut down ChatWCA cleanly and wait for the process to exit;
-2. copy the entire configured `CHATWCA_DATA_DIR`;
-3. copy the Pi directory selected by `PI_CODING_AGENT_DIR` (or Pi's default agent directory); and
-4. copy each workspace that uses workspace-local session storage, including its `.chatwca/sessions` directory; and
-5. separately copy the configured HTTP tool catalog and deployment `.env` (SQLite contains selections, not definitions).
-
-A SQLite-aware online backup tool may be used while running, but a plain file copy must account for the database, `-wal`, and `-shm` files as one consistent set. Restore backups while ChatWCA is stopped. On the first restored startup, nonterminal job runs become interrupted and overdue enabled schedules apply the one-catch-up rule. SQLite run rows do not contain conversation messages, so restoring job metadata without the corresponding Pi/default and workspace-local session stores leaves generated-conversation links unavailable.
-
-## Graceful shutdown
-
-Send `SIGINT` (for example, Ctrl-C) or `SIGTERM`. Shutdown is idempotent and:
-
-1. rejects new conversation and job CRUD/run admission and cancels scheduler timers;
-2. stops accepting HTTP/WebSocket connections and sends connected clients a shutdown notice;
-3. terminates active hook process groups and requests aborts for active Pi runs;
-4. records unfinished job attempts as `interrupted`, seals late runner persistence, and disposes subscriptions/live runtimes; and
-5. closes network transports and then SQLite.
-
-The whole graceful phase is bounded by `CHATWCA_SHUTDOWN_GRACE_MS`. At the deadline ChatWCA terminates remaining sockets/connections and invokes runtime disposal without waiting for a stalled SDK promise. Completed Pi entries remain durable. An in-progress response may be persisted as aborted depending on how far Pi progressed. A browser disconnect by itself does not trigger shutdown or stop a run.
+`SIGINT` or `SIGTERM` initiates bounded graceful shutdown, stops job admission, aborts active work, and closes runtimes and storage. A browser disconnect does not stop server-side runs.
 
 ## Troubleshooting
 
-### A scheduled job is blocked, skipped, or failed
+| Symptom | First checks |
+|---|---|
+| `model_unavailable` | Run `npx pi --list-models` as the service user with the same environment; verify Pi's global default and credentials, then restart. Unset `PI_OFFLINE` for remote providers. |
+| Workspace unavailable | Restore access to the registered server path, or close its live conversations and edit the path. |
+| `live_runtime_limit` | Wait for or abort active work, close conversations, or raise the limit and restart. |
+| WebSocket `403` or reconnects | Use the same scheme/host/port for the UI and WebSocket; preserve `Host` and upgrade headers through the proxy. |
+| Database/session errors | Check permissions, disk space, session files, and concurrent writers; inspect private server logs. |
+| Sandbox, network, or job failures | Follow the corresponding [sandbox](docs/bubblewrap-operations.md), [network](docs/network-sandbox-operations.md), or [jobs](docs/jobs-operations.md) runbook. |
 
-- `job_script_roots_unavailable`: configure a non-empty JSON root list, restart, and verify `/usr/bin/bash`; scriptless jobs remain valid with `[]`.
-- `job_script_invalid` / `job_script_unavailable`: use a readable regular non-symlink script at its canonical path beneath exactly one root. Keep roots disjoint from workspaces, mounts, data, Pi state/sessions, and runtime/helper paths. The latter code means a previously accepted path changed or disappeared before execution.
-- `workspace_unavailable`, `sandbox_workspace_rejected`, `managed_egress_policy_set_unavailable`, or another workspace/network code: repair the current workspace policy. Every occurrence resolves it afresh and runs no hook when policy admission fails.
-- `job_pre_run_failed`, `job_post_run_failed`, `job_hook_timeout`, or `job_hook_output_limit`: inspect the explicit run detail as a trusted client and the private service log. A pre-hook failure has no conversation; a post-hook failure retains the completed conversation. Hook output can be sensitive and is stored in SQLite.
-- `live_runtime_limit`: all slots are active. Scheduled attempts are persisted as skipped; wait/abort/close work or raise the startup-only limit. `job_already_running` means same-job exclusion deliberately rejected/skipped overlap.
-- `job_prompt_failed`: inspect the generated conversation and provider/service logs. There are no automatic retries.
-- `job_interrupted`: expected after shutdown/crash recovery. The attempt is never resumed; normal one-catch-up scheduling is separate.
-
-Confirm the host clock is synchronized and timezone data is current when a daily next-run time is surprising. Do not edit `next_run_at` or run rows directly. See [docs/jobs-operations.md](docs/jobs-operations.md).
-
-### No model is configured or available
-
-`model_unavailable` during conversation creation/opening means the configured global default is incomplete, unknown, or lacks configured authentication. At prompt preflight it means Pi rejected the model prompt; a missing model or credential is the common cause.
-
-1. Run `npx pi --list-models` as the same OS user, from the same shell, and with the same `PI_CODING_AGENT_DIR`/provider environment as ChatWCA.
-2. Configure `defaultProvider` and `defaultModel` in Pi's global `settings.json` and the corresponding credential in Pi; ChatWCA cannot do this in the web UI.
-3. If network catalog access is needed, make sure `PI_OFFLINE` is completely unset—not set to `0` or an empty string—and verify provider/network access.
-4. Restart ChatWCA after changing Pi configuration or credentials.
-
-A failure after a prompt was accepted appears in the streamed assistant/error state as `model_failed`; inspect the server terminal and Pi diagnostics for the provider-side cause.
-
-### Workspace is unavailable
-
-A registered workspace is retained in SQLite when its directory disappears or becomes inaccessible, but it is marked **Unavailable** and cannot list, create, or open conversations. Restore a readable/searchable directory at the exact registered path, then reselect or refresh the workspace. If the project permanently moved, use **Edit workspace** to register its new canonical path; path changes require all live conversations in that workspace to be closed.
-
-ChatWCA intentionally does not override the working directory recorded in a Pi session header. Sessions discovered for a different directory are not admitted to the selected workspace. There is no UI for rewriting or relocating a stored Pi session.
-
-### Workspace sandbox is blocked or startup fails
-
-- `sandbox_disabled`: the stored workspace requests sandboxing while server mode is disabled. This is fail-closed; change mode after validating the host, or explicitly downgrade the workspace with the UI warning.
-- `sandbox_configuration_error` / `sandbox_unavailable`: verify the JSON environment values, canonical root-owned Bubblewrap executable, unprivileged namespaces, `/usr/bin/node`, Bash, ripgrep, roots, and read-only mounts. Optional and required mode intentionally fail before binding.
-- `sandbox_workspace_rejected`: move data and Pi state outside the workspace, avoid overlap among the workspace, protected paths, and additional mounts, make `.chatwca` a real directory, and remove all Unix sockets from the workspace and mounted trees. A checkout containing default `./data` cannot itself be sandboxed until `CHATWCA_DATA_DIR` moves elsewhere.
-- `invalid_workspace_mount` / `mount_unavailable`: use an existing canonical server directory, a unique lowercase mount name, sufficient read/search (and, for read-write, write) permission, no overlap with protected paths or other mounts, and no Unix sockets. Close live conversations before changing mounts.
-- `sandbox_worker_start_failed` / `sandbox_worker_failed`: close/reopen only after correcting the host problem. ChatWCA never retries with unrestricted tools.
-
-Normal logs and CI output contain stable redacted codes, not worker stderr, paths, commands, output, or stacks. Run `npm run spike:sandbox-profile` interactively as the service user for the base profile and `npm run test:sandbox-real` for the production isolated+managed profiles. Consult the [Bubblewrap](docs/bubblewrap-operations.md) and [managed-egress](docs/network-sandbox-operations.md) runbooks. Treat detailed local probe output as private operational data.
-
-### Managed egress is blocked or startup/runtime fails
-
-- `managed_egress_disabled`: the workspace retains a managed request while server mode is disabled. It is intentionally unusable, not silently converted to isolated; close live conversations and explicitly select isolated or complete the administrator rollout.
-- `network_policy_invalid`: correct JSON types, duplicates, domain syntax, ports, positive safe-integer limits, or named-set structure. Optional mode requires at least one global allow entry. Every explicit set must include only exact normalized members of the global domain/port ceiling; wildcard containment is deliberately not inferred, and exactly one `default` set is required.
-- `network_helper_unavailable`: rebuild/install the helper for this architecture and verify canonical path, owner/mode, executable bit, version/protocol, packaged manifest hash, and separation from every workspace/protected path.
-- `network_proxy_start_failed` / `network_bridge_start_failed`: verify data-directory permissions/path length, descriptor/task limits, namespaces, capabilities, `NoNewPrivs`, seccomp, and the exact systemd controls. Optional mode refuses to listen when its startup probe fails.
-- `network_proxy_failed`: an active parent proxy failed; the conversation enters error and no isolated/unrestricted fallback is attempted. Close it, inspect redacted `network.policy`/stable error records, verify cleanup, fix the host cause, and reopen.
-- `network_destination_blocked`: ordinary policy denial. Check the workspace's effective set, normalized administrator patterns/ports, global denial, and denial reason; there is no browser approval action. Never widen policy merely to bypass local/private/DNS safeguards.
-- `managed_egress_policy_set_unavailable` (workspace issue): the selected administrator set was removed or renamed. The stored ID is intentionally retained and the workspace fails closed. Re-add the exact set and restart, or close its live conversations and explicitly select an available replacement or Isolated. Do not edit SQLite or silently map it to `default`.
-
-Policy-set configuration is not hot-reloaded. For additions, replacements, removals, and rollback, use the staged procedure above so an old live runtime never appears to change authority. Rollback by setting `CHATWCA_MANAGED_EGRESS_MODE=disabled` and restarting. Stored managed workspaces then remain policy-blocked until explicitly changed to isolated. Follow the managed runbook for hash verification, stale sockets, incident shutdown, and cgroup cleanup.
-
-### WebSocket origin mismatch or repeated reconnects
-
-A rejected browser upgrade usually appears as HTTP `403` for `/ws` in browser developer tools. Load the UI and WebSocket from the same scheme/host/port. When using a reverse proxy, preserve the browser-facing `Host` header (including a non-default port) on the WebSocket upgrade and proxy `/ws` with upgrade support. Do not serve the UI from one hostname while directing its WebSocket to another. HTTP health can be checked independently at `/api/health`.
-
-### Database, session, or runtime errors
-
-- `database_error`: verify that `CHATWCA_DATA_DIR` and `chatwca.sqlite` are writable by the server user, that the filesystem has free space, and that another ChatWCA process is not using the deployment. Inspect the server terminal for the private SQLite diagnostic.
-- `workspace_unavailable`: restore access at the registered path or close the workspace's live conversations and update the path.
-- `session_file_missing` / `session_not_listed`: the JSONL file was removed, is no longer returned from the selected workspace's configured session directory, or is outside that directory. Refresh scoped history; restore it from backup if it was removed externally.
-- `session_unavailable`: verify read/write permissions for the session file and its Pi directories.
-- `pi_runtime_create_failed`: verify the stored or new working directory, Pi settings, credentials, extensions, and filesystem permissions by running Pi in the same working directory and environment.
-- `pi_runtime_replace_failed`: a fork/runtime replacement failed. The source-preserving fork path leaves the original conversation unchanged; close/reopen an idle errored conversation and reproduce the operation in Pi's own interface before retrying.
-- `live_runtime_limit`: all configured runtime slots are active, so no idle conversation can be evicted. Wait for or abort a run, close an idle conversation, or raise `CHATWCA_MAX_LIVE_CONVERSATIONS` and restart.
-
-Public WebSocket errors deliberately omit SDK details, local paths, and stacks. Startup and unexpected listener/protocol failures are reported in the server terminal; expected command failures may expose only their stable public code. Reproduce those failures with Pi in the same working directory and environment to obtain Pi-side diagnostics. If a session was edited or deleted by another process while live, stop concurrent writers, restart ChatWCA, and recover from the canonical Pi JSONL/backup rather than editing it through ChatWCA.
+Use `GET /api/health` to check HTTP availability. Public errors intentionally omit sensitive paths and SDK details; service logs may contain additional diagnostics.
 
 ## Development checks
 
-This project does not use GitHub Actions. Run the checks locally before committing or releasing changes.
+Run checks locally before committing or releasing; this project does not use GitHub Actions.
 
 ```sh
 npm run typecheck
@@ -395,31 +195,21 @@ npm run test:browser
 npm run test:sdk-smoke
 npm run test:native
 npm run test:native:architectures
-# Linux host explicitly declared sandbox-capable; isolated and managed failures never skip:
+# Requires a sandbox-capable Linux host:
 npm run test:sandbox-real
 ```
 
-Search schema tests are separately opt-in through `CHATWCA_SEARCH_TEST_DATABASE_URL`;
-use only a disposable pgvector database as described in the [search runbook](docs/search-operations.md#development-checks).
-
-The SDK smoke test uses temporary Pi state and a faux provider; it does not require paid credentials or network access. Browser tests use a deterministic fixture server. On a declared sandbox-capable Linux host, `npm run test:release-gates` runs the complete sequence above.
+`npm run test:release-gates` runs the full sequence. SDK smoke tests use temporary state and a faux provider; browser tests use a deterministic fixture server. Search database tests are separately opt-in and require a disposable pgvector database; see [search development checks](docs/search-operations.md#development-checks).
 
 ## Documentation
 
-- [Technical design](docs/design.md)
-- [Validated Pi SDK integration notes](docs/pi-sdk-notes.md)
-- [Bubblewrap design](docs/bubblewrap-design.md)
-- [Bubblewrap operations runbook](docs/bubblewrap-operations.md)
-- [Sandbox acceptance-criteria mapping](docs/bubblewrap-acceptance.md)
-- [Managed-egress operations runbook](docs/network-sandbox-operations.md)
-- [Managed network acceptance mapping](docs/network-sandbox-acceptance.md)
-- [Managed network design](docs/network-sandbox-design.md)
-- [Scheduled-jobs design](docs/jobs-design.md)
-- [Scheduled-jobs operations runbook](docs/jobs-operations.md)
-- [Conversation-search design (in progress)](docs/search-design.md)
-- [Search foundation/provisioning runbook](docs/search-operations.md)
-- [Implementation plan](plan.md)
+- [Application design](docs/design.md) and [Pi SDK integration](docs/pi-sdk-notes.md)
+- [Sandbox design](docs/bubblewrap-design.md), [operations](docs/bubblewrap-operations.md), and [acceptance criteria](docs/bubblewrap-acceptance.md)
+- [Managed network design](docs/network-sandbox-design.md), [operations](docs/network-sandbox-operations.md), and [acceptance criteria](docs/network-sandbox-acceptance.md)
+- [Scheduled jobs design](docs/jobs-design.md) and [operations](docs/jobs-operations.md)
+- [Conversation search design](docs/search-design.md), [operations](docs/search-operations.md), and [agent history tools](docs/conversation-search-tool.md)
+- [HTTP tools](docs/http-tools-design.md) and [fork/rewind semantics](docs/revision-semantics.md)
 
 ## License
 
-ChatWCA is licensed under the [MIT License](LICENSE).
+[MIT](LICENSE).

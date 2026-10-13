@@ -1,6 +1,6 @@
 # Pi SDK integration notes
 
-**Validated version:** `@earendil-works/pi-coding-agent` 0.84.3
+**Validated version:** `@earendil-works/pi-coding-agent` 1.2.0
 
 **Required Node version:** 22.19.0 or newer
 
@@ -102,12 +102,12 @@ These notes record the concrete SDK behavior on which ChatWCA relies. They are a
 
 ## Strict sandbox resources and tools (Phase 6)
 
-The installed package and runtime exports were re-verified at `0.84.3` before implementing the strict adapter:
+The installed package and runtime exports were re-verified at `1.2.0` when upgrading the strict adapter:
 
 - `createReadToolDefinition`, `createWriteToolDefinition`, `createEditToolDefinition`, `createBashToolDefinition`, `createLsToolDefinition`, `createGrepToolDefinition`, and `createFindToolDefinition` are exported. ChatWCA uses them only to obtain pinned names, labels, descriptions, TypeBox schemas, prompt snippets/guidelines, and edit argument preparation; none of their `execute` functions or TUI renderers are retained.
-- `createAgentSessionFromServices()` accepts both `customTools` and a `tools` allowlist. In 0.84.3 a custom definition replaces the same-name built-in in the final registry, while the allowlist filters built-in, extension, and SDK tools. Sandboxed sessions pass the same seven worker-backed coding names plus explicitly selected app-owned parent tool names in both places and contract-test `session.agent.state.tools`.
+- `createAgentSessionFromServices()` accepts both `customTools` and a `tools` allowlist. In 1.2.0 a custom definition replaces the same-name built-in in the final registry, while the allowlist filters built-in, extension, and SDK tools. Sandboxed sessions pass the same seven worker-backed coding names plus explicitly selected app-owned parent tool names in both places and contract-test `session.agent.state.tools`.
 - `ResourceLoader` is a small public interface, and `createExtensionRuntime()` is exported. The strict loader follows the SDK's `examples/sdk/12-full-control.ts` pattern rather than wrapping `DefaultResourceLoader`; therefore package, extension, skill, prompt, theme, system/append-prompt, and ancestor-context discovery never starts.
-- A custom system prompt is still followed by Pi's `Current working directory: ...` line. Strict `AgentSessionServices.cwd` is consequently `/workspace`, while the parent-owned `SessionManager` and `AgentSessionRuntime` retain the canonical host workspace for persistence and ownership checks.
+- A custom system prompt includes Pi's `<cwd>\n/workspace\n</cwd>` section. Strict `AgentSessionServices.cwd` is consequently `/workspace`, while the parent-owned `SessionManager` and `AgentSessionRuntime` retain the canonical host workspace for persistence and ownership checks. Read the effective prompt through `session.systemPrompt`, not `session.agent.state.systemPrompt`: Pi now carries prompt/tool state in transcript system messages.
 - `SettingsManager.inMemory()` performs no settings file I/O. ChatWCA snapshots only safe administrator global model/thinking/retry/compaction/transport fields and omits project, package, resource, tool, shell, proxy, and session-path fields.
 - `createBashToolDefinition(..., { exposeSessionEnvironment: false })` omits the `PI_*` prompt guideline. ChatWCA's app-owned bash executor also bypasses Pi shell operations entirely, so no Pi session environment reaches the worker.
 - `ModelRuntime.create()` accepts explicit `authPath`, `modelsPath`, and `modelsStorePath`. The unrestricted and strict instances use the same administrator-owned files but are distinct objects; only the unrestricted instance is ever supplied to extension-capable services.
@@ -143,7 +143,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({
 
 After replacement preflight succeeds, the operation aborts and disposes the old session before constructing its replacement. Consequently, a construction failure after teardown does **not** leave the old session usable (validation errors and extension cancellation can still occur before teardown). ChatWCA's adapter must unsubscribe before replacement, refresh all registry indexes after success, and move the record to a stable error/closed state after a post-teardown failure. `runtime.setRebindSession()` exists, but registry-owned subscription and metadata replacement will remain centralized in the ChatWCA adapter.
 
-`runtime.dispose()` emits extension shutdown and disposes the session, but does not itself abort an active run. Graceful shutdown must call `session.abort()` first and then await `runtime.dispose()`.
+`runtime.dispose()` emits extension shutdown and disposes the session. `session.dispose()` now initiates an abort, but does not wait for idle. Graceful shutdown still awaits `session.abort()` first and then `runtime.dispose()`.
 
 ## SessionManager
 
@@ -174,8 +174,8 @@ through `session-scope.ts`.
 `tests/integration/search-session-source.test.ts` validates the exact default/local
 store convention, saved-branch reopen parity, compaction retention, multiple roots,
 transient live cursors, SDK forks, source bytes/mtime, and large image-bearing records.
-A user-only fork has a prospective path but remains undiscoverable until its first
-assistant response, just like a new session. Search never uses writable
+A user-only fork is persisted and discoverable immediately. An empty fork still
+has only a prospective path until a user or assistant message is appended. Search never uses writable
 `SessionManager.open()`: the SDK's last persisted tree entry determines the saved leaf.
 Its internal default-directory helper creates missing stores and is not publicly
 exported, so search derives the pinned convention without touching the filesystem.
@@ -185,16 +185,22 @@ cached PostgreSQL text; they never read live JSONL or use writable SDK session A
 
 ## Persistence and durability
 
-Pi persistence is synchronous and append-only once a session file exists, but a new persistent session intentionally delays file creation:
+Pi persistence is synchronous and append-only once a session file exists. A new persistent session delays file creation only until its first user or assistant message:
 
 1. `SessionManager.create(cwd, sessionDir?)` allocates an ID and prospective file path without creating the file. ChatWCA supplies `<workspace>/.chatwca/sessions` for a workspace whose immutable storage policy selects local sessions.
-2. User entries are appended on `message_end`, but a user-only session remains memory-only.
-3. On the first assistant `message_end` (including terminal error/abort responses), Pi writes the header and accumulated entries synchronously.
+2. Setup-only entries (model, thinking level, system prompt/tool declarations) remain memory-only.
+3. On the first user or assistant message append, Pi writes the header and accumulated entries synchronously. The user `message_end` listener runs before this append; ChatWCA reconciles durability in its deferred event callback, after persistence.
 4. Later entries are appended synchronously.
 
-Therefore empty and user-only conversations are not returned by listing APIs and do not survive process exit. ChatWCA must not claim that a newly created session is durable until the first assistant message has ended. This is accepted SDK behavior; no application JSONL writer will be added.
+User-only conversations and forks are durable, discoverable, and survive process exit without an assistant reply. Empty conversations do not. ChatWCA marks both user and assistant completions durable; no application JSONL writer is used.
 
 Opening uses the CWD from the session header unless `cwdOverride` is passed. Runtime creation rejects a missing stored CWD. ChatWCA does not pass a CWD override: it verifies that each scoped listing result's canonical header CWD equals the selected workspace path before the session may be opened.
+
+## Transcript system messages and provider inputs
+
+Pi 1.2.0 persists prompt sections and tool declarations as `role: "system"` message entries, including later section/tool patches. The browser serializer and conversation-search source reader deliberately omit these messages from visible dialogue; entry IDs and complete native JSONL remain authoritative. SDK listing `messageCount` includes system entries, so it need not equal the browser timeline length. Existing sessions without system entries remain readable.
+
+Provider streams, including the faux provider, receive normalized `TranscriptContext` values. Read the current prompt/tools with `getCurrentSystemPrompt(context.messages)` and `getCurrentTools(context.messages)` from `@earendil-works/pi-ai`; do not read `context.systemPrompt` or `context.tools`, and do not assume `context.messages[0]` is a user message. The reranking adapter can still pass the SDK-compatible `systemPrompt` input to `completeSimple()`; normalization happens before provider IO.
 
 ## Events, prompting, and abort
 
@@ -249,7 +255,7 @@ To preserve a live source conversation, ChatWCA must follow the design and invok
 
 ## Test model support
 
-`@earendil-works/pi-ai` 0.84.3 exports a deterministic faux provider (`fauxProvider`, `fauxAssistantMessage`, `fauxText`, `fauxThinking`, and `fauxToolCall`). It supports scripted responses, configurable streaming rate, text/image model declarations, and no paid provider.
+`@earendil-works/pi-ai` 1.2.0 exports a deterministic faux provider (`fauxProvider`, `fauxAssistantMessage`, `fauxText`, `fauxThinking`, and `fauxToolCall`). It supports scripted responses, configurable streaming rate, text/image model declarations, and no paid provider.
 
 The disposable smoke test runs with:
 
@@ -257,4 +263,4 @@ The disposable smoke test runs with:
 npm run test:sdk-smoke
 ```
 
-It uses in-memory credentials/settings and temporary agent, workspace, model-store, and session directories. The test confirms that an empty/user-only session file is absent, the first completed assistant message flushes all accumulated entries, listing then discovers the session, and session/message entry IDs survive runtime disposal and reopening. It does not require provider credentials or network access.
+It uses in-memory credentials/settings and temporary agent, workspace, model-store, and session directories. The tests confirm that an empty session file is absent, a user-only session is immediately durable/listed, and the full transcript entry IDs (including system messages) survive runtime disposal and reopening. They do not require provider credentials or network access.

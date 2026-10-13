@@ -2,7 +2,7 @@
 
 **Status:** Implemented
 
-**Runtime:** Node.js 22.19+, TypeScript, Pi SDK 0.84.3
+**Runtime:** Node.js 22.19+, TypeScript, Pi SDK 1.2.0
 
 **Audience:** Implementers and maintainers
 

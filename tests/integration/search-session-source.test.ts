@@ -41,12 +41,12 @@ async function snapshot(f: Awaited<ReturnType<typeof isolated>>) {
   return readSessionSnapshot(f.workspace, discovery.candidates[0]!);
 }
 
-describe("Pi 0.84.3 search source contracts", () => {
+describe("Pi 1.2.0 search source contracts", () => {
   it.each(["pi-default", "workspace"] as const)("matches the scoped SDK store/list fixtures (%s), never global listing or runtime creation", async (storage) => {
     const f = await isolated(storage);
     expect(scopedSessionStorePath(f.workspace, f.agentDirectory)).toBe(f.manager.getSessionDir());
     f.manager.appendMessage(f.userMessage("Saved prompt"));
-    expect((await discoverSessionFiles(f.workspace, f.agentDirectory)).candidates).toHaveLength(0);
+    expect((await discoverSessionFiles(f.workspace, f.agentDirectory)).candidates).toHaveLength(1);
     f.manager.appendMessage(f.assistantMessage("Saved reply"));
     const listing = await SessionManager.list(f.workspace.path, f.workspace.sessionDirectory ?? undefined);
     const global = vi.spyOn(SessionManager, "listAll").mockRejectedValue(new Error("must never scan global history"));
@@ -58,6 +58,29 @@ describe("Pi 0.84.3 search source contracts", () => {
     expect(result.session.modifiedAt).toBe(listing[0]?.modified.getTime());
     expect(result.session.messages.map(({ text }) => text)).toEqual(["Saved prompt", "Saved reply"]);
     expect(global).not.toHaveBeenCalled();
+  });
+
+  it("omits SDK transcript system messages and tool patches from cached and browser dialogue", async () => {
+    const f = await isolated();
+    f.manager.appendMessage({
+      role: "system", content: "Private initial instruction",
+      sections: { cwd: "/workspace" },
+      toolsAdded: [{ name: "private_tool", description: "Private tool declaration", parameters: { type: "object" } }],
+      timestamp: Date.now(),
+    });
+    expect((await discoverSessionFiles(f.workspace, f.agentDirectory)).candidates).toHaveLength(0);
+    f.manager.appendMessage(f.userMessage("Visible prompt"));
+    f.manager.appendMessage({
+      role: "system", content: "Private later instruction",
+      sections: { cwd: null }, toolsRemoved: [{ name: "private_tool" }], timestamp: Date.now(),
+    });
+    f.manager.appendMessage(f.assistantMessage("Visible reply"));
+    const result = await snapshot(f);
+    expect(result.session.messages.map(({ text }) => text)).toEqual(["Visible prompt", "Visible reply"]);
+    expect(serializeActiveBranch(f.manager).map(({ role }) => role)).toEqual(["user", "assistant"]);
+    expect(JSON.stringify(result.session.messages)).not.toMatch(/Private|private_tool/u);
+    const reopened = SessionManager.open(f.manager.getSessionFile()!);
+    expect(reopened.getBranch().map(({ id }) => id)).toEqual(f.manager.getBranch().map(({ id }) => id));
   });
 
   it("matches reopened full saved branches through forks/compaction and preserves exact bytes/metadata", async () => {
@@ -113,9 +136,8 @@ describe("Pi 0.84.3 search source contracts", () => {
     const originalBytes = await readFile(originalFile);
     const originalId = f.manager.getSessionId();
     const fork = f.manager.createBranchedSession(u)!;
-    // User-only forks are prospective paths too; they become discoverable only
-    // after the SDK persists their first assistant response.
-    expect((await discoverSessionFiles(f.workspace, f.agentDirectory)).candidates).toHaveLength(1);
+    // Pi persists user-only forks immediately, without waiting for a reply.
+    expect((await discoverSessionFiles(f.workspace, f.agentDirectory)).candidates).toHaveLength(2);
     f.manager.appendMessage(f.assistantMessage("Fork reply"));
     const discovery = await discoverSessionFiles(f.workspace, f.agentDirectory);
     const forkSnapshot = await readSessionSnapshot(f.workspace, discovery.candidates.find(({ path }) => path === fork)!);

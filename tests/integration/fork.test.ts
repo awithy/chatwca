@@ -108,7 +108,7 @@ afterEach(async () => {
 function messageEntries(session: AgentSession) {
   return session.sessionManager
     .getBranch()
-    .filter((entry) => entry.type === "message");
+    .filter((entry) => entry.type === "message" && entry.message.role !== "system");
 }
 
 async function waitForIdle(record: ConversationRegistry["records"][number]) {
@@ -417,11 +417,11 @@ describe("conversation fork integration", () => {
       [source.id, fork.id].sort(),
     );
     expect(listed.find(({ id }) => id === source.id)).toMatchObject({
-      messageCount: 4,
+      messageCount: 5,
       status: "idle",
     });
     expect(listed.find(({ id }) => id === fork.id)).toMatchObject({
-      messageCount: 2,
+      messageCount: 3,
       status: "idle",
     });
   });

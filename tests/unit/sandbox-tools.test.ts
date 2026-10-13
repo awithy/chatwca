@@ -48,7 +48,7 @@ const sources = [
 ];
 
 describe("sandbox Pi tools", () => {
-  it("copies pinned 0.84.3 metadata and schemas but no host-probing renderers", () => {
+  it("copies pinned 1.2.0 metadata and schemas but no host-probing renderers", () => {
     const tools = createSandboxTools(controller());
     expect(tools.map((tool) => tool.name)).toEqual(SANDBOX_TOOL_NAMES);
     for (const [index, tool] of tools.entries()) {

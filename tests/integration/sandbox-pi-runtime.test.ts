@@ -202,8 +202,8 @@ describe.skipIf(process.env.CHATWCA_SANDBOX_CAPABLE !== "1")("profile-selected s
       expect(runtime.session.sessionManager.getCwd()).toBe(workspace);
       expect(runtime.sandboxFileReader).toBeDefined();
       expect(runtime.session.agent.state.tools.map((tool) => tool.name)).toEqual(SANDBOX_TOOL_NAMES);
-      expect(runtime.session.agent.state.systemPrompt).toContain("Current working directory: /workspace");
-      expect(runtime.session.agent.state.systemPrompt).not.toContain(workspace);
+      expect(runtime.session.systemPrompt).toContain("<cwd>\n/workspace\n</cwd>");
+      expect(runtime.session.systemPrompt).not.toContain(workspace);
       await runtime.prompt("Read the workspace file.");
       const toolResult = runtime.session.messages.find((message) => message.role === "toolResult");
       expect(toolResult).toMatchObject({
@@ -229,8 +229,8 @@ describe.skipIf(process.env.CHATWCA_SANDBOX_CAPABLE !== "1")("profile-selected s
     try {
       expect(runtime.networkPolicy).toBe("isolated");
       expect(runtime.session.getActiveToolNames()).toContain("network_brain_search");
-      expect(runtime.session.agent.state.systemPrompt).toContain("network_brain_search");
-      expect(runtime.session.agent.state.systemPrompt).toContain("workspace networking is isolated");
+      expect(runtime.session.systemPrompt).toContain("network_brain_search");
+      expect(runtime.session.systemPrompt).toContain("workspace networking is isolated");
       await runtime.prompt("Search the local network documentation.");
       expect(fetch).toHaveBeenCalledOnce();
       expect(runtime.session.messages).toContainEqual(expect.objectContaining({
@@ -389,7 +389,7 @@ describe.skipIf(process.env.CHATWCA_SANDBOX_CAPABLE !== "1")("profile-selected s
       expect(runtime.networkPolicy).toBe("managed-egress");
       expect(runtime.networkPolicySetId).toBe("default");
       expect(runtime.networkPolicySet).toBe(serverConfig.managedNetwork.policySets.get("default"));
-      expect(runtime.session.agent.state.systemPrompt).toContain("destination-filtered proxy");
+      expect(runtime.session.systemPrompt).toContain("destination-filtered proxy");
       expect(proxies).toHaveLength(2);
       expect(proxies[0]!.httpSocketPath).not.toBe(proxies[1]!.httpSocketPath);
       expect(proxies[0]!.socksSocketPath).not.toBe(proxies[1]!.socksSocketPath);

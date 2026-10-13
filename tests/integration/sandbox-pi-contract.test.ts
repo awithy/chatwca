@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
+import { getCurrentSystemPrompt, getCurrentTools, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import {
   ModelRuntime,
@@ -99,8 +99,8 @@ describe("strict Pi sandbox contract", () => {
       expect(loader.getPrompts().prompts).toEqual([]);
       expect(loader.getSkills().skills).toEqual([]);
 
-      const prompt = session.agent.state.systemPrompt;
-      expect(prompt).toContain("Current working directory: /workspace");
+      const prompt = session.systemPrompt;
+      expect(prompt).toContain("<cwd>\n/workspace\n</cwd>");
       expect(prompt).toContain("network-isolated workspace sandbox");
       expect(prompt).toContain("/workspace/.chatwca is ephemeral");
       expect(prompt).toContain("Package downloads");
@@ -117,6 +117,12 @@ describe("strict Pi sandbox contract", () => {
 
       await session.prompt("Exercise every approved tool, then reply.");
       expect(session.messages.at(-1)).toMatchObject({ role: "assistant" });
+      // The transcript now owns the prompt and tool loadout sent to providers.
+      expect(getCurrentSystemPrompt(session.messages)).toBe(session.systemPrompt);
+      expect(getCurrentTools(session.messages).map((tool) => tool.name)).toEqual(SANDBOX_TOOL_NAMES);
+      for (const privatePath of [workspace, agentDir, dataDir, sessionFile]) {
+        expect(getCurrentSystemPrompt(session.messages)).not.toContain(privatePath);
+      }
       for (const operation of ["readFile", "writeFile", "editFile", "listDirectory", "grep", "find", "exec"] as const) {
         expect(controller[operation]).toHaveBeenCalled();
       }

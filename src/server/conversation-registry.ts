@@ -1799,7 +1799,9 @@ export class ConversationRegistry {
         ? (message as { readonly role?: unknown })
         : undefined;
     const title = titleOf(record.session);
-    const becameDurable = source?.role === "assistant" && !record.durable;
+    // Pi persists the first user message as well as terminal assistant replies.
+    const becameDurable =
+      (source?.role === "user" || source?.role === "assistant") && !record.durable;
     if (title === record.title && !becameDurable) return;
 
     record.title = title;

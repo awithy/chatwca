@@ -158,7 +158,7 @@ describe("PiRuntimeFactory", () => {
       expect(
         reopened.session.sessionManager
           .getBranch()
-          .filter((entry) => entry.type === "message"),
+          .filter((entry) => entry.type === "message" && entry.message.role !== "system"),
       ).toHaveLength(2);
     } finally {
       await runtime?.dispose();
@@ -350,8 +350,8 @@ describe("PiRuntimeFactory", () => {
       runtimeFactory: factory,
       imageLimits: {
         maxImages: 1,
-        maxImageBytes: 32,
-        maxTotalImageBytes: 32,
+        maxImageBytes: 128,
+        maxTotalImageBytes: 128,
       },
     });
     let reopened: PiConversationRuntime | undefined;
@@ -359,9 +359,8 @@ describe("PiRuntimeFactory", () => {
     try {
       const record = await registry.create(policy(cwd));
       const identity = record.runtime.identity;
-      const data = Buffer.from([
-        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-      ]).toString("base64");
+      // A complete 1x1 RGBA PNG: Pi now decodes images before persisting them.
+      const data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
       await registry.prompt(record.id, "Describe this image", [
         { mimeType: "image/png", encoding: "base64", data },
       ]);
@@ -416,7 +415,7 @@ describe("PiRuntimeFactory", () => {
         expect(
           source.session.sessionManager
             .getBranch()
-            .filter((entry) => entry.type === "message"),
+            .filter((entry) => entry.type === "message" && entry.message.role !== "system"),
         ).toHaveLength(4);
       });
 

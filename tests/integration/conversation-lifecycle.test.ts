@@ -279,7 +279,8 @@ describe("complete conversation lifecycle integration", () => {
         title: "Persistent custom title",
         status: "closed",
         runnable: true,
-        messageCount: 2,
+        // SDK listing counts persisted system/tool declarations too.
+        messageCount: 3,
       }),
     );
 
@@ -461,7 +462,13 @@ describe("complete conversation lifecycle integration", () => {
     const second = await registry.create(historyWorkspace(secondCwd));
 
     await registry.prompt(first.id, "Run in the background", []);
-    await vi.waitFor(() => expect(first.status).toBe("streaming"));
+    await vi.waitFor(() => {
+      expect(first.status).toBe("streaming");
+      // No assistant response yet: the user message already made the session durable.
+      // Inspect the event-updated record before getState() can reconcile disk state.
+      expect(first.durable).toBe(true);
+      expect(existsSync(first.sessionFile)).toBe(true);
+    });
     await registry.prompt(second.id, "Run in the foreground", []);
     await vi.waitFor(() => expect(second.status).toBe("streaming"));
 
@@ -487,7 +494,7 @@ describe("complete conversation lifecycle integration", () => {
     expect(
       first.session.sessionManager
         .getBranch()
-        .filter((entry) => entry.type === "message"),
+        .filter((entry) => entry.type === "message" && entry.message.role !== "system"),
     ).toHaveLength(1);
 
     releaseFirst?.();
@@ -589,7 +596,7 @@ describe("complete conversation lifecycle integration", () => {
       expect(
         record.session.sessionManager
           .getBranch()
-          .filter((entry) => entry.type === "message"),
+          .filter((entry) => entry.type === "message" && entry.message.role !== "system"),
       ).toHaveLength(1);
     });
     await registry.abort(record.id);

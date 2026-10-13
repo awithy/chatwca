@@ -52,7 +52,7 @@ describe("synthetic Pi reranking HTTP composition", () => {
   it.each(["openai", "openai-codex"] as const)("defaults on with %s, advertises safe capability and honors explicit opt-out", async (provider) => {
     const f = await fixture(provider);
     f.faux.setResponses([(context) => {
-      expect(JSON.parse(context.messages[0]!.content as string)).toEqual({ query: "evidence", candidates: [
+      expect(JSON.parse(context.messages.find((message) => message.role === "user")!.content as string)).toEqual({ query: "evidence", candidates: [
         { id: "c0", role: "user", text: "Synthetic alpha" }, { id: "c1", role: "assistant", text: "Synthetic beta" },
       ] });
       return fauxAssistantMessage('["c1","c0"]');

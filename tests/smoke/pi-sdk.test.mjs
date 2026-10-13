@@ -22,7 +22,7 @@ import {
 function messageEntries(sessionManager) {
   return sessionManager
     .getBranch()
-    .filter((entry) => entry.type === "message");
+    .filter((entry) => entry.type === "message" && entry.message.role !== "system");
 }
 
 function textOf(message) {
@@ -32,6 +32,23 @@ function textOf(message) {
     .map((part) => part.text)
     .join("");
 }
+
+test("a user-only Pi session is durable and discoverable before any assistant reply", async () => {
+  const root = await mkdtemp(join(tmpdir(), "chatwca-pi-user-only-"));
+  try {
+    const manager = SessionManager.create(root, join(root, "sessions"));
+    const file = manager.getSessionFile();
+    assert.equal(existsSync(file), false);
+    const id = manager.appendMessage({ role: "user", content: "Keep this unanswered prompt", timestamp: Date.now() });
+    assert.equal(existsSync(file), true);
+    const listed = await SessionManager.list(root, manager.getSessionDir());
+    assert.equal(listed.length, 1);
+    const reopened = SessionManager.open(file);
+    assert.deepEqual(messageEntries(reopened).map((entry) => entry.id), [id]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("a persistent Pi session streams, becomes durable, and reopens", async () => {
   const root = await mkdtemp(join(tmpdir(), "chatwca-pi-sdk-"));
@@ -116,13 +133,14 @@ test("a persistent Pi session streams, becomes durable, and reopens", async () =
     assert.ok(eventTypes.includes("message_update"));
     assert.ok(eventTypes.includes("agent_end"));
     assert.deepEqual(messageEndObservations, [
+      { role: "system", fileExists: false },
       { role: "user", fileExists: false },
-      { role: "assistant", fileExists: false },
+      { role: "assistant", fileExists: true },
     ]);
     assert.equal(
       existsSync(sessionFile),
       true,
-      "the first assistant message flushes the header and accumulated entries",
+      "the first user message flushes the header and accumulated setup entries",
     );
 
     const entriesBeforeDispose = messageEntries(runtime.session.sessionManager);
@@ -139,7 +157,10 @@ test("a persistent Pi session streams, becomes durable, and reopens", async () =
     assert.equal(listed[0].id, runtime.session.sessionId);
 
     const originalSessionId = runtime.session.sessionId;
-    const originalEntryIds = entriesBeforeDispose.map((entry) => entry.id);
+    // Keep the full transcript (including prompt/tool declarations) authoritative.
+    const originalEntryIds = runtime.session.sessionManager.getBranch().map((entry) => entry.id);
+    assert.equal(runtime.session.sessionManager.getBranch().filter((entry) =>
+      entry.type === "message" && entry.message.role === "system").length, 1);
     await runtime.dispose();
     runtime = undefined;
 
@@ -152,7 +173,7 @@ test("a persistent Pi session streams, becomes durable, and reopens", async () =
     const reopenedEntries = messageEntries(reopenedRuntime.session.sessionManager);
     assert.equal(reopenedRuntime.session.sessionId, originalSessionId);
     assert.deepEqual(
-      reopenedEntries.map((entry) => entry.id),
+      reopenedRuntime.session.sessionManager.getBranch().map((entry) => entry.id),
       originalEntryIds,
       "entry IDs survive disposal and reopening",
     );

@@ -42,7 +42,7 @@ export interface ServerConfig {
   readonly shutdownGraceMs: number;
   /** Pi consumes this environment setting directly; it must never be sent to the browser. */
   readonly piCodingAgentDir: string | undefined;
-  /** Pi 0.84.3 enables offline mode when PI_OFFLINE is present, regardless of its value. */
+  /** Pi 1.2.0 enables offline mode when PI_OFFLINE is present, regardless of its value. */
   readonly piOffline: boolean;
   /** Complete server-only sandbox policy and runtime configuration. */
   readonly sandbox: Readonly<SandboxConfig>;

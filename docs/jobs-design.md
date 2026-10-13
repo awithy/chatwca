@@ -108,7 +108,7 @@ The generated conversation receives a title derived from the job name and schedu
 [Job] Daily international news — 2026-03-23 07:00 EDT
 ```
 
-The Pi session ID is stored on the job-run row as soon as the runtime exists. If the prompt reaches a terminal assistant response, Pi's normal persistence behavior makes the JSONL session durable. Pre-hook failures have no conversation ID.
+The Pi session ID is stored on the job-run row as soon as the runtime exists. Once Pi persists the first user message, the JSONL session is durable even if no assistant reply completes. Pre-hook failures have no conversation ID.
 
 ### 5.2 Workspace policy
 

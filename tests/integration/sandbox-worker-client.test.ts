@@ -74,7 +74,7 @@ describe.skipIf(process.env.CHATWCA_SANDBOX_CAPABLE !== "1")("real sandbox worke
     expect(grep.text.split("\n").sort()).toEqual([".hidden.ts:1: TWO hidden", "other.ts:2: TWO here"]);
     expect(grep).toMatchObject({ matches: 2, truncated: false });
     // Pi's positive rg glob can re-include ignored files; remove that regression
-    // fixture before comparing the remaining 0.84.3 text/details contract.
+    // fixture before comparing the remaining 1.2.0 text/details contract.
     await rm(path.join(workspace, "nested", "ignored.ts"));
     const piGrep = await createGrepToolDefinition(workspace).execute(
       "grep", { pattern: "TWO", path: "nested", glob: "*.ts", literal: true, limit: 100 },

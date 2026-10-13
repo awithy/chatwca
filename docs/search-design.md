@@ -131,7 +131,7 @@ Index the durable saved branch, including retained pre-compaction dialogue:
 - Exclude thinking, images, tool calls/results, Bash, system/custom roles and summaries.
 - Preserve entry ID, role, time, source text and source spans.
 - Normalize line endings only. Context edits do not redact historical dialogue.
-- Unsaved streaming content and prospective user-only forks are not searchable yet.
+- Unsaved assistant streaming content and empty forks are not searchable yet. User messages and user-only forks are persisted immediately by Pi 1.2.0 and can be indexed before an assistant reply.
 
 Keep current message chunks: at most 3,200 code points / 12 KiB UTF-8, up to 400
 code points overlap, no cross-entry merging. Role prefix plus text is the embedding

@@ -1,6 +1,6 @@
 import type { AddressInfo } from "node:net";
 import { expect, test, type Page } from "@playwright/test";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
+import { getCurrentTools, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "../../src/server/config.js";
@@ -98,8 +98,8 @@ for (const provider of ["openai", "openai-codex"] as const) {
   test(`real API/${provider} applies reranking, opts out, filters scope and opens the exact message`, async ({ page }) => {
     const f = await fixture(page, provider);
     f.faux.setResponses([(context) => {
-      expect(context.tools).toBeUndefined();
-      expect(JSON.parse(context.messages[0]!.content as string)).toEqual({ query: "synthetic evidence", candidates: [
+      expect(getCurrentTools(context.messages)).toEqual([]);
+      expect(JSON.parse(context.messages.find((message) => message.role === "user")!.content as string)).toEqual({ query: "synthetic evidence", candidates: [
         { id: "c0", role: "user", text: "Synthetic alpha <script>plain text</script>" }, { id: "c1", role: "user", text: "Synthetic beta" },
       ] });
       return fauxAssistantMessage('["c1","c0"]');

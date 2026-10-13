@@ -1,4 +1,4 @@
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
+import { getCurrentTools, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
@@ -25,9 +25,9 @@ describe("reranking through pinned Pi ModelRuntime", () => {
     const f = await fixture(provider);
     f.faux.setResponses([(context, options, _state, model) => {
       expect(model.provider).toBe(provider);
-      expect(context.tools).toBeUndefined();
+      expect(getCurrentTools(context.messages)).toEqual([]);
       expect(options).toMatchObject({ maxRetries: 0, transport: "sse", signal: expect.any(AbortSignal) });
-      expect(JSON.parse(context.messages[0]!.content as string).candidates.map((c: { id: string }) => c.id)).toEqual(["c0", "c1"]);
+      expect(JSON.parse(context.messages.find((message) => message.role === "user")!.content as string).candidates.map((c: { id: string }) => c.id)).toEqual(["c0", "c1"]);
       return fauxAssistantMessage('["c1","c0"]');
     }]);
     try {

@@ -488,9 +488,9 @@ Sandboxed sessions pass an explicit allowlist and `customTools` set to `createAg
 read, write, edit, bash, ls, grep, find
 ```
 
-Each coding definition preserves Pi's current name, schema, descriptions, output truncation, tool result details, and edit patch shape, but its `execute` method calls the worker protocol. Tool definition behavior is pinned and tested against Pi 0.84.3.
+Each coding definition preserves Pi's current name, schema, descriptions, output truncation, tool result details, and edit patch shape, but its `execute` method calls the worker protocol. Tool definition behavior is pinned and tested against Pi 1.2.0.
 
-The implementation will not rely only on the SDK's low-level operation interfaces. In 0.84.3, some built-in implementations still perform host-side path probes, spawn `rg`/`fd` in the parent, omit `AbortSignal` from filesystem operation interfaces, or save full bash output in the parent's temp directory. Overriding whole `execute` functions avoids those gaps.
+The implementation will not rely only on the SDK's low-level operation interfaces. In 1.2.0, some built-in implementations still perform host-side path probes, spawn `rg`/`fd` in the parent, omit `AbortSignal` from filesystem operation interfaces, or save full bash output in the parent's temp directory. Overriding whole `execute` functions avoids those gaps.
 
 An SDK upgrade requires rerunning contract tests for tool schemas, result details, truncation, image handling, and edit semantics before the pinned version changes.
 
@@ -663,7 +663,7 @@ The worker artifact uses Node built-ins only so it needs no `node_modules` mount
 - fixed environment construction and credential omission;
 - IPC framing, chunk sequencing, hashes, limits, malformed input, and backpressure;
 - worker request correlation and fatal unsolicited-message behavior;
-- tool schemas and result shapes against Pi 0.84.3;
+- tool schemas and result shapes against Pi 1.2.0;
 - exact edit behavior, mutation alias serialization, and output truncation; and
 - fork/open APIs always receiving explicit workspace policy.
 

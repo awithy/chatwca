@@ -188,7 +188,7 @@ function bashOutput(
 }
 
 /**
- * Build the complete sandbox tool set. Pi factories provide pinned 0.84.3
+ * Build the complete sandbox tool set. Pi factories provide pinned 1.2.0
  * metadata and schemas only; every execute function below is application-owned.
  */
 export function createSandboxTools(controller: SandboxToolController): readonly ToolDefinition[] {

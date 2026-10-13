@@ -2,7 +2,7 @@
 
 **Status:** Implemented and locally validated (steps 1–8), including release gates, disposable PG17/pgvector checks and real Bubblewrap pair acceptance with synthetic cache/faux providers. Deployed on this workstation following explicit approval on 2026-10-03; health, search readiness, sandbox startup probes, schema-v9 migration and served UI verified. Workspace selection remains default-off. See [`checkpoint.md`](../checkpoint.md) for deployment details.
 
-**Runtime:** Node.js 22.19+, TypeScript, Pi SDK 0.84.3
+**Runtime:** Node.js 22.19+, TypeScript, Pi SDK 1.2.0
 
 **Deployment:** One trusted user, one ChatWCA server process
 

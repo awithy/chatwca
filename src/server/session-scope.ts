@@ -33,7 +33,7 @@ export async function storedCwdOwnsWorkspace(storedCwd: string, workspace: Sessi
 }
 
 /**
- * Pi 0.84.3 getDefaultSessionDirPath convention, pinned by an SDK contract test.
+ * Pi 1.2.0 getDefaultSessionDirPath convention, pinned by an SDK contract test.
  * Its getDefaultSessionDir helper is not a read API: it mkdirs missing stores and
  * is not a package export. Keep this pure; never create a directory for search.
  */

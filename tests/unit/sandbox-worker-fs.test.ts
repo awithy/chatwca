@@ -104,7 +104,7 @@ describe("bounded sandbox worker file operations", () => {
 });
 
 describe("Pi-compatible sandbox edits", () => {
-  it("matches Pi 0.84.3 diff, patch, first line, BOM, CRLF, fuzzy matching, and permissions", async () => {
+  it("matches Pi 1.2.0 diff, patch, first line, BOM, CRLF, fuzzy matching, and permissions", async () => {
     const directory = await temporaryDirectory();
     const target = path.join(directory, "fixture.txt");
     const original = "\ufeffone  \r\ntwo\r\nthree\r\n";

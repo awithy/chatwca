@@ -37,7 +37,7 @@ CHATWCA_HOST=127.0.0.1 npm start
 
 Open **http://127.0.0.1:8787**. `npm start` uses the existing production build; it does not build first.
 
-`npm ci` installs the pinned Pi SDK (**0.84.3**) and its local CLI. A global Pi installation is not required. Configure providers, credentials, and defaults through Pi; ChatWCA has no browser model or credential settings.
+`npm ci` installs the pinned Pi SDK (**1.2.0**) and its local CLI. A global Pi installation is not required. Configure providers, credentials, and defaults through Pi; ChatWCA has no browser model or credential settings.
 
 ### Model selection
 
@@ -156,7 +156,7 @@ Sessions use Pi's default store or `<workspace>/.chatwca/sessions`. They remain 
 npx pi --session-dir .chatwca/sessions -r
 ```
 
-A new conversation becomes durable after its first assistant message finishes, including a terminal error or abort response. Empty and user-only conversations do not survive a server restart.
+A new conversation becomes durable when Pi persists its first user message, before the assistant responds. User-only conversations survive a server restart; empty conversations and setup-only entries do not.
 
 For a consistent file-copy backup, stop ChatWCA and copy:
 

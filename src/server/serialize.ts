@@ -416,7 +416,8 @@ function serializeEntry(
     };
   }
 
-  // Pi extension/custom, bash, and summary roles have no v1 normalized message
+  // Pi system prompt/tool declarations, extension/custom, bash, and summary
+  // roles have no v1 normalized message
   // representation. Their entries remain canonical in Pi's session store.
   return undefined;
 }

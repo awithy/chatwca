@@ -242,7 +242,12 @@ describe("PiRuntimeFactory", () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
-  it("adds the parent-owned web_search tool when Brave is configured", async () => {
+  it.each([
+    { queries: ["current topic"] },
+    { queries: ["current topic"], count: null },
+    { queries: ["current topic"], count: 3 },
+    { queries: ["current topic", "related topic"], count: 3 },
+  ])("adds the parent-owned web_search tool and validates provider arguments (%j)", async (arguments_) => {
     const fetch = vi.fn(async () => Response.json({
       web: {
         results: [{
@@ -261,15 +266,21 @@ describe("PiRuntimeFactory", () => {
       },
     });
     faux.setResponses([
-      fauxAssistantMessage(fauxToolCall("web_search", { query: "current topic" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("web_search", arguments_), { stopReason: "toolUse" }),
       fauxAssistantMessage("Search complete"),
     ]);
     const runtime = await factory.createPersistent(policy(cwd));
 
     try {
       expect(runtime.session.getActiveToolNames()).toContain("web_search");
+      const searchTool = runtime.session.agent.state.tools.find((tool) => tool.name === "web_search");
+      expect(searchTool).toMatchObject({
+        constrainedSampling: { type: "json_schema", strict: "prefer" },
+        parameters: { required: ["queries"] },
+      });
+      expect(searchTool?.parameters).not.toHaveProperty("properties.query");
       await runtime.prompt("Search for the current topic.");
-      expect(fetch).toHaveBeenCalledOnce();
+      expect(fetch).toHaveBeenCalledTimes(arguments_.queries.length);
       expect(runtime.session.messages).toContainEqual(expect.objectContaining({
         role: "toolResult",
         toolName: "web_search",

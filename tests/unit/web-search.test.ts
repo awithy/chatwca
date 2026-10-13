@@ -1,7 +1,11 @@
+import { validateToolArguments } from "@earendil-works/pi-ai";
+import { convertResponsesTools } from "@earendil-works/pi-ai/api/openai-responses-shared";
 import { describe, expect, it, vi } from "vitest";
 
 import {
   WEB_SEARCH_TOOL_NAME,
+  MAX_WEB_SEARCH_QUERIES,
+  MAX_WEB_SEARCH_QUERY_LENGTH,
   createWebSearchTool,
   loadWebSearchConfig,
 } from "../../src/server/web-search.js";
@@ -60,7 +64,93 @@ describe("Brave web_search tool", () => {
     expect(result.details).toEqual({ queryCount: 2 });
   });
 
-  it("rejects ambiguous input and redacts transport failures", async () => {
+  it("declares only the required queries array, with clear single-search guidance", () => {
+    const tool = createWebSearchTool({ apiKey: "server-secret", timeoutMs: 1_000 });
+    expect(Object.keys(tool.parameters.properties)).toEqual(["queries", "count"]);
+    expect(tool.parameters.required).toEqual(["queries"]);
+    expect(tool.description).toContain('{"queries":["OpenAI official website"],"count":3}');
+    expect(tool.promptGuidelines?.join(" ")).toContain("one-item array");
+    expect(tool.parameters.properties.queries.description).toContain("Never include dummy or placeholder strings");
+  });
+
+  it("sends a required queries array and nullable count through the Codex tool converter", () => {
+    const tool = createWebSearchTool({ apiKey: "server-secret", timeoutMs: 1_000 });
+    // Codex defaults to strict: null; the tool must opt in so Pi, rather than the
+    // remote API, converts optional properties to required nullable properties.
+    const [converted] = convertResponsesTools([tool], { strict: null });
+    expect(converted).toMatchObject({
+      type: "function",
+      strict: true,
+      parameters: {
+        additionalProperties: false,
+        required: ["queries", "count"],
+        properties: {
+          queries: { type: "array", minItems: 1, maxItems: MAX_WEB_SEARCH_QUERIES },
+          count: { anyOf: [{ type: "integer" }, { type: "null" }] },
+        },
+      },
+    });
+    expect(converted).not.toHaveProperty("parameters.properties.query");
+    // Ordinary callers can still omit count, but never queries.
+    expect(tool.parameters.required).toEqual(["queries"]);
+    expect(convertResponsesTools([tool], { strict: null, supportsStrictMode: false })[0])
+      .toMatchObject({ parameters: tool.parameters });
+  });
+
+  it.each([
+    { queries: ["OpenAI official website"], count: 3 },
+    { queries: ["OpenAI official website"], count: null },
+    { queries: ["OpenAI official website", "second query"], count: null },
+  ])("validates and executes single and batched searches (%j)", async (input) => {
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      return responseFor(url.searchParams.get("q")!);
+    });
+    const tool = createWebSearchTool({ apiKey: "server-secret", timeoutMs: 1_000, fetch });
+    const args = validateToolArguments(tool, {
+      type: "toolCall", id: "strict-search", name: tool.name, arguments: input,
+    });
+    expect(args.queries).toEqual(input.queries);
+    if (input.count === null) expect(args).not.toHaveProperty("count");
+    const result = await tool.execute("strict-search", args, undefined, undefined, {} as never);
+    expect(result.details).toEqual({ queryCount: input.queries.length });
+    expect(fetch).toHaveBeenCalledTimes(input.queries.length);
+    expect(fetch.mock.calls.map(([url]) => new URL(String(url)).searchParams.get("q")))
+      .toEqual(input.queries);
+    for (const [url] of fetch.mock.calls) {
+      expect(new URL(String(url)).searchParams.get("count")).toBe(String(input.count ?? 10));
+    }
+  });
+
+  it.each([
+    {},
+    { query: "OpenAI official website" },
+    { query: "OpenAI official website", queries: ["x"], count: 3 },
+    { query: "OpenAI official website", queries: ["OpenAI official website"], count: 3 },
+    { queries: null },
+    { queries: [] },
+    { queries: [""] },
+    { queries: ["x".repeat(MAX_WEB_SEARCH_QUERY_LENGTH + 1)] },
+    { queries: Array.from({ length: MAX_WEB_SEARCH_QUERIES + 1 }, () => "search") },
+    { queries: ["search"], count: 0 },
+    { queries: ["search"], count: 21 },
+  ])("rejects legacy, ambiguous, missing, and out-of-bounds arguments (%j)", (input) => {
+    const tool = createWebSearchTool({ apiKey: "server-secret", timeoutMs: 1_000 });
+    expect(() => validateToolArguments(tool, {
+      type: "toolCall", id: "invalid-search", name: tool.name, arguments: input,
+    })).toThrow("Validation failed");
+  });
+
+  it("rejects whitespace-only queries before network IO", async () => {
+    const fetch = vi.fn();
+    const tool = createWebSearchTool({ apiKey: "server-secret", timeoutMs: 1_000, fetch });
+    await expect(tool.execute(
+      "blank", { queries: ["  "] }, undefined, undefined, {} as never,
+    )).rejects.toThrow("Use a one-item array for a single search");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("redacts transport failures", async () => {
     const fetch = vi.fn(async () => {
       throw new Error("request included server-secret");
     });
@@ -71,15 +161,8 @@ describe("Brave web_search tool", () => {
     });
 
     await expect(tool.execute(
-      "ambiguous",
-      { query: "one", queries: ["two"] },
-      undefined,
-      undefined,
-      {} as never,
-    )).rejects.toThrow("Provide exactly one of query or queries");
-    await expect(tool.execute(
       "failed",
-      { query: "one" },
+      { queries: ["one"] },
       undefined,
       undefined,
       {} as never,
@@ -96,7 +179,7 @@ describe("Brave web_search tool", () => {
 
     await expect(tool.execute(
       "http-error",
-      { query: "one" },
+      { queries: ["one"] },
       undefined,
       undefined,
       {} as never,

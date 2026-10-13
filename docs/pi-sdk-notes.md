@@ -50,6 +50,28 @@ These notes record the concrete SDK behavior on which ChatWCA relies. They are a
   focus, fallback and cancellation reaching provider IO. Existing Global Search and
   reranking are deployed; the new agent history tools below are not.
 
+## Parent-owned Brave Search schema
+
+- `src/server/web-search.ts` exposes one required `queries` array for both single
+  and batched searches. A single search uses a one-item array, for example
+  `{"queries":["OpenAI official website"],"count":3}`. There is no `query` field;
+  the closed schema rejects legacy single-field and dual-field calls. Instructions
+  explicitly prohibit dummy placeholders.
+- The former mutually exclusive optional `query`/`queries` design was unreliable
+  with provider-enforced schemas: models populated both fields even after making
+  the unused field nullable. The single-array contract removes that choice rather
+  than relying on the model to follow an XOR rule not enforced by the schema.
+- The tool opts into JSON-schema constrained sampling with `strict: "prefer"`.
+  Pi's provider adapter keeps `queries` required and makes the optional `count`
+  required-but-nullable on strict-capable providers. The pinned
+  `validateToolArguments()` removes a null count before execution, preserving the
+  default of 10 results per query. Unsupported providers retain ordinary tool
+  calling with an optional count.
+- Unit tests inspect the actual Pi Responses tool conversion with Codex defaults,
+  reject legacy/ambiguous calls, and validate/execute single and batched searches.
+  Runtime integration tests exercise the same calls through a faux provider and
+  the real AgentSession, without live Brave or model requests.
+
 ## Conversation history tools
 
 - `src/server/search/tools.ts` uses the pinned `defineTool()` contract, parallel

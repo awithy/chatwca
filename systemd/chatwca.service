@@ -9,6 +9,8 @@ Type=simple
 User=adrian
 WorkingDirectory=/home/adrian/projects/chatwca
 Environment=NODE_ENV=production
+# Trust the machine's system CA certificates in addition to Node's bundled CAs.
+Environment=NODE_USE_SYSTEM_CA=1
 EnvironmentFile=-/home/adrian/projects/chatwca/.env
 ExecStart=/usr/bin/node /home/adrian/projects/chatwca/dist/server/server/index.js
 Restart=on-failure
